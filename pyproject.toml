@@ -1,0 +1,32 @@
+[project]
+name = "apag-ai-knowledge-base"
+version = "0.1.0"
+description = "A-PAG AI Knowledge Base Platform"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "python-dotenv>=1.0.1",
+    "python-multipart>=0.0.9",
+    "pypdf>=4.1.0",
+    "minio>=7.2.5",
+    "sqlalchemy>=2.0.28",
+    "psycopg2-binary>=2.9.9",
+    "alembic>=1.13.0",
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+    "ruff>=0.3.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.pyright]
+include = ["src", "tests", "main.py"]
+extraPaths = ["."]
+
+[tool.ruff.lint]
+ignore = ["B008", "BLE001"]
