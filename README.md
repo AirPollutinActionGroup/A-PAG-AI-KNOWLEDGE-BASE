@@ -127,9 +127,6 @@ The platform enforces a sovereign, quarantine-first security posture designed to
 git clone https://github.com/AirPollutinActionGroup/A-PAG-AI-KNOWLEDGE-BASE.git
 cd A-PAG-AI-KNOWLEDGE-BASE
 
-# Switch to active feature branch
-git checkout feature/ingestion-pipeline-step-1-to-3
-
 # Create virtual environment & install dependencies
 uv venv
 .venv\Scripts\activate      # On Windows (or 'source .venv/bin/activate' on Linux/macOS)
