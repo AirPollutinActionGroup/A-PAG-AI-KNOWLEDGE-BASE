@@ -23,7 +23,6 @@
 - [API Reference](#-api-reference)
 - [Testing & Quality Assurance](#-testing--quality-assurance)
 - [Current Status & Known Limitations](#-current-status--known-limitations)
-- [License](#-license)
 
 ---
 
@@ -296,7 +295,3 @@ uv run ruff check src/ tests/ main.py
 4. **Test Suite Scope**: Unit tests run against both in-memory and SQLite/Postgres fixtures; dedicated live-PostgreSQL integration test separation is scheduled for Phase D.
 
 ---
-
-## 📄 License
-
-Internal proprietary software developed for the Air Pollution Action Group (A-PAG). All rights reserved.
