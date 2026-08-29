@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A-PAG AI Knowledge Base — Ingestion Pipeline Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0b0f19;
+            --bg-card: rgba(18, 24, 38, 0.85);
+            --bg-card-hover: rgba(26, 34, 52, 0.95);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --border-highlight: rgba(79, 140, 255, 0.3);
+            --text-main: #f1f5f9;
+            --text-muted: #94a3b8;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #06b6d4;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-amber: #f59e0b;
+            --accent-purple: #8b5cf6;
+            --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--bg-primary);
+            background-image: 
+                radial-gradient(circle at 15% 15%, rgba(59, 130, 246, 0.12) 0%, transparent 40%),
+                radial-gradient(circle at 85% 85%, rgba(139, 92, 246, 0.10) 0%, transparent 40%);
+            color: var(--text-main);
+            min-height: 100vh;
+            padding: 2rem 1.5rem;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 2rem;
+        }
+
+        .logo-group {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .logo-icon {
+            width: 44px;
+            height: 44px;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: white;
+            box-shadow: 0 4px 14px rgba(59, 130, 246, 0.35);
+        }
+
+        .logo-text h1 {
+            font-size: 1.35rem;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+        }
+
+        .logo-text p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .header-badges {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.35rem 0.85rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            background: rgba(16, 185, 129, 0.12);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.25);
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: currentColor;
+            box-shadow: 0 0 8px currentColor;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.85); }
+        }
+
+        /* Grid Layout */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.75rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (max-width: 900px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Glassmorphic Cards */
+        .card {
+            background: var(--bg-card);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.5rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .card:hover {
+            border-color: var(--border-highlight);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.25rem;
+        }
+
+        .card-header h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Drop Zone */
+        .dropzone {
+            border: 2px dashed rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            padding: 2.25rem 1.5rem;
+            text-align: center;
+            background: rgba(255, 255, 255, 0.02);
+            cursor: pointer;
+            transition: all 0.25s ease;
+            position: relative;
+            margin-bottom: 1.25rem;
+        }
+
+        .dropzone:hover, .dropzone.dragover {
+            border-color: var(--accent-blue);
+            background: rgba(59, 130, 246, 0.06);
+            transform: translateY(-2px);
+        }
+
+        .dropzone input[type="file"] {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .dropzone-icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .dropzone p.primary {
+            font-weight: 500;
+            margin-bottom: 0.25rem;
+        }
+
+        .dropzone p.secondary {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .selected-file-banner {
+            display: none;
+            background: rgba(59, 130, 246, 0.15);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            padding: 0.6rem 0.85rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            color: #93c5fd;
+            margin-top: 0.75rem;
+            font-family: var(--font-mono);
+        }
+
+        /* Form Controls */
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        label {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        select, input[type="text"] {
+            background: rgba(11, 15, 25, 0.8);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 0.65rem 0.85rem;
+            border-radius: 8px;
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        select:focus, input[type="text"]:focus {
+            border-color: var(--accent-blue);
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            margin-top: 0.5rem;
+            margin-bottom: 1.25rem;
+            font-size: 0.875rem;
+            cursor: pointer;
+        }
+
+        .checkbox-group input {
+            cursor: pointer;
+            accent-color: var(--accent-blue);
+        }
+
+        .btn-primary {
+            width: 100%;
+            background: linear-gradient(135deg, var(--accent-blue), #2563eb);
+            color: white;
+            border: none;
+            padding: 0.85rem 1.5rem;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .btn-primary:hover {
+            background: linear-gradient(135deg, #4f46e5, var(--accent-blue));
+            box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5);
+            transform: translateY(-1px);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Preset Fast-Test Buttons */
+        .presets-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+
+        .btn-preset {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 0.65rem 0.75rem;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            cursor: pointer;
+            text-align: left;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .btn-preset:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-1px);
+        }
+
+        /* Inspector & Response Box */
+        .inspector-box {
+            background: #060911;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1rem;
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: #cbd5e1;
+            max-height: 380px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        /* Ingestion Step Timeline */
+        .pipeline-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .step-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.65rem 0.85rem;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 0.85rem;
+            transition: border-color 0.2s;
+        }
+
+        .step-num {
+            width: 24px;
+            height: 24px;
+            border-radius: 60%;
+            background: rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .step-item.active {
+            border-color: var(--accent-blue);
+            background: rgba(59, 130, 246, 0.08);
+        }
+
+        .step-item.active .step-num {
+            background: var(--accent-blue);
+            color: white;
+        }
+
+        .step-item.passed {
+            border-color: rgba(16, 185, 129, 0.4);
+            background: rgba(16, 185, 129, 0.06);
+        }
+
+        .step-item.passed .step-num {
+            background: var(--accent-green);
+            color: white;
+        }
+
+        .step-item.rejected {
+            border-color: rgba(239, 68, 68, 0.4);
+            background: rgba(239, 68, 68, 0.06);
+        }
+
+        .step-item.rejected .step-num {
+            background: var(--accent-red);
+            color: white;
+        }
+
+        /* Documents Ledger Table */
+        .table-container {
+            overflow-x: auto;
+            margin-top: 1rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            text-align: left;
+        }
+
+        th {
+            background: rgba(255, 255, 255, 0.04);
+            padding: 0.75rem 1rem;
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            font-size: 0.75rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        td {
+            padding: 0.85rem 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            vertical-align: middle;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .pill {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            font-family: var(--font-mono);
+        }
+
+        .pill-promoted { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+        .pill-rejected { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+        .pill-duplicate { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .pill-superseded { background: rgba(139, 92, 246, 0.15); color: #c084fc; border: 1px solid rgba(139, 92, 246, 0.3); }
+        .pill-quarantine { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+
+        .mono { font-family: var(--font-mono); font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="logo-group">
+                <div class="logo-icon">⚡</div>
+                <div class="logo-text">
+                    <h1>A-PAG AI Knowledge Base</h1>
+                    <p>Document Ingestion & Validation Studio</p>
+                </div>
+            </div>
+            <div class="header-badges">
+                <div class="status-badge" id="api-status-badge">
+                    <span class="status-dot"></span>
+                    <span id="api-status-text">API Online</span>
+                </div>
+                <a href="/docs" target="_blank" style="color: var(--text-muted); font-size: 0.85rem; text-decoration: none; border: 1px solid var(--border-color); padding: 0.35rem 0.75rem; border-radius: 8px;">
+                    Swagger Docs ↗
+                </a>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <div class="main-grid">
+            <!-- Left Card: Upload Hub -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>📤 Upload & Ingestion Hub</h2>
+                </div>
+
+                <!-- Dropzone -->
+                <div class="dropzone" id="dropzone">
+                    <input type="file" id="file-input" accept=".pdf,application/pdf">
+                    <div class="dropzone-icon">📄</div>
+                    <p class="primary">Drag & drop policy PDF here, or browse</p>
+                    <p class="secondary">Max size: 50MB • Standard PDF format</p>
+                    <div class="selected-file-banner" id="file-banner"></div>
+                </div>
+
+                <!-- Metadata Options -->
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="classification">Classification</label>
+                        <select id="classification">
+                            <option value="PUBLIC">PUBLIC</option>
+                            <option value="RESTRICTED">RESTRICTED</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="supersedes-id">Supersedes ID (Optional)</label>
+                        <input type="text" id="supersedes-id" placeholder="UUID of older doc">
+                    </div>
+                </div>
+
+                <div class="checkbox-group">
+                    <input type="checkbox" id="keep-previous" checked>
+                    <label for="keep-previous" style="cursor: pointer; text-transform: none;">Keep previous document version as SUPERSEDED</label>
+                </div>
+
+                <button class="btn-primary" id="btn-upload" onclick="handleUpload()">
+                    <span>🚀 Ingest Document (202 Accepted)</span>
+                </button>
+
+                <!-- One-Click Preset Tests -->
+                <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+                    <label style="margin-bottom: 0.5rem; display: block;">⚡ One-Click Synthetic Preset Tests</label>
+                    <div class="presets-grid">
+                        <button class="btn-preset" onclick="runPreset('valid')">🟢 Standard Digital Policy</button>
+                        <button class="btn-preset" onclick="runPreset('corrupt_header')">🔴 Corrupted Header PDF</button>
+                        <button class="btn-preset" onclick="runPreset('truncated_eof')">🔴 Missing EOF Trailer</button>
+                        <button class="btn-preset" onclick="runPreset('malicious')">🛡️ Malicious Script Exploit</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Card: Live Pipeline Inspector -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>🔍 Live Pipeline Inspector</h2>
+                    <button onclick="clearInspector()" style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 0.8rem;">Clear</button>
+                </div>
+
+                <!-- Step Visualizer -->
+                <div class="pipeline-steps">
+                    <div class="step-item" id="step-1">
+                        <div class="step-num">1</div>
+                        <div><strong>Quarantine Landing</strong>: Stream raw PDF to temporary quarantine bucket</div>
+                    </div>
+                    <div class="step-item" id="step-2">
+                        <div class="step-num">2</div>
+                        <div><strong>Fail-Fast Checks</strong>: Headers, ClamAV exploit scan, password check</div>
+                    </div>
+                    <div class="step-item" id="step-3">
+                        <div class="step-num">3</div>
+                        <div><strong>Promotion / Dedup</strong>: SHA-256 calculation, promote to raw bucket</div>
+                    </div>
+                </div>
+
+                <label style="margin-bottom: 0.4rem; display: block;">API Response Payload</label>
+                <div class="inspector-box" id="inspector-output">// Upload a PDF or click a preset test to inspect live pipeline execution...</div>
+            </div>
+        </div>
+
+        <!-- Bottom Card: Documents Ledger -->
+        <div class="card">
+            <div class="card-header">
+                <h2>📑 Ingested Documents Ledger</h2>
+                <button onclick="loadDocuments()" style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-main); padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">
+                    🔄 Refresh
+                </button>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Document ID</th>
+                            <th>Filename</th>
+                            <th>Size</th>
+                            <th>Classification</th>
+                            <th>Ver</th>
+                            <th>Status</th>
+                            <th>Checksum (SHA-256)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="docs-table-body">
+                        <tr>
+                            <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">No documents ingested yet.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedFile = null;
+
+        const fileInput = document.getElementById('file-input');
+        const dropzone = document.getElementById('dropzone');
+        const fileBanner = document.getElementById('file-banner');
+        const inspector = document.getElementById('inspector-output');
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                setFile(e.target.files[0]);
+            }
+        });
+
+        dropzone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropzone.classList.add('dragover');
+        });
+
+        dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                setFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        function setFile(file) {
+            selectedFile = file;
+            fileBanner.style.display = 'block';
+            fileBanner.innerText = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+        }
+
+        function resetSteps() {
+            document.querySelectorAll('.step-item').forEach(el => {
+                el.className = 'step-item';
+            });
+        }
+
+        function updateSteps(status) {
+            const s1 = document.getElementById('step-1');
+            const s2 = document.getElementById('step-2');
+            const s3 = document.getElementById('step-3');
+
+            s1.className = 'step-item passed';
+
+            if (status === 'AWAITING_CLASSIFICATION' || status === 'DUPLICATE') {
+                s2.className = 'step-item passed';
+                s3.className = 'step-item passed';
+            } else if (status === 'REJECTED') {
+                s2.className = 'step-item rejected';
+                s3.className = 'step-item rejected';
+            }
+        }
+
+        async function handleUpload() {
+            if (!selectedFile) {
+                alert("Please select a PDF file first.");
+                return;
+            }
+
+            const btn = document.getElementById('btn-upload');
+            btn.disabled = true;
+            resetSteps();
+            document.getElementById('step-1').className = 'step-item active';
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            formData.append('classification', document.getElementById('classification').value);
+
+            const supersedes = document.getElementById('supersedes-id').value.trim();
+            if (supersedes) formData.append('supersedes_doc_id', supersedes);
+            formData.append('keep_previous_version', document.getElementById('keep-previous').checked);
+
+            try {
+                const res = await fetch('/api/v1/documents/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await res.json();
+                inspector.innerText = JSON.stringify(data, null, 2);
+
+                if (res.ok) {
+                    updateSteps(data.status);
+                } else {
+                    document.getElementById('step-2').className = 'step-item rejected';
+                }
+
+                loadDocuments();
+            } catch (err) {
+                inspector.innerText = `Error connecting to API: ${err.message}`;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function runPreset(type) {
+            resetSteps();
+            document.getElementById('step-1').className = 'step-item active';
+
+            let blob;
+            let filename = "test.pdf";
+
+            if (type === 'valid') {
+                // Synthetic valid PDF
+                blob = new Blob(["%PDF-1.4\n1 0 obj\n<< /Title (CAQM Policy) >>\nendobj\n%%EOF"], { type: 'application/pdf' });
+                filename = "caqm_statutory_policy.pdf";
+            } else if (type === 'corrupt_header') {
+                blob = new Blob(["NOT_A_PDF_STREAM_1234567890\n%%EOF"], { type: 'application/pdf' });
+                filename = "broken_header.pdf";
+            } else if (type === 'truncated_eof') {
+                blob = new Blob(["%PDF-1.4\n1 0 obj\n<<>>\nendobj\nTRUNCATED_STREAM"], { type: 'application/pdf' });
+                filename = "truncated_eof.pdf";
+            } else if (type === 'malicious') {
+                blob = new Blob(["%PDF-1.7\n/Launch (powershell.exe -enc AAAA)\n/OpenAction /JavaScript (eval())\n%%EOF"], { type: 'application/pdf' });
+                filename = "exploit_sample.pdf";
+            }
+
+            const file = new File([blob], filename, { type: 'application/pdf' });
+            setFile(file);
+            handleUpload();
+        }
+
+        async function loadDocuments() {
+            try {
+                const res = await fetch('/api/v1/documents');
+                if (!res.ok) return;
+                const docs = await res.json();
+                const tbody = document.getElementById('docs-table-body');
+
+                if (docs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">No documents ingested yet.</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = docs.map(d => {
+                    let pillClass = 'pill-promoted';
+                    if (d.status === 'REJECTED') pillClass = 'pill-rejected';
+                    else if (d.status === 'DUPLICATE') pillClass = 'pill-duplicate';
+                    else if (d.status === 'SUPERSEDED') pillClass = 'pill-superseded';
+                    else if (d.status === 'QUARANTINED') pillClass = 'pill-quarantine';
+
+                    return `
+                        <tr>
+                            <td class="mono" title="${d.id}">${d.id.substring(0, 8)}...</td>
+                            <td><strong>${d.filename}</strong></td>
+                            <td class="mono">${(d.size / 1024).toFixed(1)} KB</td>
+                            <td><span style="font-size: 0.75rem;">${d.classification}</span></td>
+                            <td>v${d.version}</td>
+                            <td><span class="pill ${pillClass}">${d.status}</span></td>
+                            <td class="mono" title="${d.checksum || 'N/A'}">${d.checksum ? d.checksum.substring(0, 12) + '...' : '—'}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (err) {
+                console.error("Error loading documents:", err);
+            }
+        }
+
+        function clearInspector() {
+            inspector.innerText = '// Ready for new inspection...';
+            resetSteps();
+        }
+
+        // Initialize on load
+        loadDocuments();
+    </script>
+</body>
+</html>
