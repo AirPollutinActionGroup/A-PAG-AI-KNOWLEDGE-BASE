@@ -7,27 +7,44 @@
 [![Tests](https://img.shields.io/badge/Tests-19%20Passing%20(100%25)-10B981.svg?style=flat&logo=pytest&logoColor=white)](TEST_REPORT.md)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-> Sovereign, secure, and resilient document intelligence pipeline built for the **Air Pollution Action Group (A-PAG)** to ingest, validate, classify, deduplicate, and catalog environmental policy directives, state action plans, and regulatory compliance documents.
+> An enterprise-grade, sovereign **AI Knowledge Base & Policy Intelligence Platform** built for the **Air Pollution Action Group (A-PAG)** to ingest, extract, normalize, and semantically search air quality directives, NCAP clean air plans, CAQM statutory orders, CPCB standards, and state compliance reports across India.
 
 ---
 
-## 📑 Table of Contents
+## 🎯 What We Are Building: The Complete Vision
 
-- [Architectural Overview](#-architectural-overview)
-- [Pipeline Lifecycle & Flow](#-pipeline-lifecycle--flow)
-- [Project Directory Structure](#-project-directory-structure)
-- [Quick Start Guide](#-quick-start-guide)
-- [Interactive Testing Studio](#-interactive-testing-studio)
-- [Database Schema & Migrations](#-database-schema--migrations)
-- [API Reference](#-api-reference)
-- [Testing & Quality Assurance](#-testing--quality-assurance)
-- [Git Branching Workflow](#-git-branching-workflow)
+The platform is designed as an end-to-end **Policy-to-Retrieval Intelligence Engine** that transforms raw, multi-format government PDFs into structured, queryable knowledge for decision-makers:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                       A-PAG AI KNOWLEDGE BASE ARCHITECTURE                              │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+
+ [ Stage 1: Ingestion & Quarantine ] ──► [ Stage 2: Fail-Fast Validation ]
+                │                                         │
+                ▼                                         ▼
+ [ Stage 3: Dedup, Versioning & DB ] ──► [ Stage 4: Structure & Table Extraction ]
+                │                                         │
+                ▼                                         ▼
+ [ Stage 5: Normalization & Entities ] ► [ Stage 6: Hybrid Search & Grounded RAG ]
+```
+
+### 🛣️ The 6-Stage End-to-End Roadmap
+
+| Stage | Domain / Function | Key Capabilities | Status |
+|:---:|---|---|:---:|
+| **Stage 1** | **Quarantine Ingestion** | Untrusted multi-part upload landing, isolated bucket storage (`apag-quarantine/`), instant `202 Accepted` response. | ✅ **Complete** |
+| **Stage 2** | **Fail-Fast Security & Validation** | 8-point checks: MIME validation, 50MB ceiling, `%PDF-` header, `%%EOF` trailer, ClamAV exploit scanner, encryption check, bounded pages. | ✅ **Complete** |
+| **Stage 3** | **Dedup, Versioning & Storage** | SHA-256 cryptographic deduplication, document version increments (`v1 → v2`), superseding history, promotion to `apag-raw/`, and PostgreSQL ORM cataloging. | ✅ **Complete** |
+| **Stage 4** | **Structure-Preserving Extraction** | Multi-engine text parsing, layout preservation, complex table extraction (HTML/Markdown), and figure/graph parsing. | ⏳ *Next Phase* |
+| **Stage 5** | **Domain Schema Normalization** | Entity recognition (CAQM, GRAP, CPCB, DPCC, PM2.5, NOx), statutory metadata tagging, and normalized JSON schema generation. | 🔮 *Upcoming* |
+| **Stage 6** | **Hybrid Search & Grounded RAG** | Dense vector embeddings, BM25 sparse keyword search, cross-encoder reranking, and citation-backed LLM policy retrieval. | 🔮 *Upcoming* |
 
 ---
 
-## 🏛️ Architectural Overview
+## 🏛️ Ingestion Pipeline Architecture (Stages 1–3)
 
-The platform enforces a sovereign, quarantine-first security posture designed to process large volumes of multi-format government PDFs while guaranteeing data integrity and threat isolation:
+The current implementation provides the security, storage, and database foundation for the entire platform:
 
 ```
 [ PDF Upload ] ──► 1. Quarantine Landing (apag-quarantine/{uuid}.pdf)
@@ -47,7 +64,7 @@ The platform enforces a sovereign, quarantine-first security posture designed to
                                    • Log to audit_log
 ```
 
-### Core Design Principles:
+### Core Engineering Principles:
 1. **2-Bucket Isolation Model**:
    - `apag-quarantine`: Untrusted landing zone. No external service or reader accesses files here.
    - `apag-raw`: Promoted originals, indexed cryptographically by SHA-256 checksums (`apag-raw/{sha256}.pdf`).
@@ -250,9 +267,3 @@ main (Production Release)
 - **`main`**: Stable, production-ready releases.
 - **`main_ci`**: Integration branch for automated builds and testing.
 - **`feature/*`**: Isolated feature branches for development.
-
----
-
-## ⚖️ License & Sovereign Compliance
-
-Developed for the **Air Pollution Action Group (A-PAG)**. All rights reserved. Configured strictly for sovereign data residency and environmental policy intelligence.
