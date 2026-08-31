@@ -108,6 +108,12 @@ class Document(Base):
             "classification IN ('PUBLIC', 'RESTRICTED', 'NULL')",
             name="chk_documents_classification",
         ),
+        Index(
+            "uq_documents_active_sha256",
+            "sha256",
+            unique=True,
+            postgresql_where=text("status NOT IN ('SUPERSEDED', 'ARCHIVED', 'REJECTED', 'DUPLICATE')"),
+        ),
     )
 
 

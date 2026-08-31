@@ -49,6 +49,7 @@ class UploadResponse(BaseModel):
     quarantine_key: str
     checksum: str | None = None
     rejection_reason: str | None = None
+    was_duplicate: bool = False
     message: str
 
 

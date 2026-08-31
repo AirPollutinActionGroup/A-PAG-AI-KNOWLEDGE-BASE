@@ -64,7 +64,7 @@ class ClamAVScanner(ThreatScanner):
 class FileValidator:
     """Core fail-fast validator for uploaded PDF documents."""
 
-    MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+    MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
     MAX_PAGE_COUNT = 5000
     PDF_MAGIC_HEADER = b"%PDF-"
     PDF_EOF_TRAILER = b"%%EOF"
@@ -95,7 +95,7 @@ class FileValidator:
                 file_size_bytes=size,
                 mime_type=declared_mime_type,
                 rejection_reason=(
-                    f"FILE_TOO_LARGE: Exceeds 50MB limit (Actual: {size / (1024*1024):.2f} MB)."
+                    f"FILE_TOO_LARGE: Exceeds 100MB limit (Actual: {size / (1024*1024):.2f} MB)."
                 ),
             )
 
@@ -139,6 +139,15 @@ class FileValidator:
             )
 
         # 7. Encryption / Password Check & Bounded Page Count
+        # Fast check for encryption marker in PDF dictionary
+        if b"/Encrypt" in data:
+            return ValidationResult(
+                is_valid=False,
+                file_size_bytes=size,
+                mime_type=declared_mime_type,
+                rejection_reason="ENCRYPTED_PDF: Password-protected or encrypted PDFs are not supported.",
+            )
+
         try:
             reader = pypdf.PdfReader(io.BytesIO(data))
             if reader.is_encrypted:
@@ -160,11 +169,19 @@ class FileValidator:
                     ),
                 )
         except Exception as e:
+            err_str = str(e).lower()
+            if "encrypt" in err_str or "password" in err_str:
+                return ValidationResult(
+                    is_valid=False,
+                    file_size_bytes=size,
+                    mime_type=declared_mime_type,
+                    rejection_reason="ENCRYPTED_PDF: Password-protected or encrypted PDFs are not supported.",
+                )
             return ValidationResult(
                 is_valid=False,
                 file_size_bytes=size,
                 mime_type=declared_mime_type,
-                rejection_reason=f"PDF_PARSER_ERROR: Malformed internal PDF structure ({e!s}).",
+                rejection_reason=f"CORRUPTED_PDF_STRUCTURE: Malformed internal PDF structure ({e!s}).",
             )
 
         # 8. SHA-256 Checksum Calculation

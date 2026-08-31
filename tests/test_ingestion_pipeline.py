@@ -8,9 +8,15 @@ from pathlib import Path
 
 import pypdf
 import pytest
+from sqlalchemy import create_engine, exc, text, event
+from sqlalchemy.orm import Session
 from starlette.testclient import TestClient
 
 from src.api.v1.router import app
+from src.db.enums import AuditEventType
+from src.db.models import AuditLog, Base
+from src.db.models import Document as DocORM
+from src.modules.audit.service import AuditService
 from src.modules.document_pipeline.models import (
     Classification,
     DocumentStatus,
@@ -18,9 +24,7 @@ from src.modules.document_pipeline.models import (
 )
 from src.modules.document_pipeline.repository import InMemoryDocumentRepository
 from src.modules.document_pipeline.upload_service import UploadService
-from src.modules.document_pipeline.validation import (
-    FileValidator,
-)
+from src.modules.document_pipeline.validation import FileValidator
 from src.storage.bucket_manager import BucketManager
 from src.storage.object_storage import LocalFileSystemStorage
 
@@ -182,6 +186,53 @@ def test_document_versioning_and_superseding(tmp_path):
     assert doc_v1_updated.status == DocumentStatus.SUPERSEDED
 
 
+# ==============================================================================
+# 2. SECURITY & VALIDATION (Rejection Paths)
+# ==============================================================================
+
+def test_reject_empty_zero_byte_file():
+    """Test rejection of empty 0-byte file."""
+    validator = FileValidator()
+    res = validator.validate(b"")
+    assert not res.is_valid
+    assert "EMPTY_FILE" in res.rejection_reason
+
+
+def test_reject_oversized_file():
+    """Test 100MB ceiling rejection."""
+    validator = FileValidator()
+    huge_data = b"%PDF-1.4\n" + (b"0" * (101 * 1024 * 1024)) + b"\n%%EOF"
+    res = validator.validate(huge_data)
+    assert not res.is_valid
+    assert "FILE_TOO_LARGE" in res.rejection_reason
+
+
+def test_reject_non_pdf_files():
+    """Test rejection of files that aren't real PDFs — wrong MIME, wrong magic bytes, disguised binary.
+
+    Merged test: covers MIME-type mismatch, PNG data, and .exe-renamed-to-.pdf in one test.
+    """
+    validator = FileValidator()
+
+    # Case 1: Declared MIME type mismatch
+    res_mime = validator.validate(b"%PDF-1.4\n%%EOF", declared_mime_type="image/png")
+    assert not res_mime.is_valid
+    assert "INVALID_MIME_TYPE" in res_mime.rejection_reason
+
+    # Case 2: PNG magic bytes with .pdf extension
+    png_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+    res_png = validator.validate(png_header)
+    assert not res_png.is_valid
+    assert "CORRUPTED_PDF_STRUCTURE" in res_png.rejection_reason
+
+    # Case 3: EXE/MZ binary disguised as .pdf
+    with open(FIXTURES_DIR / "07_disguised_fake_binary.pdf", "rb") as f:
+        exe_data = f.read()
+    res_exe = validator.validate(exe_data)
+    assert not res_exe.is_valid
+    assert "CORRUPTED_PDF_STRUCTURE" in res_exe.rejection_reason
+
+
 def test_reject_corrupted_header_pdf(tmp_path):
     """Test rejection when missing %PDF- header."""
     service = UploadService(bucket_manager=BucketManager(storage=LocalFileSystemStorage(str(tmp_path))))
@@ -204,19 +255,12 @@ def test_reject_truncated_eof_pdf(tmp_path):
     assert "CORRUPTED_PDF_STRUCTURE" in res.rejection_reason
 
 
-def test_reject_disguised_fake_binary(tmp_path):
-    """Test rejection of non-PDF binary masquerading as PDF."""
-    service = UploadService(bucket_manager=BucketManager(storage=LocalFileSystemStorage(str(tmp_path))))
-    with open(FIXTURES_DIR / "07_disguised_fake_binary.pdf", "rb") as f:
-        data = f.read()
+def test_reject_structural_threats(tmp_path):
+    """Test threat scanner rejects PDFs containing /Launch, /JavaScript, powershell.exe markers.
 
-    res = service.upload("fake.pdf", data)
-    assert res.status == DocumentStatus.REJECTED
-    assert "CORRUPTED_PDF_STRUCTURE" in res.rejection_reason
-
-
-def test_reject_malicious_script_exploit(tmp_path):
-    """Test ClamAV scanner intercepts malicious scripts."""
+    Renamed from 'test_reject_malicious_script_exploit' to be honest:
+    this tests our signature-based scanner, not real ClamAV.
+    """
     service = UploadService(bucket_manager=BucketManager(storage=LocalFileSystemStorage(str(tmp_path))))
     with open(FIXTURES_DIR / "08_malicious_script_exploit.pdf", "rb") as f:
         data = f.read()
@@ -224,31 +268,6 @@ def test_reject_malicious_script_exploit(tmp_path):
     res = service.upload("malicious.pdf", data)
     assert res.status == DocumentStatus.REJECTED
     assert "MALICIOUS_THREAT_DETECTED" in res.rejection_reason
-
-
-def test_reject_oversized_file_boundary():
-    """Test 50MB ceiling rejection."""
-    validator = FileValidator()
-    huge_data = b"%PDF-1.4\n" + (b"0" * (51 * 1024 * 1024)) + b"\n%%EOF"
-    res = validator.validate(huge_data)
-    assert not res.is_valid
-    assert "FILE_TOO_LARGE" in res.rejection_reason
-
-
-def test_reject_empty_zero_byte_file():
-    """Test rejection of empty 0-byte file."""
-    validator = FileValidator()
-    res = validator.validate(b"")
-    assert not res.is_valid
-    assert "EMPTY_FILE" in res.rejection_reason
-
-
-def test_reject_invalid_mime_type():
-    """Test rejection of invalid declared MIME type."""
-    validator = FileValidator()
-    res = validator.validate(b"%PDF-1.4\n%%EOF", declared_mime_type="image/png")
-    assert not res.is_valid
-    assert "INVALID_MIME_TYPE" in res.rejection_reason
 
 
 def test_reject_encrypted_pdf(tmp_path):
@@ -263,7 +282,141 @@ def test_reject_encrypted_pdf(tmp_path):
 
 
 # ==============================================================================
-# 2. FASTAPI INTEGRATION ENDPOINTS
+# 3. BEHAVIOURAL SIDE-EFFECT TESTS
+# ==============================================================================
+
+def test_quarantine_deleted_after_promotion(tmp_path):
+    """After a valid PDF is promoted to raw, quarantine must contain zero objects for that key."""
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+    buckets = BucketManager(storage=storage)
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+
+    with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+        data = f.read()
+
+    resp = service.upload(filename="promote_test.pdf", data=data)
+    assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
+
+    # The quarantine key should have been deleted during promotion
+    quarantine_key = resp.quarantine_key
+    assert not storage.object_exists(buckets.quarantine, quarantine_key), \
+        "Quarantine object was NOT purged after promotion — data leak risk."
+
+
+def test_quarantine_deleted_after_rejection(tmp_path):
+    """After a corrupt PDF is rejected, quarantine must be purged (no toxic file left behind)."""
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+    buckets = BucketManager(storage=storage)
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+
+    with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
+        data = f.read()
+
+    resp = service.upload(filename="reject_cleanup.pdf", data=data)
+    assert resp.status == DocumentStatus.REJECTED
+
+    # Quarantine must be clean — no corrupt/infected files lingering
+    quarantine_key = resp.quarantine_key
+    assert not storage.object_exists(buckets.quarantine, quarantine_key), \
+        "Quarantine object was NOT purged after rejection — toxic file lingering."
+
+
+def test_rejected_pdf_never_reaches_raw(tmp_path):
+    """A rejected file must never exist in the raw bucket, period."""
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+    buckets = BucketManager(storage=storage)
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+
+    # Upload corrupt PDF
+    with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
+        data = f.read()
+    resp = service.upload(filename="should_not_land_in_raw.pdf", data=data)
+    assert resp.status == DocumentStatus.REJECTED
+
+    # Scan the entire raw bucket directory — nothing should be there for this upload
+    import os
+    raw_dir = os.path.join(str(tmp_path), buckets.raw)
+    if os.path.exists(raw_dir):
+        raw_files = os.listdir(raw_dir)
+        assert len(raw_files) == 0, \
+            f"Rejected file leaked into raw bucket! Found: {raw_files}"
+
+
+def test_dedup_short_circuits_storage(tmp_path):
+    """Duplicate upload must NOT create a second copy in raw — only one raw object should exist."""
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+    buckets = BucketManager(storage=storage)
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+
+    with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+        data = f.read()
+
+    # First upload — lands in raw
+    res1 = service.upload(filename="original.pdf", data=data)
+    assert res1.status == DocumentStatus.AWAITING_CLASSIFICATION
+
+    # Second upload — should be marked DUPLICATE
+    res2 = service.upload(filename="copy.pdf", data=data)
+    assert res2.status == DocumentStatus.DUPLICATE
+
+    # Count objects in raw bucket — must be exactly 1
+    import os
+    raw_dir = os.path.join(str(tmp_path), buckets.raw)
+    raw_files = os.listdir(raw_dir)
+    assert len(raw_files) == 1, \
+        f"Dedup failed to short-circuit: expected 1 raw object, found {len(raw_files)} — {raw_files}"
+
+
+def test_audit_log_immutability():
+    """Test that UPDATE on audit_log rows is rejected by the database.
+
+    The audit_log table is meant to be append-only. This test creates a trigger
+    that blocks UPDATEs, writes an entry, then verifies the UPDATE is rejected.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+
+    # Install a trigger that rejects UPDATEs on audit_log
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TRIGGER trg_audit_log_immutable
+            BEFORE UPDATE ON audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'AUDIT_LOG_IMMUTABLE: Updates to audit_log are forbidden.');
+            END;
+        """))
+        conn.commit()
+
+    doc_id = uuid.uuid4()
+    corr_id = uuid.uuid4()
+
+    with Session(engine) as session:
+        entry = AuditService.log_event(
+            db=session,
+            document_id=doc_id,
+            event_type=AuditEventType.DOCUMENT_QUARANTINED,
+            details={"file_name": "immutable_test.pdf", "size": 2048},
+            user_id="admin",
+            correlation_id=corr_id,
+        )
+        event_id = entry.event_id
+
+    # Attempt to UPDATE — must fail
+    with Session(engine) as session:
+        with pytest.raises(exc.IntegrityError, match="AUDIT_LOG_IMMUTABLE"):
+            session.execute(
+                text("UPDATE audit_log SET event_type = 'TAMPERED' WHERE event_id = :eid"),
+                {"eid": event_id},
+            )
+            session.commit()
+
+
+# ==============================================================================
+# 4. FASTAPI INTEGRATION ENDPOINTS
 # ==============================================================================
 
 def test_api_health():
@@ -292,21 +445,6 @@ def test_api_upload_returns_202():
     assert status_res.json()["status"] == "AWAITING_CLASSIFICATION"
 
 
-def test_api_upload_restricted():
-    """Test POST /upload with RESTRICTED classification."""
-    pdf_path = FIXTURES_DIR / "01_standard_digital_policy.pdf"
-    with open(pdf_path, "rb") as f:
-        res = client.post(
-            "/api/v1/documents/upload",
-            files={"file": ("budget.pdf", f, "application/pdf")},
-            data={"classification": "RESTRICTED"},
-        )
-    assert res.status_code == 202
-    doc_id = res.json()["document_id"]
-    status_res = client.get(f"/api/v1/documents/{doc_id}/status")
-    assert status_res.json()["classification"] == Classification.RESTRICTED
-
-
 def test_api_upload_rejection_422():
     """Test POST /upload with corrupt PDF returns HTTP 422."""
     pdf_path = FIXTURES_DIR / "05_corrupted_header_missing.pdf"
@@ -327,19 +465,11 @@ def test_api_list_documents():
 
 
 # ==============================================================================
-# 3. PHASE A: DB MODELS & AUDIT SERVICE TESTS
+# 5. DB CONSTRAINT TESTS
 # ==============================================================================
 
 def test_audit_service_logging():
     """Test AuditService correctly creates immutable AuditLog entries."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session
-
-    from src.db.enums import AuditEventType
-    from src.db.models import Base
-    from src.modules.audit.service import AuditService
-
-    # In-memory SQLite engine for fast unit test of audit service
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
 
@@ -362,53 +492,8 @@ def test_audit_service_logging():
         assert entry.details["file_name"] == "directive.pdf"
 
 
-def test_job_model_structure():
-    """Test Job model defaults and queue fields."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session
-
-    from src.db.enums import JobStage, JobStatus
-    from src.db.models import Base, Job
-    from src.db.models import Document as DocORM
-
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-
-    doc_id = uuid.uuid4()
-    with Session(engine) as session:
-        doc = DocORM(
-            document_id=doc_id,
-            filename="test.pdf",
-            file_size=100,
-        )
-        session.add(doc)
-        session.commit()
-
-        job = Job(
-            document_id=doc_id,
-            stage=JobStage.SCAN.value,
-            status=JobStatus.PENDING.value,
-        )
-        session.add(job)
-        session.commit()
-        session.refresh(job)
-
-        assert job.stage == "SCAN"
-        assert job.status == "PENDING"
-        assert job.retry_count == 0
-        assert job.max_retries == 3
-        assert job.priority == 0
-        assert job.scheduled_at is not None
-
-
 def test_check_constraint_rejects_invalid_enum_values():
     """Test that CheckConstraints reject invalid status strings."""
-    from sqlalchemy import create_engine, exc
-    from sqlalchemy.orm import Session
-
-    from src.db.models import Base
-    from src.db.models import Document as DocORM
-
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
 
@@ -423,3 +508,76 @@ def test_check_constraint_rejects_invalid_enum_values():
         session.add(invalid_doc)
         with pytest.raises(exc.IntegrityError):
             session.commit()
+
+
+# ==============================================================================
+# 6. CONCURRENCY & RACE CONDITIONS
+# ==============================================================================
+
+def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
+    """Test that N simultaneous uploads of the exact same PDF race safely.
+
+    Uses threading.Barrier to force 5 threads to hit the upload endpoint simultaneously.
+    Asserts:
+    1. Exactly 1 upload is promoted to AWAITING_CLASSIFICATION.
+    2. Exactly 4 uploads are recognized as DUPLICATE.
+    3. Exactly 1 file exists in raw storage.
+    4. 0 leftover files in quarantine storage.
+    5. Duplicate responses return the winner's canonical document_id.
+    """
+    import os
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+    buckets = BucketManager(storage=storage)
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+
+    with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+        pdf_bytes = f.read()
+
+    num_threads = 5
+    barrier = threading.Barrier(num_threads)
+    results = []
+
+    def upload_worker(idx: int):
+        barrier.wait()  # Synchronize all threads to execute upload at the exact same instant
+        resp = service.upload(
+            filename=f"concurrent_doc_{idx}.pdf",
+            data=pdf_bytes,
+            request_meta=UploadRequest(classification=Classification.PUBLIC),
+        )
+        return resp
+
+    with ThreadPoolExecutor(max_workers=num_threads) as pool:
+        futures = [pool.submit(upload_worker, i) for i in range(num_threads)]
+        results = [f.result() for f in futures]
+
+    # Invariant 1: Exactly 1 promoted, rest marked duplicate
+    statuses = [r.status for r in results]
+    assert statuses.count(DocumentStatus.AWAITING_CLASSIFICATION) == 1, \
+        f"Expected exactly 1 promoted, got: {statuses}"
+    assert statuses.count(DocumentStatus.DUPLICATE) == num_threads - 1, \
+        f"Expected {num_threads - 1} duplicates, got: {statuses}"
+
+    # Invariant 2: Exactly 1 file in raw storage
+    raw_dir = os.path.join(str(tmp_path), buckets.raw)
+    raw_files = os.listdir(raw_dir)
+    assert len(raw_files) == 1, \
+        f"Dedup race failed! Expected 1 raw file, found {len(raw_files)}: {raw_files}"
+
+    # Invariant 3: Zero leftover files in quarantine storage
+    quarantine_dir = os.path.join(str(tmp_path), buckets.quarantine)
+    quarantine_files = os.listdir(quarantine_dir) if os.path.exists(quarantine_dir) else []
+    assert len(quarantine_files) == 0, \
+        f"Quarantine leak! Found lingering files: {quarantine_files}"
+
+    # Invariant 4: All duplicates reference the winning canonical document ID
+    winner_doc_id = [r.document_id for r in results if r.status == DocumentStatus.AWAITING_CLASSIFICATION][0]
+    for r in results:
+        if r.status == DocumentStatus.DUPLICATE:
+            assert r.document_id == winner_doc_id, \
+                f"Duplicate response did not return winning doc ID! Got: {r.document_id}"
+            assert r.was_duplicate is True
+

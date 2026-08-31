@@ -127,40 +127,53 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         return [self._to_dto(o) for o in orms]
 
 
+import threading
+
+
 class InMemoryDocumentRepository(DocumentRepository):
-    """In-memory repository implementation for unit tests."""
+    """In-memory repository implementation for unit and concurrency tests."""
 
     def __init__(self):
         self._storage: dict[uuid.UUID, DocumentDTO] = {}
+        self._lock = threading.Lock()
 
     def create(self, doc: DocumentDTO) -> DocumentDTO:
-        self._storage[doc.id] = doc.model_copy(deep=True)
-        return self._storage[doc.id]
+        with self._lock:
+            self._storage[doc.id] = doc.model_copy(deep=True)
+            return self._storage[doc.id]
 
     def update_status(self, doc_id: uuid.UUID, status: DocumentStatus | str) -> None:
-        if doc_id in self._storage:
-            st = status if isinstance(status, DocumentStatus) else DocumentStatus(status)
-            self._storage[doc_id].status = st
-            self._storage[doc_id].updated_at = datetime.now(UTC)
+        with self._lock:
+            if doc_id in self._storage:
+                st = status if isinstance(status, DocumentStatus) else DocumentStatus(status)
+                self._storage[doc_id].status = st
+                self._storage[doc_id].updated_at = datetime.now(UTC)
 
     def get_by_id(self, doc_id: uuid.UUID) -> DocumentDTO | None:
-        if doc_id in self._storage:
-            return self._storage[doc_id].model_copy(deep=True)
-        return None
+        with self._lock:
+            if doc_id in self._storage:
+                return self._storage[doc_id].model_copy(deep=True)
+            return None
 
     def get_by_checksum(self, checksum: str) -> DocumentDTO | None:
-        for doc in self._storage.values():
-            if doc.checksum == checksum and doc.status not in [
-                DocumentStatus.SUPERSEDED,
-                DocumentStatus.ARCHIVED,
-            ]:
-                return doc.model_copy(deep=True)
-        return None
+        with self._lock:
+            for doc in self._storage.values():
+                if doc.checksum == checksum and doc.status not in [
+                    DocumentStatus.SUPERSEDED,
+                    DocumentStatus.ARCHIVED,
+                    DocumentStatus.REJECTED,
+                    DocumentStatus.DUPLICATE,
+                ]:
+                    return doc.model_copy(deep=True)
+            return None
 
     def update_document(self, doc: DocumentDTO) -> DocumentDTO:
-        doc.updated_at = datetime.now(UTC)
-        self._storage[doc.id] = doc.model_copy(deep=True)
-        return self._storage[doc.id]
+        with self._lock:
+            doc.updated_at = datetime.now(UTC)
+            self._storage[doc.id] = doc.model_copy(deep=True)
+            return self._storage[doc.id]
 
     def get_all(self) -> list[DocumentDTO]:
-        return [doc.model_copy(deep=True) for doc in self._storage.values()]
+        with self._lock:
+            return [doc.model_copy(deep=True) for doc in self._storage.values()]
+

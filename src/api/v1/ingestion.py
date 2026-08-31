@@ -105,3 +105,46 @@ async def get_document_status(document_id: uuid.UUID):
 async def list_documents():
     """Lists all ingested documents recorded in the repository."""
     return _repo.get_all()
+
+
+@router.get(
+    "/test-preset/{preset_name}",
+    summary="Get binary fixture for testing presets",
+)
+async def get_test_preset(preset_name: str):
+    """Returns actual binary test PDF fixtures for the interactive studio."""
+    from pathlib import Path
+    from fastapi.responses import Response
+
+    fixtures_dir = Path(__file__).resolve().parent.parent.parent.parent / "tests" / "fixtures" / "pdfs"
+
+    fixture_map = {
+        "valid_v1": ("01_standard_digital_policy.pdf", "caqm_directive_2026_v1.pdf"),
+        "corrupt_header": ("05_corrupted_header_missing.pdf", "broken_header.pdf"),
+        "truncated_eof": ("06_truncated_eof_missing.pdf", "truncated_stream.pdf"),
+        "fake_exe": ("07_disguised_fake_binary.pdf", "disguised_malware.pdf"),
+        "malicious": ("08_malicious_script_exploit.pdf", "threat_exploit_sample.pdf"),
+        "encrypted": ("10_password_protected.pdf", "password_protected_confidential.pdf"),
+    }
+
+    if preset_name not in fixture_map:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Test preset '{preset_name}' not found.",
+        )
+
+    file_name, download_name = fixture_map[preset_name]
+    file_path = fixtures_dir / file_name
+
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Fixture file '{file_name}' not found on disk.",
+        )
+
+    return Response(
+        content=file_path.read_bytes(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
+

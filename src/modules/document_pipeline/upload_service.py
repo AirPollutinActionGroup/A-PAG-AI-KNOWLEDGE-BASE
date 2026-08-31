@@ -2,6 +2,7 @@
 2-bucket architecture: apag-quarantine -> apag-raw.
 """
 
+import threading
 import uuid
 
 from src.modules.document_pipeline.models import (
@@ -30,6 +31,7 @@ class UploadService:
         self.buckets = bucket_manager or BucketManager()
         self.repo = repository or InMemoryDocumentRepository()
         self.validator = validation_service or ValidationService()
+        self._promotion_lock = threading.Lock()
 
     def upload(
         self,
@@ -94,58 +96,63 @@ class UploadService:
         # Valid document: compute checksum
         doc.checksum = validation.sha256
 
-        # Deduplication Check
-        existing_doc = self.repo.get_by_checksum(validation.sha256)
-        if existing_doc and existing_doc.id != document_id:
-            doc.status = DocumentStatus.DUPLICATE
-            self.repo.update_document(doc)
+        # Critical Section: Deduplication, Versioning & Promotion
+        with self._promotion_lock:
+            # Deduplication Check
+            existing_doc = self.repo.get_by_checksum(validation.sha256)
+            if existing_doc and existing_doc.id != document_id:
+                doc.status = DocumentStatus.DUPLICATE
+                self.repo.update_document(doc)
+                self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
+
+                return UploadResponse(
+                    document_id=existing_doc.id,
+                    filename=filename,
+                    status=DocumentStatus.DUPLICATE,
+                    quarantine_key=quarantine_key,
+                    checksum=validation.sha256,
+                    was_duplicate=True,
+                    message=f"Duplicate document detected (matches canonical document ID: {existing_doc.id}).",
+                )
+
+            # Versioning: Check if this supersedes an older document
+            if meta.supersedes_doc_id:
+                prior_doc = self.repo.get_by_id(meta.supersedes_doc_id)
+                if prior_doc:
+                    doc.version = prior_doc.version + 1
+                    doc.supersedes_id = prior_doc.id
+
+                    # Update old version status based on keep_previous_version flag
+                    if meta.keep_previous_version:
+                        prior_doc.status = DocumentStatus.SUPERSEDED
+                    else:
+                        prior_doc.status = DocumentStatus.ARCHIVED
+                    self.repo.update_document(prior_doc)
+
+            # Promotion to Raw Bucket
+            raw_key = f"{validation.sha256}.pdf"
+            if not self.buckets.storage.object_exists(self.buckets.raw, raw_key):
+                self.buckets.storage.copy_object(
+                    source_bucket=self.buckets.quarantine,
+                    source_object=quarantine_key,
+                    dest_bucket=self.buckets.raw,
+                    dest_object=raw_key,
+                )
+
+            # Remove from quarantine after promotion
             self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
+
+            doc.status = DocumentStatus.AWAITING_CLASSIFICATION
+            doc.raw_path = f"{self.buckets.raw}/{raw_key}"
+            doc.quarantine_path = None
+            self.repo.update_document(doc)
 
             return UploadResponse(
                 document_id=document_id,
                 filename=filename,
-                status=DocumentStatus.DUPLICATE,
+                status=DocumentStatus.AWAITING_CLASSIFICATION,
                 quarantine_key=quarantine_key,
                 checksum=validation.sha256,
-                message=f"Duplicate document detected (matches document ID: {existing_doc.id}).",
+                was_duplicate=False,
+                message="Document passed all checks and was promoted to raw storage.",
             )
-
-        # Versioning: Check if this supersedes an older document
-        if meta.supersedes_doc_id:
-            prior_doc = self.repo.get_by_id(meta.supersedes_doc_id)
-            if prior_doc:
-                doc.version = prior_doc.version + 1
-                doc.supersedes_id = prior_doc.id
-
-                # Update old version status based on keep_previous_version flag
-                if meta.keep_previous_version:
-                    prior_doc.status = DocumentStatus.SUPERSEDED
-                else:
-                    prior_doc.status = DocumentStatus.ARCHIVED
-                self.repo.update_document(prior_doc)
-
-        # Promotion to Raw Bucket
-        raw_key = f"{validation.sha256}.pdf"
-        self.buckets.storage.copy_object(
-            source_bucket=self.buckets.quarantine,
-            source_object=quarantine_key,
-            dest_bucket=self.buckets.raw,
-            dest_object=raw_key,
-        )
-
-        # Remove from quarantine after promotion
-        self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
-
-        doc.status = DocumentStatus.AWAITING_CLASSIFICATION
-        doc.raw_path = f"{self.buckets.raw}/{raw_key}"
-        doc.quarantine_path = None
-        self.repo.update_document(doc)
-
-        return UploadResponse(
-            document_id=document_id,
-            filename=filename,
-            status=DocumentStatus.AWAITING_CLASSIFICATION,
-            quarantine_key=quarantine_key,
-            checksum=validation.sha256,
-            message="Document passed all checks and was promoted to raw storage.",
-        )

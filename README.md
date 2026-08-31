@@ -46,7 +46,7 @@ PDF Upload ──► Quarantine ──► 8-Point Validation & Scan ──► Ra
 ```
 
 - **Quarantine-First Isolation**: Files land in temporary storage before validation.
-- **Fail-Fast Security**: Strict checks for MIME type, 50MB ceiling, header/trailer integrity, and malware.
+- **Fail-Fast Security**: Strict checks for MIME type, 100MB ceiling, header/trailer integrity, and malware.
 - **SHA-256 Deduplication & Versioning**: Prevents redundant storage and tracks historical policy versions (`supersedes_id`).
 - **Extraction with OCR Fallback**: Native PDF text extraction with automatic OCR fallback for scanned pages.
 - **Structured Normalization**: Cleans text, extracts tables (Markdown/HTML), and detects entities (CAQM, GRAP, CPCB, pollutants).
@@ -77,42 +77,46 @@ PDF Upload ──► Quarantine ──► 8-Point Validation & Scan ──► Ra
 
 ### 1. Prerequisites
 - **Python 3.12+**
-- **uv** package manager
 - **Docker & Docker Compose**
 
-### 2. Setup & Run
+### 2. Setup & Start the Testing Studio UI
 ```bash
 # Clone repository
 git clone https://github.com/AirPollutinActionGroup/A-PAG-AI-KNOWLEDGE-BASE.git
 cd A-PAG-AI-KNOWLEDGE-BASE
 
-# Setup environment & dependencies
-uv venv
+# Setup virtual environment & dependencies
+python -m venv .venv
 .venv\Scripts\activate      # Windows (or 'source .venv/bin/activate' on Linux/macOS)
-uv pip install -r requirements.txt
+pip install -r requirements.txt
 
-# Start PostgreSQL and MinIO infrastructure
+# Start background services (PostgreSQL 16 + MinIO)
 docker compose up -d
 
-# Run database migrations
-uv run alembic upgrade head
-
-# Start development server
-uv run python main.py
+# Start the Ingestion & Testing Studio server
+python main.py
+# or:
+uvicorn src.api.v1.router:app --reload --host 0.0.0.0 --port 8000
 ```
 
+### 3. Interactive Web Access
 - **Testing Studio UI**: [http://localhost:8000](http://localhost:8000)
-- **API Documentation**: [http://localhost:8000/docs](http://localhost:8000/docs)
+  - Features 9 one-click preset test scenarios (Valid V1/V2, Duplicates, Bad Headers, Encrypted PDFs, Exploits, Zero-byte files).
+  - Real-time 8-check validation indicator matrix.
+  - Ingested documents ledger displaying exact rejection reasons and raw storage paths.
+- **Swagger API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Health Check Probe**: [http://localhost:8000/health](http://localhost:8000/health)
 
 ---
 
 ## 🧪 Testing & Verification
 
 ```bash
-# Run test suite
-uv run pytest tests/ -v
+# Run the complete test suite (22 tests, ~2.0s)
+pytest tests/ -v
 
 # Run code linter
-uv run ruff check src/ tests/ main.py
+ruff check src/ tests/ main.py
 ```
-*(Official test execution report available in [`TEST_REPORT.md`](TEST_REPORT.md))*
+*(Detailed test descriptions and execution logs available in [`TEST_REPORT.md`](TEST_REPORT.md))*
+
