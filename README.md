@@ -73,38 +73,63 @@ PDF Upload ──► Quarantine ──► 8-Point Validation & Scan ──► Ra
 
 ---
 
-## 🚀 Quick Start Guide
+## 🚀 Project Setup & Quick Start Guide
 
 ### 1. Prerequisites
 - **Python 3.12+**
+- **uv** (recommended) or **pip**
 - **Docker & Docker Compose**
 
-### 2. Setup & Start the Testing Studio UI
+### 2. Environment Configuration
 ```bash
-# Clone repository
+# Clone the repository
 git clone https://github.com/AirPollutinActionGroup/A-PAG-AI-KNOWLEDGE-BASE.git
 cd A-PAG-AI-KNOWLEDGE-BASE
 
-# Setup virtual environment & dependencies
+# Copy environment variables
+cp .env.example .env
+```
+
+### 3. Virtual Environment & Dependencies
+**Option A: Using `uv` (Fastest)**
+```bash
+uv venv
+.venv\Scripts\activate      # Windows (or 'source .venv/bin/activate' on Linux/macOS)
+uv pip install -r requirements.txt
+```
+
+**Option B: Using standard `pip`**
+```bash
 python -m venv .venv
 .venv\Scripts\activate      # Windows (or 'source .venv/bin/activate' on Linux/macOS)
 pip install -r requirements.txt
+```
 
-# Start background services (PostgreSQL 16 + MinIO)
+### 4. Start Infrastructure & Database Migrations
+```bash
+# Start background services (PostgreSQL 16 + MinIO Object Storage)
 docker compose up -d
 
-# Start the Ingestion & Testing Studio server
+# Run database schema migrations
+alembic upgrade head
+# or with uv:
+uv run alembic upgrade head
+```
+
+### 5. Start Development Server & Testing Studio UI
+```bash
+# Start server with auto-reload
 python main.py
-# or:
+# or using uvicorn directly:
 uvicorn src.api.v1.router:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 3. Interactive Web Access
+### 6. Interactive Web Access
 - **Testing Studio UI**: [http://localhost:8000](http://localhost:8000)
   - Features 9 one-click preset test scenarios (Valid V1/V2, Duplicates, Bad Headers, Encrypted PDFs, Exploits, Zero-byte files).
   - Real-time 8-check validation indicator matrix.
   - Ingested documents ledger displaying exact rejection reasons and raw storage paths.
-- **Swagger API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Interactive Swagger API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
 - **Health Check Probe**: [http://localhost:8000/health](http://localhost:8000/health)
 
 ---
