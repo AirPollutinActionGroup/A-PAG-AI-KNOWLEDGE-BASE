@@ -66,8 +66,8 @@ class UploadService:
                 correlation_id=correlation_id,
             )
         except Exception:
-            logger.warning(
-                "Audit write failed: doc_id=%s event=%s",
+            logger.error(
+                "AUDIT WRITE FAILED: doc_id=%s event=%s — compliance gap, investigate immediately",
                 document_id, event_type.value, exc_info=True,
             )
 
@@ -80,6 +80,7 @@ class UploadService:
         """Stage 1: Quarantine Upload -> Stage 2: Validation -> Stage 3: Promote/Reject."""
         meta = request_meta or UploadRequest()
         document_id = uuid.uuid4()
+        correlation_id = uuid.uuid4()
         quarantine_key = f"{document_id}.pdf"
 
         logger.info(
@@ -115,7 +116,7 @@ class UploadService:
             "filename": filename, "size_bytes": len(data),
             "classification": meta.classification.value,
             "quarantine_key": quarantine_key,
-        })
+        }, correlation_id=correlation_id)
 
         # -------------------------------------------------------------
         # STAGE 2: Fail-Fast Pre-checks & Threat Scan
@@ -139,7 +140,7 @@ class UploadService:
             self._audit(document_id, AuditEventType.DOCUMENT_REJECTED, details={
                 "filename": filename, "rejection_reason": validation.rejection_reason,
                 "file_size_bytes": len(data),
-            })
+            }, correlation_id=correlation_id)
 
             # Purge infected/corrupt object from quarantine
             self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
@@ -174,7 +175,7 @@ class UploadService:
                     "filename": filename, "reason": "DUPLICATE",
                     "canonical_document_id": str(existing_doc.id),
                     "sha256": validation.sha256,
-                })
+                }, correlation_id=correlation_id)
 
                 logger.info(
                     "DUPLICATE: doc_id=%s matches canonical=%s sha256=%s",
@@ -210,7 +211,7 @@ class UploadService:
                         "superseded_by": str(document_id),
                         "new_version": doc.version,
                         "prior_status": prior_doc.status.value,
-                    })
+                    }, correlation_id=correlation_id)
 
                     logger.info(
                         "VERSIONED: doc_id=%s v%d supersedes=%s (prior now %s)",
@@ -260,11 +261,11 @@ class UploadService:
             self._audit(document_id, AuditEventType.VALIDATION_PASSED, details={
                 "sha256": validation.sha256, "page_count": validation.page_count,
                 "file_size_bytes": validation.file_size_bytes,
-            })
+            }, correlation_id=correlation_id)
             self._audit(document_id, AuditEventType.DOCUMENT_PROMOTED, details={
                 "raw_path": doc.raw_path, "sha256": validation.sha256,
                 "version": doc.version,
-            })
+            }, correlation_id=correlation_id)
 
             logger.info(
                 "PROMOTED: doc_id=%s -> %s sha256=%s",

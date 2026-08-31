@@ -626,6 +626,12 @@ def test_upload_writes_audit_events_on_promotion(tmp_path):
         assert "raw_path" in promoted_event.details
         assert "sha256" in promoted_event.details
 
+        # Verify all events share the same correlation_id (non-None)
+        corr_ids = [e.correlation_id for e in events]
+        assert all(c is not None for c in corr_ids), "correlation_id must not be None"
+        assert len(set(str(c) for c in corr_ids)) == 1, \
+            f"All events from one upload must share the same correlation_id, got {corr_ids}"
+
 
 def test_upload_writes_audit_events_on_rejection(tmp_path):
     """Upload a corrupt PDF and verify audit_log has QUARANTINED and REJECTED events."""
@@ -661,3 +667,9 @@ def test_upload_writes_audit_events_on_rejection(tmp_path):
         rejected_event = events[1]
         assert "rejection_reason" in rejected_event.details
         assert "CORRUPTED_PDF_STRUCTURE" in rejected_event.details["rejection_reason"]
+
+        # Verify all events share the same correlation_id (non-None)
+        corr_ids = [e.correlation_id for e in events]
+        assert all(c is not None for c in corr_ids), "correlation_id must not be None"
+        assert len(set(str(c) for c in corr_ids)) == 1, \
+            f"All events from one upload must share the same correlation_id, got {corr_ids}"
