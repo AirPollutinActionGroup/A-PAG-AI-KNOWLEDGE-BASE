@@ -65,3 +65,10 @@ Everything is synchronous: SQLAlchemy sessions, file I/O, validation. The system
 - As-designed (after Phase 6 workers): 8/10
 
 **Fix**: Phase 6 async workers handle the heavy lifting. Phase 7 may require `asyncpg` migration for the API layer — that's a real migration (rewriting every DB call site, session management, and test), not a checkbox.
+
+---
+
+## 6. Repository test rule (Effective after Step 6)
+
+**Rule**: After Step 6, `InMemoryDocumentRepository` should still exist but only be used in explicitly-marked unit tests (e.g. `tests/unit/`). Any new integration, service, or API test must default to real PostgreSQL. This prevents in-memory mock drift.
+

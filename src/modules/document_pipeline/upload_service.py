@@ -84,8 +84,8 @@ class UploadService:
         quarantine_key = f"{document_id}.pdf"
 
         logger.info(
-            "Upload received: doc_id=%s filename=%s size=%d bytes",
-            document_id, filename, len(data),
+            "Upload received: corr_id=%s doc_id=%s filename=%s size=%d bytes",
+            correlation_id, document_id, filename, len(data),
         )
 
         # -------------------------------------------------------------
@@ -97,7 +97,7 @@ class UploadService:
             data=data,
             content_type="application/pdf",
         )
-        logger.debug("Quarantined: doc_id=%s key=%s", document_id, quarantine_key)
+        logger.debug("Quarantined: corr_id=%s doc_id=%s key=%s", correlation_id, document_id, quarantine_key)
 
         doc = Document(
             id=document_id,
@@ -123,8 +123,8 @@ class UploadService:
         # -------------------------------------------------------------
         validation = self.validator.validate_document(data, mime_type="application/pdf")
         logger.info(
-            "Validation result: doc_id=%s valid=%s reason=%s",
-            document_id, validation.is_valid, validation.rejection_reason,
+            "Validation result: corr_id=%s doc_id=%s valid=%s reason=%s",
+            correlation_id, document_id, validation.is_valid, validation.rejection_reason,
         )
 
         # -------------------------------------------------------------
@@ -145,7 +145,8 @@ class UploadService:
             # Purge infected/corrupt object from quarantine
             self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
             logger.warning(
-                "REJECTED: doc_id=%s reason=%s", document_id, validation.rejection_reason,
+                "REJECTED: corr_id=%s doc_id=%s reason=%s",
+                correlation_id, document_id, validation.rejection_reason,
             )
 
             return UploadResponse(
@@ -178,8 +179,8 @@ class UploadService:
                 }, correlation_id=correlation_id)
 
                 logger.info(
-                    "DUPLICATE: doc_id=%s matches canonical=%s sha256=%s",
-                    document_id, existing_doc.id, validation.sha256,
+                    "DUPLICATE: corr_id=%s doc_id=%s matches canonical=%s sha256=%s",
+                    correlation_id, document_id, existing_doc.id, validation.sha256,
                 )
 
                 return UploadResponse(
@@ -214,8 +215,8 @@ class UploadService:
                     }, correlation_id=correlation_id)
 
                     logger.info(
-                        "VERSIONED: doc_id=%s v%d supersedes=%s (prior now %s)",
-                        document_id, doc.version, prior_doc.id, prior_doc.status.value,
+                        "VERSIONED: corr_id=%s doc_id=%s v%d supersedes=%s (prior now %s)",
+                        correlation_id, document_id, doc.version, prior_doc.id, prior_doc.status.value,
                     )
 
             # Promotion to Raw Bucket — wrapped in error recovery
@@ -268,8 +269,8 @@ class UploadService:
             }, correlation_id=correlation_id)
 
             logger.info(
-                "PROMOTED: doc_id=%s -> %s sha256=%s",
-                document_id, doc.raw_path, validation.sha256,
+                "PROMOTED: corr_id=%s doc_id=%s -> %s sha256=%s",
+                correlation_id, document_id, doc.raw_path, validation.sha256,
             )
 
             return UploadResponse(
