@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import shutil
 from abc import ABC, abstractmethod
+
+logger = logging.getLogger(__name__)
 
 
 class ObjectStorage(ABC):
@@ -164,6 +167,10 @@ class MinIOStorage(ObjectStorage):
             self.client.remove_object(bucket_name, object_name)
             return True
         except Exception:
+            logger.error(
+                "Failed to delete object '%s' from bucket '%s'",
+                object_name, bucket_name, exc_info=True,
+            )
             return False
 
     def object_exists(self, bucket_name: str, object_name: str) -> bool:
@@ -171,6 +178,10 @@ class MinIOStorage(ObjectStorage):
             self.client.stat_object(bucket_name, object_name)
             return True
         except Exception:
+            logger.debug(
+                "Object '%s' not found in bucket '%s' (or stat failed)",
+                object_name, bucket_name,
+            )
             return False
 
     def copy_object(

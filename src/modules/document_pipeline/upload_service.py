@@ -2,6 +2,7 @@
 2-bucket architecture: apag-quarantine -> apag-raw.
 """
 
+import logging
 import threading
 import uuid
 
@@ -17,6 +18,8 @@ from src.modules.document_pipeline.repository import (
 )
 from src.modules.document_pipeline.validation import ValidationService
 from src.storage.bucket_manager import BucketManager
+
+logger = logging.getLogger(__name__)
 
 
 class UploadService:
@@ -44,6 +47,11 @@ class UploadService:
         document_id = uuid.uuid4()
         quarantine_key = f"{document_id}.pdf"
 
+        logger.info(
+            "Upload received: doc_id=%s filename=%s size=%d bytes",
+            document_id, filename, len(data),
+        )
+
         # -------------------------------------------------------------
         # STAGE 1: Immediate Quarantine Landing
         # -------------------------------------------------------------
@@ -53,6 +61,7 @@ class UploadService:
             data=data,
             content_type="application/pdf",
         )
+        logger.debug("Quarantined: doc_id=%s key=%s", document_id, quarantine_key)
 
         doc = Document(
             id=document_id,
@@ -70,6 +79,10 @@ class UploadService:
         # STAGE 2: Fail-Fast Pre-checks & Threat Scan
         # -------------------------------------------------------------
         validation = self.validator.validate_document(data, mime_type="application/pdf")
+        logger.info(
+            "Validation result: doc_id=%s valid=%s reason=%s",
+            document_id, validation.is_valid, validation.rejection_reason,
+        )
 
         # -------------------------------------------------------------
         # STAGE 3: Promotion / Rejection / Deduplication / Versioning
@@ -82,6 +95,9 @@ class UploadService:
 
             # Purge infected/corrupt object from quarantine
             self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
+            logger.warning(
+                "REJECTED: doc_id=%s reason=%s", document_id, validation.rejection_reason,
+            )
 
             return UploadResponse(
                 document_id=document_id,
@@ -104,6 +120,10 @@ class UploadService:
                 doc.status = DocumentStatus.DUPLICATE
                 self.repo.update_document(doc)
                 self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
+                logger.info(
+                    "DUPLICATE: doc_id=%s matches canonical=%s sha256=%s",
+                    document_id, existing_doc.id, validation.sha256,
+                )
 
                 return UploadResponse(
                     document_id=existing_doc.id,
@@ -128,24 +148,53 @@ class UploadService:
                     else:
                         prior_doc.status = DocumentStatus.ARCHIVED
                     self.repo.update_document(prior_doc)
+                    logger.info(
+                        "VERSIONED: doc_id=%s v%d supersedes=%s (prior now %s)",
+                        document_id, doc.version, prior_doc.id, prior_doc.status.value,
+                    )
 
-            # Promotion to Raw Bucket
+            # Promotion to Raw Bucket — wrapped in error recovery
             raw_key = f"{validation.sha256}.pdf"
-            if not self.buckets.storage.object_exists(self.buckets.raw, raw_key):
-                self.buckets.storage.copy_object(
-                    source_bucket=self.buckets.quarantine,
-                    source_object=quarantine_key,
-                    dest_bucket=self.buckets.raw,
-                    dest_object=raw_key,
-                )
+            try:
+                if not self.buckets.storage.object_exists(self.buckets.raw, raw_key):
+                    self.buckets.storage.copy_object(
+                        source_bucket=self.buckets.quarantine,
+                        source_object=quarantine_key,
+                        dest_bucket=self.buckets.raw,
+                        dest_object=raw_key,
+                    )
 
-            # Remove from quarantine after promotion
-            self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
+                # Remove from quarantine after successful promotion
+                self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
+            except Exception:
+                # Storage failure: keep quarantine file intact, mark as failed
+                logger.exception(
+                    "PROMOTION FAILED: doc_id=%s — storage error during copy/delete. "
+                    "Quarantine file preserved for retry.",
+                    document_id,
+                )
+                doc.status = DocumentStatus.VALIDATION_FAILED
+                doc.rejection_reason = "STORAGE_ERROR: Failed to promote file from quarantine to raw storage."
+                self.repo.update_document(doc)
+
+                return UploadResponse(
+                    document_id=document_id,
+                    filename=filename,
+                    status=DocumentStatus.VALIDATION_FAILED,
+                    quarantine_key=quarantine_key,
+                    checksum=validation.sha256,
+                    rejection_reason=doc.rejection_reason,
+                    message="Storage error during promotion. File preserved in quarantine for retry.",
+                )
 
             doc.status = DocumentStatus.AWAITING_CLASSIFICATION
             doc.raw_path = f"{self.buckets.raw}/{raw_key}"
             doc.quarantine_path = None
             self.repo.update_document(doc)
+            logger.info(
+                "PROMOTED: doc_id=%s -> %s sha256=%s",
+                document_id, doc.raw_path, validation.sha256,
+            )
 
             return UploadResponse(
                 document_id=document_id,

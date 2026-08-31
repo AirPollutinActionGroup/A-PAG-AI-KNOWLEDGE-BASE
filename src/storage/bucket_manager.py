@@ -1,10 +1,14 @@
 """Bucket Manager for 2-bucket architecture: apag-quarantine and apag-raw."""
 
+import logging
+
 from src.storage.object_storage import (
     LocalFileSystemStorage,
     MinIOStorage,
     ObjectStorage,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BucketManager:
@@ -27,6 +31,7 @@ class BucketManager:
             self.storage = storage
         elif use_local:
             self.storage = LocalFileSystemStorage(base_dir=local_dir)
+            logger.info("Storage backend: LocalFileSystem (%s)", local_dir)
         else:
             try:
                 self.storage = MinIOStorage(
@@ -35,13 +40,20 @@ class BucketManager:
                     secret_key=secret_key,
                     secure=secure,
                 )
+                logger.info("Storage backend: MinIO (%s)", endpoint)
             except Exception:
-                # Fallback to local filesystem storage if MinIO is not running
+                logger.warning(
+                    "MinIO connection failed (endpoint=%s). "
+                    "Falling back to local filesystem at '%s'. "
+                    "THIS IS NOT PRODUCTION-SAFE.",
+                    endpoint, local_dir,
+                )
                 self.storage = LocalFileSystemStorage(base_dir=local_dir)
 
         # Ensure both buckets exist
         self.storage.ensure_bucket_exists(self.QUARANTINE_BUCKET)
         self.storage.ensure_bucket_exists(self.RAW_BUCKET)
+        logger.info("Buckets ready: [%s, %s]", self.QUARANTINE_BUCKET, self.RAW_BUCKET)
 
     @property
     def quarantine(self) -> str:

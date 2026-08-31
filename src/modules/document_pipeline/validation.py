@@ -1,7 +1,7 @@
 """Stage 2: Validation Service and Threat Scanner.
 Performs fail-fast pre-checks:
 1. MIME type validation (application/pdf)
-2. File size ceiling (50 MB)
+2. File size ceiling (100 MB)
 3. Magic bytes (%PDF-)
 4. Trailer marker (%%EOF)
 5. Threat scanning (ClamAV)
@@ -12,12 +12,15 @@ Performs fail-fast pre-checks:
 
 import hashlib
 import io
+import logging
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
 import pypdf
 
 from src.modules.document_pipeline.models import ScanResult, ValidationResult
+
+logger = logging.getLogger(__name__)
 
 
 class ThreatScanner(ABC):
@@ -48,12 +51,14 @@ class ClamAVScanner(ThreatScanner):
                 detected.append(sig.decode("latin-1", errors="ignore"))
 
         if detected:
+            logger.warning("Threat scan INFECTED: %s", detected)
             return ScanResult(
                 passed=False,
                 threats_detected=detected,
                 details={"scanner": "ClamAV", "verdict": "INFECTED", "threats": detected},
             )
 
+        logger.debug("Threat scan CLEAN")
         return ScanResult(
             passed=True,
             threats_detected=[],
@@ -186,6 +191,10 @@ class FileValidator:
 
         # 8. SHA-256 Checksum Calculation
         sha256 = hashlib.sha256(data).hexdigest()
+        logger.info(
+            "Validation PASSED: size=%d pages=%d sha256=%s",
+            size, page_count, sha256,
+        )
 
         return ValidationResult(
             is_valid=True,

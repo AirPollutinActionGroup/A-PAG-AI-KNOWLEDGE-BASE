@@ -1,5 +1,6 @@
 """PostgreSQL and In-Memory Document Repository implementations."""
 
+import logging
 import uuid
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from src.db.enums import DocumentStatus
 from src.db.models import Document as DocumentORM
 from src.modules.document_pipeline.models import Document as DocumentDTO
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentRepository(ABC):

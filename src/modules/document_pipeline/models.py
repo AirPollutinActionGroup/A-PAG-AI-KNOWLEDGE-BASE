@@ -2,33 +2,12 @@
 
 import uuid
 from datetime import UTC, datetime
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-
-class DocumentStatus(str, Enum):
-    """Document lifecycle states."""
-
-    UPLOADED = "UPLOADED"
-    QUARANTINED = "QUARANTINED"
-    VALIDATED = "VALIDATED"
-    VALIDATION_FAILED = "VALIDATION_FAILED"
-    REJECTED = "REJECTED"
-    AWAITING_CLASSIFICATION = "AWAITING_CLASSIFICATION"
-    DUPLICATE = "DUPLICATE"
-    LIVE = "LIVE"
-    SUPERSEDED = "SUPERSEDED"
-    ARCHIVED = "ARCHIVED"
-
-
-class Classification(str, Enum):
-    """2-tier data access classification."""
-
-    PUBLIC = "PUBLIC"
-    RESTRICTED = "RESTRICTED"
-    NULL = "NULL"
+# Single source of truth for enums — imported from db layer
+from src.db.enums import Classification, DocumentStatus
 
 
 class UploadRequest(BaseModel):

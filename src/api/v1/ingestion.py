@@ -2,6 +2,7 @@
 Handles document upload, quarantine validation, status queries, and versioning.
 """
 
+import logging
 import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
@@ -12,9 +13,14 @@ from src.modules.document_pipeline.models import (
     UploadRequest,
     UploadResponse,
 )
-from src.modules.document_pipeline.repository import InMemoryDocumentRepository
+from src.modules.document_pipeline.repository import (
+    InMemoryDocumentRepository,
+    PostgreSQLDocumentRepository,
+)
 from src.modules.document_pipeline.upload_service import UploadService
 from src.storage.bucket_manager import BucketManager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["Document Ingestion Pipeline"])
 
@@ -25,7 +31,34 @@ _buckets = BucketManager(
     secret_key=settings.MINIO_SECRET_KEY,
     secure=settings.MINIO_SECURE,
 )
-_repo = InMemoryDocumentRepository()
+
+
+def _create_repository():
+    """Create the appropriate repository based on environment.
+
+    Uses PostgreSQL in production for durable persistence.
+    Falls back to InMemoryDocumentRepository if DB is unavailable.
+    """
+    if settings.ENVIRONMENT == "development":
+        logger.info("Repository backend: InMemory (development mode)")
+        return InMemoryDocumentRepository()
+
+    try:
+        from src.db.engine import SessionLocal
+        db = SessionLocal()
+        repo = PostgreSQLDocumentRepository(db)
+        logger.info("Repository backend: PostgreSQL (%s)", settings.POSTGRES_HOST)
+        return repo
+    except Exception:
+        logger.warning(
+            "PostgreSQL unavailable, falling back to InMemory repository. "
+            "Data will NOT survive server restarts.",
+            exc_info=True,
+        )
+        return InMemoryDocumentRepository()
+
+
+_repo = _create_repository()
 _upload_service = UploadService(bucket_manager=_buckets, repository=_repo)
 
 

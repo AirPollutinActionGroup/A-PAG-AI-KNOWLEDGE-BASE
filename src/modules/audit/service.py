@@ -1,5 +1,6 @@
 """Audit service for writing immutable audit trail entries."""
 
+import logging
 import uuid
 from typing import Any
 
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from src.db.enums import AuditEventType
 from src.db.models import AuditLog
+
+logger = logging.getLogger(__name__)
 
 
 class AuditService:
@@ -33,4 +36,8 @@ class AuditService:
         db.add(entry)
         db.commit()
         db.refresh(entry)
+        logger.info(
+            "Audit entry: event_id=%s doc_id=%s type=%s user=%s",
+            entry.event_id, document_id, ev_type_str, user_id,
+        )
         return entry
