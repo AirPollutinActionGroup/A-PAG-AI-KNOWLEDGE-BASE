@@ -5,7 +5,12 @@
 import logging
 import threading
 import uuid
+from typing import Any
 
+from sqlalchemy.orm import Session
+
+from src.db.enums import AuditEventType
+from src.modules.audit.service import AuditService
 from src.modules.document_pipeline.models import (
     Document,
     DocumentStatus,
@@ -30,11 +35,41 @@ class UploadService:
         bucket_manager: BucketManager | None = None,
         repository: DocumentRepository | None = None,
         validation_service: ValidationService | None = None,
+        db_session: Session | None = None,
     ):
         self.buckets = bucket_manager or BucketManager()
         self.repo = repository or InMemoryDocumentRepository()
         self.validator = validation_service or ValidationService()
         self._promotion_lock = threading.Lock()
+        self._db = db_session
+
+    def _audit(
+        self,
+        document_id: uuid.UUID,
+        event_type: AuditEventType,
+        details: dict[str, Any] | None = None,
+        correlation_id: uuid.UUID | None = None,
+    ) -> None:
+        """Best-effort audit log write. Logs warning on failure, never blocks pipeline."""
+        if self._db is None:
+            logger.debug(
+                "Audit skipped (no db session): doc_id=%s event=%s",
+                document_id, event_type.value,
+            )
+            return
+        try:
+            AuditService.log_event(
+                db=self._db,
+                document_id=document_id,
+                event_type=event_type,
+                details=details,
+                correlation_id=correlation_id,
+            )
+        except Exception:
+            logger.warning(
+                "Audit write failed: doc_id=%s event=%s",
+                document_id, event_type.value, exc_info=True,
+            )
 
     def upload(
         self,
@@ -75,6 +110,13 @@ class UploadService:
         )
         self.repo.create(doc)
 
+        # AUDIT: Document received and quarantined
+        self._audit(document_id, AuditEventType.DOCUMENT_QUARANTINED, details={
+            "filename": filename, "size_bytes": len(data),
+            "classification": meta.classification.value,
+            "quarantine_key": quarantine_key,
+        })
+
         # -------------------------------------------------------------
         # STAGE 2: Fail-Fast Pre-checks & Threat Scan
         # -------------------------------------------------------------
@@ -92,6 +134,12 @@ class UploadService:
             doc.status = DocumentStatus.REJECTED
             doc.rejection_reason = validation.rejection_reason
             self.repo.update_document(doc)
+
+            # AUDIT: Validation failed → document rejected
+            self._audit(document_id, AuditEventType.DOCUMENT_REJECTED, details={
+                "filename": filename, "rejection_reason": validation.rejection_reason,
+                "file_size_bytes": len(data),
+            })
 
             # Purge infected/corrupt object from quarantine
             self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
@@ -120,6 +168,14 @@ class UploadService:
                 doc.status = DocumentStatus.DUPLICATE
                 self.repo.update_document(doc)
                 self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
+
+                # AUDIT: Duplicate detected → rejected
+                self._audit(document_id, AuditEventType.DOCUMENT_REJECTED, details={
+                    "filename": filename, "reason": "DUPLICATE",
+                    "canonical_document_id": str(existing_doc.id),
+                    "sha256": validation.sha256,
+                })
+
                 logger.info(
                     "DUPLICATE: doc_id=%s matches canonical=%s sha256=%s",
                     document_id, existing_doc.id, validation.sha256,
@@ -148,6 +204,14 @@ class UploadService:
                     else:
                         prior_doc.status = DocumentStatus.ARCHIVED
                     self.repo.update_document(prior_doc)
+
+                    # AUDIT: Prior document superseded
+                    self._audit(prior_doc.id, AuditEventType.DOCUMENT_SUPERSEDED, details={
+                        "superseded_by": str(document_id),
+                        "new_version": doc.version,
+                        "prior_status": prior_doc.status.value,
+                    })
+
                     logger.info(
                         "VERSIONED: doc_id=%s v%d supersedes=%s (prior now %s)",
                         document_id, doc.version, prior_doc.id, prior_doc.status.value,
@@ -191,6 +255,17 @@ class UploadService:
             doc.raw_path = f"{self.buckets.raw}/{raw_key}"
             doc.quarantine_path = None
             self.repo.update_document(doc)
+
+            # AUDIT: Validation passed + promoted to raw
+            self._audit(document_id, AuditEventType.VALIDATION_PASSED, details={
+                "sha256": validation.sha256, "page_count": validation.page_count,
+                "file_size_bytes": validation.file_size_bytes,
+            })
+            self._audit(document_id, AuditEventType.DOCUMENT_PROMOTED, details={
+                "raw_path": doc.raw_path, "sha256": validation.sha256,
+                "version": doc.version,
+            })
+
             logger.info(
                 "PROMOTED: doc_id=%s -> %s sha256=%s",
                 document_id, doc.raw_path, validation.sha256,

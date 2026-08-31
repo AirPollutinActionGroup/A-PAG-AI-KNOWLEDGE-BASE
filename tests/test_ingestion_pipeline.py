@@ -581,3 +581,83 @@ def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
                 f"Duplicate response did not return winning doc ID! Got: {r.document_id}"
             assert r.was_duplicate is True
 
+
+# ==============================================================================
+# 7. AUDIT WIRING INTEGRATION
+# ==============================================================================
+
+def test_upload_writes_audit_events_on_promotion(tmp_path):
+    """Upload a valid PDF and verify audit_log has QUARANTINED, VALIDATION_PASSED, PROMOTED events in order."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+        buckets = BucketManager(storage=storage)
+        repo = InMemoryDocumentRepository()
+        service = UploadService(
+            bucket_manager=buckets, repository=repo, db_session=db,
+        )
+
+        with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+            data = f.read()
+
+        resp = service.upload(filename="audit_test.pdf", data=data)
+        assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
+
+        # Query audit_log — must have exactly 3 events in order
+        events = db.query(AuditLog).filter(
+            AuditLog.document_id == resp.document_id
+        ).order_by(AuditLog.event_id).all()
+
+        event_types = [e.event_type for e in events]
+        assert event_types == [
+            AuditEventType.DOCUMENT_QUARANTINED.value,
+            AuditEventType.VALIDATION_PASSED.value,
+            AuditEventType.DOCUMENT_PROMOTED.value,
+        ], f"Expected [QUARANTINED, VALIDATION_PASSED, PROMOTED], got {event_types}"
+
+        # Verify details contain useful context
+        quarantine_event = events[0]
+        assert quarantine_event.details["filename"] == "audit_test.pdf"
+        assert quarantine_event.details["size_bytes"] == len(data)
+
+        promoted_event = events[2]
+        assert "raw_path" in promoted_event.details
+        assert "sha256" in promoted_event.details
+
+
+def test_upload_writes_audit_events_on_rejection(tmp_path):
+    """Upload a corrupt PDF and verify audit_log has QUARANTINED and REJECTED events."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+        buckets = BucketManager(storage=storage)
+        repo = InMemoryDocumentRepository()
+        service = UploadService(
+            bucket_manager=buckets, repository=repo, db_session=db,
+        )
+
+        with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
+            data = f.read()
+
+        resp = service.upload(filename="corrupt_audit.pdf", data=data)
+        assert resp.status == DocumentStatus.REJECTED
+
+        # Query audit_log — must have exactly 2 events
+        events = db.query(AuditLog).filter(
+            AuditLog.document_id == resp.document_id
+        ).order_by(AuditLog.event_id).all()
+
+        event_types = [e.event_type for e in events]
+        assert event_types == [
+            AuditEventType.DOCUMENT_QUARANTINED.value,
+            AuditEventType.DOCUMENT_REJECTED.value,
+        ], f"Expected [QUARANTINED, REJECTED], got {event_types}"
+
+        # Verify rejection details include the reason
+        rejected_event = events[1]
+        assert "rejection_reason" in rejected_event.details
+        assert "CORRUPTED_PDF_STRUCTURE" in rejected_event.details["rejection_reason"]
