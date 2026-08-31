@@ -79,6 +79,18 @@ def _ensure_fixtures():
 
 
 _ensure_fixtures()
+
+# In-memory repository and test client for unit tests
+_test_repo = InMemoryDocumentRepository()
+_test_storage = LocalFileSystemStorage(base_dir="./storage_data/test_unit")
+_test_buckets = BucketManager(storage=_test_storage)
+_test_upload_service = UploadService(bucket_manager=_test_buckets, repository=_test_repo)
+
+from src.api.v1.ingestion import get_document_repository, get_upload_service
+
+app.dependency_overrides[get_document_repository] = lambda: _test_repo
+app.dependency_overrides[get_upload_service] = lambda: _test_upload_service
+
 client = TestClient(app)
 
 

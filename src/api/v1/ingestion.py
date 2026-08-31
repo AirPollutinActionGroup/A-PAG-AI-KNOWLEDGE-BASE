@@ -5,16 +5,18 @@ Handles document upload, quarantine validation, status queries, and versioning.
 import logging
 import uuid
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
 
 from src.core.config import settings
+from src.db.engine import get_db
 from src.modules.document_pipeline.models import (
     Classification,
     UploadRequest,
     UploadResponse,
 )
 from src.modules.document_pipeline.repository import (
-    InMemoryDocumentRepository,
+    DocumentRepository,
     PostgreSQLDocumentRepository,
 )
 from src.modules.document_pipeline.upload_service import UploadService
@@ -24,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["Document Ingestion Pipeline"])
 
-# Shared singleton services for API layer
+# Shared storage bucket manager singleton
 _buckets = BucketManager(
     endpoint=settings.MINIO_ENDPOINT,
     access_key=settings.MINIO_ACCESS_KEY,
@@ -33,33 +35,17 @@ _buckets = BucketManager(
 )
 
 
-def _create_repository():
-    """Create the appropriate repository based on environment.
-
-    Uses PostgreSQL in production for durable persistence.
-    Falls back to InMemoryDocumentRepository if DB is unavailable.
-    """
-    if settings.ENVIRONMENT == "development":
-        logger.info("Repository backend: InMemory (development mode)")
-        return InMemoryDocumentRepository()
-
-    try:
-        from src.db.engine import SessionLocal
-        db = SessionLocal()
-        repo = PostgreSQLDocumentRepository(db)
-        logger.info("Repository backend: PostgreSQL (%s)", settings.POSTGRES_HOST)
-        return repo
-    except Exception:
-        logger.warning(
-            "PostgreSQL unavailable, falling back to InMemory repository. "
-            "Data will NOT survive server restarts.",
-            exc_info=True,
-        )
-        return InMemoryDocumentRepository()
+def get_document_repository(db: Session = Depends(get_db)) -> DocumentRepository:
+    """Dependency provider returning production PostgreSQL document repository."""
+    return PostgreSQLDocumentRepository(db)
 
 
-_repo = _create_repository()
-_upload_service = UploadService(bucket_manager=_buckets, repository=_repo)
+def get_upload_service(
+    repo: DocumentRepository = Depends(get_document_repository),
+    db: Session = Depends(get_db),
+) -> UploadService:
+    """Dependency provider returning UploadService with wired repo, storage, and audit session."""
+    return UploadService(bucket_manager=_buckets, repository=repo, db_session=db)
 
 
 @router.post(
@@ -82,6 +68,7 @@ async def upload_document(
         True,
         description="True to keep old version as SUPERSEDED; False to ARCHIVE",
     ),
+    upload_service: UploadService = Depends(get_upload_service),
 ):
     """Stage 1: Ingests PDF into quarantine, runs validation, and promotes or rejects."""
     # 1. MIME type validation check
@@ -101,7 +88,7 @@ async def upload_document(
     )
 
     # 3. Process through upload service
-    result = _upload_service.upload(
+    result = upload_service.upload(
         filename=file.filename or "unknown.pdf",
         data=content,
         request_meta=req_meta,
@@ -120,9 +107,12 @@ async def upload_document(
     "/{document_id}/status",
     summary="Query document processing and validation status",
 )
-async def get_document_status(document_id: uuid.UUID):
+async def get_document_status(
+    document_id: uuid.UUID,
+    repo: DocumentRepository = Depends(get_document_repository),
+):
     """Returns the current lifecycle status, storage location, and version details."""
-    doc = _repo.get_by_id(document_id)
+    doc = repo.get_by_id(document_id)
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -135,9 +125,11 @@ async def get_document_status(document_id: uuid.UUID):
     "",
     summary="List all ingested documents",
 )
-async def list_documents():
+async def list_documents(
+    repo: DocumentRepository = Depends(get_document_repository),
+):
     """Lists all ingested documents recorded in the repository."""
-    return _repo.get_all()
+    return repo.get_all()
 
 
 @router.get(
