@@ -1,5 +1,5 @@
-"""Master Test Suite for Document Ingestion Pipeline (Stages 1–3).
-Pure Ingestion Pipeline verification without extraction/normalization.
+"""Unit Test Suite for Document Ingestion Pipeline (Stages 1–3).
+Fast, in-memory & SQLite verification without requiring real PostgreSQL.
 """
 
 import io
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pypdf
 import pytest
-from sqlalchemy import create_engine, exc, text, event
+from sqlalchemy import create_engine, exc, text
 from sqlalchemy.orm import Session
 from starlette.testclient import TestClient
 
@@ -28,7 +28,7 @@ from src.modules.document_pipeline.validation import FileValidator
 from src.storage.bucket_manager import BucketManager
 from src.storage.object_storage import LocalFileSystemStorage
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "pdfs"
+FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pdfs"
 
 
 def _ensure_fixtures():
@@ -208,10 +208,7 @@ def test_reject_oversized_file():
 
 
 def test_reject_non_pdf_files():
-    """Test rejection of files that aren't real PDFs — wrong MIME, wrong magic bytes, disguised binary.
-
-    Merged test: covers MIME-type mismatch, PNG data, and .exe-renamed-to-.pdf in one test.
-    """
+    """Test rejection of files that aren't real PDFs — wrong MIME, wrong magic bytes, disguised binary."""
     validator = FileValidator()
 
     # Case 1: Declared MIME type mismatch
@@ -256,11 +253,7 @@ def test_reject_truncated_eof_pdf(tmp_path):
 
 
 def test_reject_structural_threats(tmp_path):
-    """Test threat scanner rejects PDFs containing /Launch, /JavaScript, powershell.exe markers.
-
-    Renamed from 'test_reject_malicious_script_exploit' to be honest:
-    this tests our signature-based scanner, not real ClamAV.
-    """
+    """Test threat scanner rejects PDFs containing /Launch, /JavaScript, powershell.exe markers."""
     service = UploadService(bucket_manager=BucketManager(storage=LocalFileSystemStorage(str(tmp_path))))
     with open(FIXTURES_DIR / "08_malicious_script_exploit.pdf", "rb") as f:
         data = f.read()
@@ -298,7 +291,6 @@ def test_quarantine_deleted_after_promotion(tmp_path):
     resp = service.upload(filename="promote_test.pdf", data=data)
     assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
 
-    # The quarantine key should have been deleted during promotion
     quarantine_key = resp.quarantine_key
     assert not storage.object_exists(buckets.quarantine, quarantine_key), \
         "Quarantine object was NOT purged after promotion — data leak risk."
@@ -317,7 +309,6 @@ def test_quarantine_deleted_after_rejection(tmp_path):
     resp = service.upload(filename="reject_cleanup.pdf", data=data)
     assert resp.status == DocumentStatus.REJECTED
 
-    # Quarantine must be clean — no corrupt/infected files lingering
     quarantine_key = resp.quarantine_key
     assert not storage.object_exists(buckets.quarantine, quarantine_key), \
         "Quarantine object was NOT purged after rejection — toxic file lingering."
@@ -330,13 +321,11 @@ def test_rejected_pdf_never_reaches_raw(tmp_path):
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
 
-    # Upload corrupt PDF
     with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
         data = f.read()
     resp = service.upload(filename="should_not_land_in_raw.pdf", data=data)
     assert resp.status == DocumentStatus.REJECTED
 
-    # Scan the entire raw bucket directory — nothing should be there for this upload
     import os
     raw_dir = os.path.join(str(tmp_path), buckets.raw)
     if os.path.exists(raw_dir):
@@ -355,15 +344,12 @@ def test_dedup_short_circuits_storage(tmp_path):
     with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
         data = f.read()
 
-    # First upload — lands in raw
     res1 = service.upload(filename="original.pdf", data=data)
     assert res1.status == DocumentStatus.AWAITING_CLASSIFICATION
 
-    # Second upload — should be marked DUPLICATE
     res2 = service.upload(filename="copy.pdf", data=data)
     assert res2.status == DocumentStatus.DUPLICATE
 
-    # Count objects in raw bucket — must be exactly 1
     import os
     raw_dir = os.path.join(str(tmp_path), buckets.raw)
     raw_files = os.listdir(raw_dir)
@@ -372,15 +358,10 @@ def test_dedup_short_circuits_storage(tmp_path):
 
 
 def test_audit_log_immutability():
-    """Test that UPDATE on audit_log rows is rejected by the database.
-
-    The audit_log table is meant to be append-only. This test creates a trigger
-    that blocks UPDATEs, writes an entry, then verifies the UPDATE is rejected.
-    """
+    """Test that UPDATE on audit_log rows is rejected by SQLite trigger."""
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
 
-    # Install a trigger that rejects UPDATEs on audit_log
     with engine.connect() as conn:
         conn.execute(text("""
             CREATE TRIGGER trg_audit_log_immutable
@@ -405,7 +386,6 @@ def test_audit_log_immutability():
         )
         event_id = entry.event_id
 
-    # Attempt to UPDATE — must fail
     with Session(engine) as session:
         with pytest.raises(exc.IntegrityError, match="AUDIT_LOG_IMMUTABLE"):
             session.execute(
@@ -439,7 +419,6 @@ def test_api_upload_returns_202():
     doc_id = res.json()["document_id"]
     assert res.json()["status"] == "AWAITING_CLASSIFICATION"
 
-    # Verify status endpoint
     status_res = client.get(f"/api/v1/documents/{doc_id}/status")
     assert status_res.status_code == 200
     assert status_res.json()["status"] == "AWAITING_CLASSIFICATION"
@@ -498,7 +477,6 @@ def test_check_constraint_rejects_invalid_enum_values():
     Base.metadata.create_all(bind=engine)
 
     with Session(engine) as session:
-        # Invalid status not in check constraint
         invalid_doc = DocORM(
             document_id=uuid.uuid4(),
             filename="invalid.pdf",
@@ -515,16 +493,7 @@ def test_check_constraint_rejects_invalid_enum_values():
 # ==============================================================================
 
 def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
-    """Test that N simultaneous uploads of the exact same PDF race safely.
-
-    Uses threading.Barrier to force 5 threads to hit the upload endpoint simultaneously.
-    Asserts:
-    1. Exactly 1 upload is promoted to AWAITING_CLASSIFICATION.
-    2. Exactly 4 uploads are recognized as DUPLICATE.
-    3. Exactly 1 file exists in raw storage.
-    4. 0 leftover files in quarantine storage.
-    5. Duplicate responses return the winner's canonical document_id.
-    """
+    """Test that N simultaneous uploads of the exact same PDF race safely."""
     import os
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -542,7 +511,7 @@ def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
     results = []
 
     def upload_worker(idx: int):
-        barrier.wait()  # Synchronize all threads to execute upload at the exact same instant
+        barrier.wait()
         resp = service.upload(
             filename=f"concurrent_doc_{idx}.pdf",
             data=pdf_bytes,
@@ -554,31 +523,22 @@ def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
         futures = [pool.submit(upload_worker, i) for i in range(num_threads)]
         results = [f.result() for f in futures]
 
-    # Invariant 1: Exactly 1 promoted, rest marked duplicate
     statuses = [r.status for r in results]
-    assert statuses.count(DocumentStatus.AWAITING_CLASSIFICATION) == 1, \
-        f"Expected exactly 1 promoted, got: {statuses}"
-    assert statuses.count(DocumentStatus.DUPLICATE) == num_threads - 1, \
-        f"Expected {num_threads - 1} duplicates, got: {statuses}"
+    assert statuses.count(DocumentStatus.AWAITING_CLASSIFICATION) == 1
+    assert statuses.count(DocumentStatus.DUPLICATE) == num_threads - 1
 
-    # Invariant 2: Exactly 1 file in raw storage
     raw_dir = os.path.join(str(tmp_path), buckets.raw)
     raw_files = os.listdir(raw_dir)
-    assert len(raw_files) == 1, \
-        f"Dedup race failed! Expected 1 raw file, found {len(raw_files)}: {raw_files}"
+    assert len(raw_files) == 1
 
-    # Invariant 3: Zero leftover files in quarantine storage
     quarantine_dir = os.path.join(str(tmp_path), buckets.quarantine)
     quarantine_files = os.listdir(quarantine_dir) if os.path.exists(quarantine_dir) else []
-    assert len(quarantine_files) == 0, \
-        f"Quarantine leak! Found lingering files: {quarantine_files}"
+    assert len(quarantine_files) == 0
 
-    # Invariant 4: All duplicates reference the winning canonical document ID
     winner_doc_id = [r.document_id for r in results if r.status == DocumentStatus.AWAITING_CLASSIFICATION][0]
     for r in results:
         if r.status == DocumentStatus.DUPLICATE:
-            assert r.document_id == winner_doc_id, \
-                f"Duplicate response did not return winning doc ID! Got: {r.document_id}"
+            assert r.document_id == winner_doc_id
             assert r.was_duplicate is True
 
 
@@ -605,7 +565,6 @@ def test_upload_writes_audit_events_on_promotion(tmp_path):
         resp = service.upload(filename="audit_test.pdf", data=data)
         assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
 
-        # Query audit_log — must have exactly 3 events in order
         events = db.query(AuditLog).filter(
             AuditLog.document_id == resp.document_id
         ).order_by(AuditLog.event_id).all()
@@ -615,9 +574,8 @@ def test_upload_writes_audit_events_on_promotion(tmp_path):
             AuditEventType.DOCUMENT_QUARANTINED.value,
             AuditEventType.VALIDATION_PASSED.value,
             AuditEventType.DOCUMENT_PROMOTED.value,
-        ], f"Expected [QUARANTINED, VALIDATION_PASSED, PROMOTED], got {event_types}"
+        ]
 
-        # Verify details contain useful context
         quarantine_event = events[0]
         assert quarantine_event.details["filename"] == "audit_test.pdf"
         assert quarantine_event.details["size_bytes"] == len(data)
@@ -626,11 +584,9 @@ def test_upload_writes_audit_events_on_promotion(tmp_path):
         assert "raw_path" in promoted_event.details
         assert "sha256" in promoted_event.details
 
-        # Verify all events share the same correlation_id (non-None)
         corr_ids = [e.correlation_id for e in events]
-        assert all(c is not None for c in corr_ids), "correlation_id must not be None"
-        assert len(set(str(c) for c in corr_ids)) == 1, \
-            f"All events from one upload must share the same correlation_id, got {corr_ids}"
+        assert all(c is not None for c in corr_ids)
+        assert len(set(str(c) for c in corr_ids)) == 1
 
 
 def test_upload_writes_audit_events_on_rejection(tmp_path):
@@ -652,7 +608,6 @@ def test_upload_writes_audit_events_on_rejection(tmp_path):
         resp = service.upload(filename="corrupt_audit.pdf", data=data)
         assert resp.status == DocumentStatus.REJECTED
 
-        # Query audit_log — must have exactly 2 events
         events = db.query(AuditLog).filter(
             AuditLog.document_id == resp.document_id
         ).order_by(AuditLog.event_id).all()
@@ -661,15 +616,12 @@ def test_upload_writes_audit_events_on_rejection(tmp_path):
         assert event_types == [
             AuditEventType.DOCUMENT_QUARANTINED.value,
             AuditEventType.DOCUMENT_REJECTED.value,
-        ], f"Expected [QUARANTINED, REJECTED], got {event_types}"
+        ]
 
-        # Verify rejection details include the reason
         rejected_event = events[1]
         assert "rejection_reason" in rejected_event.details
         assert "CORRUPTED_PDF_STRUCTURE" in rejected_event.details["rejection_reason"]
 
-        # Verify all events share the same correlation_id (non-None)
         corr_ids = [e.correlation_id for e in events]
-        assert all(c is not None for c in corr_ids), "correlation_id must not be None"
-        assert len(set(str(c) for c in corr_ids)) == 1, \
-            f"All events from one upload must share the same correlation_id, got {corr_ids}"
+        assert all(c is not None for c in corr_ids)
+        assert len(set(str(c) for c in corr_ids)) == 1
