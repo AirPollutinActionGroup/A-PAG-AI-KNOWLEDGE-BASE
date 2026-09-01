@@ -68,14 +68,16 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         )
 
     def create(self, doc: DocumentDTO) -> DocumentDTO:
+        status_val = doc.status.value if hasattr(doc.status, "value") else str(doc.status)
+        class_val = doc.classification.value if hasattr(doc.classification, "value") else str(doc.classification)
         orm = DocumentORM(
             document_id=doc.id,
             filename=doc.filename,
             uploader_user_id=doc.owner_id,
             file_size=doc.size,
             sha256=doc.checksum,
-            status=doc.status.value if isinstance(doc.status, DocumentStatus) else str(doc.status),
-            classification=str(doc.classification),
+            status=status_val,
+            classification=class_val,
             version=doc.version,
             supersedes_id=doc.supersedes_id,
             quarantine_path=doc.quarantine_path,
@@ -88,7 +90,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         return self._to_dto(orm)
 
     def update_status(self, doc_id: uuid.UUID, status: DocumentStatus | str) -> None:
-        st_val = status.value if isinstance(status, DocumentStatus) else str(status)
+        st_val = status.value if hasattr(status, "value") else str(status)
         stmt = select(DocumentORM).where(DocumentORM.document_id == doc_id)
         orm = self.db.execute(stmt).scalar_one_or_none()
         if orm:
@@ -112,7 +114,9 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         stmt = select(DocumentORM).where(DocumentORM.document_id == doc.id)
         orm = self.db.execute(stmt).scalar_one_or_none()
         if orm:
-            orm.status = doc.status.value if isinstance(doc.status, DocumentStatus) else str(doc.status)
+            orm.status = doc.status.value if hasattr(doc.status, "value") else str(doc.status)
+            if hasattr(doc, "classification") and doc.classification:
+                orm.classification = doc.classification.value if hasattr(doc.classification, "value") else str(doc.classification)
             orm.sha256 = doc.checksum
             orm.raw_path = doc.raw_path
             orm.quarantine_path = doc.quarantine_path
