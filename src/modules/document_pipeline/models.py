@@ -61,7 +61,7 @@ class Document(BaseModel):
     size: int
     checksum: str | None = None
     status: DocumentStatus = DocumentStatus.UPLOADED
-    classification: Classification = Classification.NULL
+    classification: Classification | None = None
     version: int = 1
     supersedes_id: uuid.UUID | None = None
     quarantine_path: str | None = None

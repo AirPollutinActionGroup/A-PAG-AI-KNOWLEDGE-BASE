@@ -54,11 +54,10 @@ class Document(Base):
         server_default=DocumentStatus.UPLOADED.value,
         index=True,
     )
-    classification: Mapped[str] = mapped_column(
+    classification: Mapped[str | None] = mapped_column(
         String(50),
-        nullable=False,
-        default=Classification.NULL.value,
-        server_default=Classification.NULL.value,
+        nullable=True,
+        default=None,
     )
 
     # Versioning
@@ -105,7 +104,7 @@ class Document(Base):
             name="chk_documents_status",
         ),
         CheckConstraint(
-            "classification IN ('PUBLIC', 'RESTRICTED', 'NULL')",
+            "classification IS NULL OR classification IN ('PUBLIC', 'RESTRICTED')",
             name="chk_documents_classification",
         ),
         Index(

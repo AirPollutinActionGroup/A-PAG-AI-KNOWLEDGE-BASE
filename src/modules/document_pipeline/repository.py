@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.db.enums import DocumentStatus
+from src.db.enums import Classification, DocumentStatus
 from src.db.models import Document as DocumentORM
 from src.modules.document_pipeline.models import Document as DocumentDTO
 
@@ -57,7 +57,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             size=orm.file_size,
             checksum=orm.sha256,
             status=DocumentStatus(orm.status),
-            classification=orm.classification,
+            classification=Classification(orm.classification) if orm.classification else None,
             version=orm.version,
             supersedes_id=orm.supersedes_id,
             quarantine_path=orm.quarantine_path,
