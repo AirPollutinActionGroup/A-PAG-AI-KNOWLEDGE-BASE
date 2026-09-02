@@ -52,7 +52,7 @@ class ScanJobHandler:
         details: dict[str, Any] | None = None,
         correlation_id: uuid.UUID | None = None,
     ) -> None:
-        """Best-effort audit log write. Logs error on failure, never blocks pipeline."""
+        """Best-effort audit log write. Prevents duplicate audit events on re-try."""
         if self._db is None:
             logger.debug(
                 "Audit skipped (no db session): doc_id=%s event=%s",
@@ -60,6 +60,23 @@ class ScanJobHandler:
             )
             return
         try:
+            # Idempotency guard: do not write duplicate audit events for the same document and event_type
+            from src.db.models import AuditLog
+            existing = (
+                self._db.query(AuditLog)
+                .filter(
+                    AuditLog.document_id == document_id,
+                    AuditLog.event_type == event_type.value,
+                )
+                .first()
+            )
+            if existing:
+                logger.debug(
+                    "Audit duplicate ignored: doc_id=%s event=%s",
+                    document_id, event_type.value,
+                )
+                return
+
             AuditService.log_event(
                 db=self._db,
                 document_id=document_id,
@@ -98,6 +115,31 @@ class ScanJobHandler:
             )
 
         filename = doc.filename
+
+        # Idempotency guard: If document is already promoted or finalized, return existing state
+        if doc.status in (DocumentStatus.AWAITING_CLASSIFICATION, DocumentStatus.LIVE):
+            logger.info("Scan job: doc_id=%s already in %s, skipping re-scan", document_id, doc.status.value)
+            return UploadResponse(
+                document_id=document_id,
+                filename=filename,
+                status=doc.status,
+                quarantine_key=quarantine_key,
+                checksum=doc.checksum,
+                was_duplicate=False,
+                message="Document already processed and promoted.",
+            )
+        if doc.status in (DocumentStatus.REJECTED, DocumentStatus.DUPLICATE):
+            logger.info("Scan job: doc_id=%s already finalized as %s", document_id, doc.status.value)
+            return UploadResponse(
+                document_id=document_id,
+                filename=filename,
+                status=doc.status,
+                quarantine_key=quarantine_key,
+                checksum=doc.checksum,
+                rejection_reason=doc.rejection_reason,
+                was_duplicate=(doc.status == DocumentStatus.DUPLICATE),
+                message=f"Document already finalized: {doc.rejection_reason}",
+            )
 
         # 2. Retrieve bytes from quarantine storage
         try:

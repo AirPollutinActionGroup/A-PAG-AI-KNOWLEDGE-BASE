@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     WORKER_POLL_INTERVAL_SECONDS: float = 1.0
     SCAN_WORKER_LEASE_SECONDS: int = 60
     WORKER_HEARTBEAT_FILE: str = "/tmp/worker_alive"
+    MAX_JOB_RETRIES: int = 3
+    RETRY_BACKOFF_BASE_SECONDS: int = 5
+    RETRY_BACKOFF_MAX_SECONDS: int = 60
+    REAPER_INTERVAL_SECONDS: int = 30
 
     model_config = SettingsConfigDict(
         env_file=".env",
