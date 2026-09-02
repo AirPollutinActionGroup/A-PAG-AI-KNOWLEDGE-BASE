@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "apag_secure_password_2026"
     MINIO_SECURE: bool = False
 
+    # Worker Configuration
+    WORKER_POLL_INTERVAL_SECONDS: float = 1.0
+    SCAN_WORKER_LEASE_SECONDS: int = 60
+    WORKER_HEARTBEAT_FILE: str = "/tmp/worker_alive"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
