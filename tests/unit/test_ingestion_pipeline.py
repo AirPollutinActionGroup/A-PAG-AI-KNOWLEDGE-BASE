@@ -7,6 +7,7 @@ import io
 import os
 import threading
 import uuid
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -667,3 +668,51 @@ def test_upload_writes_audit_events_on_rejection(tmp_path):
         corr_ids = [e.correlation_id for e in events]
         assert all(c is not None for c in corr_ids)
         assert len(set(str(c) for c in corr_ids)) == 1
+
+
+# ==============================================================================
+# 8. CHECK 9: DECOMPRESSION BOMB DETECTION TESTS
+# ==============================================================================
+
+def test_reject_decompression_bomb_pdf(tmp_path):
+    """Test rejection when a PDF stream exceeds maximum expansion ratio (Check #9)."""
+    buckets = BucketManager(storage=LocalFileSystemStorage(str(tmp_path)))
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
+    # Construct a PDF containing an artificially high-ratio compressed stream (1000x > 200x limit)
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    bomb_bytes = zlib.compress(b"0" * 500_000)
+    stream_dict = pypdf.generic.DictionaryObject()
+    stream_dict[pypdf.generic.NameObject("/Length")] = pypdf.generic.NumberObject(len(bomb_bytes))
+    stream_dict[pypdf.generic.NameObject("/Filter")] = pypdf.generic.NameObject("/FlateDecode")
+    enc_stream = pypdf.generic.EncodedStreamObject()
+    enc_stream._data = bomb_bytes
+    enc_stream.update(stream_dict)
+    writer._add_object(enc_stream)
+
+    buf = io.BytesIO()
+    writer.write(buf)
+    pdf_data = buf.getvalue()
+
+    res = upload_and_process_sync(service, handler, "bomb.pdf", pdf_data)
+    assert res.status == DocumentStatus.REJECTED
+    assert "DECOMPRESSION_BOMB_SUSPECTED" in (res.rejection_reason or "")
+
+
+def test_accept_normal_pdf_with_reasonable_compression(tmp_path):
+    """Regression guard: test that normal PDFs with standard stream compression are accepted."""
+    buckets = BucketManager(storage=LocalFileSystemStorage(str(tmp_path)))
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
+    with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+        pdf_data = f.read()
+
+    res = upload_and_process_sync(service, handler, "normal_policy.pdf", pdf_data)
+    assert res.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert res.rejection_reason is None
+

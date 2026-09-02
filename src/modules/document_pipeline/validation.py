@@ -4,20 +4,23 @@ Performs fail-fast pre-checks:
 2. File size ceiling (100 MB)
 3. Magic bytes (%PDF-)
 4. Trailer marker (%%EOF)
-5. Threat scanning (ClamAV)
+5. Threat scanning (Heuristic / ClamAV interface)
 6. Password protection / encryption check
 7. Bounded page count limit (<= 5000 pages)
 8. SHA-256 calculation
+9. Decompression bomb detection (Stream expansion ratio & absolute size cap)
 """
 
 import hashlib
 import io
 import logging
+import zlib
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pypdf
 
+from src.core.config import settings
 from src.modules.document_pipeline.models import ScanResult, ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -74,8 +77,120 @@ class FileValidator:
     PDF_MAGIC_HEADER = b"%PDF-"
     PDF_EOF_TRAILER = b"%%EOF"
 
-    def __init__(self, scanner: ThreatScanner | None = None):
+    def __init__(
+        self,
+        scanner: ThreatScanner | None = None,
+        max_decompression_ratio: int | None = None,
+        max_single_stream_bytes: int | None = None,
+    ):
         self.scanner = scanner or ClamAVScanner()
+        self.max_decompression_ratio = (
+            max_decompression_ratio or settings.MAX_DECOMPRESSION_RATIO
+        )
+        self.max_single_stream_bytes = (
+            max_single_stream_bytes or settings.MAX_SINGLE_STREAM_DECOMPRESSED_BYTES
+        )
+
+    def _check_stream_for_bomb(
+        self, raw_data: bytes, filter_type: Any, chunk_size: int = 64 * 1024
+    ) -> tuple[bool, int, int]:
+        """Inspects a stream payload incrementally without full in-memory buffer expansion.
+        Returns (is_bomb, compressed_bytes, decompressed_bytes).
+        """
+        compressed_len = len(raw_data)
+        if compressed_len == 0:
+            return False, 0, 0
+
+        max_allowed = min(
+            compressed_len * self.max_decompression_ratio,
+            self.max_single_stream_bytes,
+        )
+
+        filters = []
+        if isinstance(filter_type, list):
+            filters = [str(f) for f in filter_type]
+        elif filter_type is not None:
+            filters = [str(filter_type)]
+
+        # If uncompressed, verify against absolute ceiling directly
+        if not any("Flate" in f for f in filters):
+            if compressed_len > self.max_single_stream_bytes:
+                return True, compressed_len, compressed_len
+            return False, compressed_len, compressed_len
+
+        # Bounded streaming decompression
+        for wbits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+            try:
+                decompressor = zlib.decompressobj(wbits)
+                total_decompressed = 0
+                for i in range(0, compressed_len, chunk_size):
+                    chunk = raw_data[i : i + chunk_size]
+                    remaining_allowed = max_allowed - total_decompressed
+                    unpacked = decompressor.decompress(chunk, remaining_allowed + 1)
+                    total_decompressed += len(unpacked)
+                    if total_decompressed > max_allowed:
+                        return True, compressed_len, total_decompressed
+                return False, compressed_len, total_decompressed
+            except Exception:
+                continue
+
+        return False, compressed_len, compressed_len
+
+    def _check_decompression_bombs(self, reader: pypdf.PdfReader) -> tuple[bool, dict[str, Any]]:
+        """Iterates over all stream objects in the PDF and enforces compression ratio limits."""
+        size = reader.trailer.get("/Size", 0)
+        checked_objects = set()
+
+        # 1. Check all indirect objects in trailer
+        if isinstance(size, int) and size > 0:
+            for i in range(1, size):
+                try:
+                    obj = reader.get_object(i)
+                    if obj is None:
+                        continue
+                    checked_objects.add(id(obj))
+                    if isinstance(obj, (pypdf.generic.EncodedStreamObject, pypdf.generic.StreamObject)) or hasattr(obj, "_data"):
+                        raw_bytes = getattr(obj, "_data", None)
+                        if isinstance(raw_bytes, bytes):
+                            is_bomb, c_len, d_len = self._check_stream_for_bomb(
+                                raw_bytes, obj.get("/Filter")
+                            )
+                            if is_bomb:
+                                ratio = d_len / max(c_len, 1)
+                                return True, {
+                                    "compressed_bytes": c_len,
+                                    "decompressed_bytes": d_len,
+                                    "ratio": ratio,
+                                }
+                except Exception:
+                    continue
+
+        # 2. Check page contents and resources recursively
+        for page in reader.pages:
+            try:
+                contents = page.get_contents()
+                if contents is not None:
+                    content_list = contents if isinstance(contents, list) else [contents]
+                    for c in content_list:
+                        if id(c) in checked_objects:
+                            continue
+                        checked_objects.add(id(c))
+                        raw_bytes = getattr(c, "_data", None)
+                        if isinstance(raw_bytes, bytes):
+                            is_bomb, c_len, d_len = self._check_stream_for_bomb(
+                                raw_bytes, c.get("/Filter")
+                            )
+                            if is_bomb:
+                                ratio = d_len / max(c_len, 1)
+                                return True, {
+                                    "compressed_bytes": c_len,
+                                    "decompressed_bytes": d_len,
+                                    "ratio": ratio,
+                                }
+            except Exception:
+                continue
+
+        return False, {}
 
     def validate(
         self,
@@ -173,6 +288,23 @@ class FileValidator:
                         f"PAGE_LIMIT_EXCEEDED: PDF has {page_count} pages (Max: {self.MAX_PAGE_COUNT})."
                     ),
                 )
+
+            # 9. Decompression Bomb Detection (Checked before proceeding)
+            is_bomb, bomb_details = self._check_decompression_bombs(reader)
+            if is_bomb:
+                return ValidationResult(
+                    is_valid=False,
+                    file_size_bytes=size,
+                    mime_type=declared_mime_type,
+                    rejection_reason=(
+                        f"DECOMPRESSION_BOMB_SUSPECTED: Stream expansion ratio exceeded limit "
+                        f"(Compressed: {bomb_details.get('compressed_bytes', 0)}B, "
+                        f"Decompressed: {bomb_details.get('decompressed_bytes', 0)}B, "
+                        f"Ratio: {bomb_details.get('ratio', 0.0):.1f}x > Max {self.max_decompression_ratio}x)."
+                    ),
+                    scan_result=scan_res,
+                )
+
         except Exception as e:
             err_str = str(e).lower()
             if "encrypt" in err_str or "password" in err_str:

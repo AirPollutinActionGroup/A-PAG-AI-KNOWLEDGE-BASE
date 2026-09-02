@@ -55,3 +55,19 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Status**: Fast-follow UI task.
 - **Context**: The testing Studio UI at `/` was written for the synchronous pipeline and expects terminal `AWAITING_CLASSIFICATION` immediately from `POST /upload`. It needs to be updated to poll `GET /api/v1/documents/{id}/status` every 500ms until terminal state.
 - **Trigger to address**: Before internal user onboarding.
+
+### 8. Malware Scanning: Heuristic Only, Real ClamAV Deliberately Deferred
+- **Status**: Deliberate architectural deferral.
+- **Decision**: After evaluating the actual threat model, we determined real ClamAV-style signature scanning is not justified for Phase 1.
+- **Reasoning**:
+  - Uploads come from trusted internal employees on company-managed devices, sourced from Drive/email that already passed through upstream malware scanning (Google/email provider).
+  - The pipeline never executes or renders PDF content (no PDF viewer, no macro execution, no embedded script execution) — the primary threat ClamAV-style scanning defends against (a viewer executing malicious embedded content) does not apply to how this system processes files.
+  - The heuristic signature scanner (`ClamAVScanner` interface) is kept as a low-cost anomaly flag (detects `/JavaScript`, `/Launch`, `/OpenAction` patterns) — not a claim of real malware protection.
+  - The two threats that DO apply to this system's actual attack surface — parser crashes from malformed structure, and resource exhaustion from oversized/bomb files — are covered by structural validation (checks 1–7) and decompression bomb detection (check 9).
+- **Trigger to revisit and add real ClamAV (`clamd` daemon)**:
+  - External (non-employee) users gain upload access
+  - Documents get distributed/downloaded in ways this system doesn't control (e.g., users can download and open PDFs in Adobe Reader with macros/JS enabled from within the org)
+  - A specific compliance/audit requirement mandates named malware scanning software
+  - A-PAG's platform expands to CEGIS/Prosperiti or other orgs with different risk tolerance
+- **Estimated effort when triggered**: 4–6 hours (`clamd` Docker service, `pyclamd` client, replace `ClamAVScanner` call site, EICAR test).
+

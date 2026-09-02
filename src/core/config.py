@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     RETRY_BACKOFF_MAX_SECONDS: int = 60
     REAPER_INTERVAL_SECONDS: int = 30
 
+    # Validation Security Limits
+    MAX_DECOMPRESSION_RATIO: int = 200
+    MAX_SINGLE_STREAM_DECOMPRESSED_BYTES: int = 500_000_000
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
