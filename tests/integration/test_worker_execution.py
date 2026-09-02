@@ -336,3 +336,47 @@ def test_worker_idempotent_on_retry(postgres_engine, test_storage):
             .all()
         )
         assert len(promoted_audits) == 1, f"Expected 1 DOCUMENT_PROMOTED audit, found {len(promoted_audits)}"
+
+
+def test_worker_processes_jobs_in_order_within_priority(postgres_engine, test_storage):
+    """Verifies that jobs with equal priority are picked up in chronological scheduled_at order."""
+    SessionLocal = sessionmaker(bind=postgres_engine)
+    base_time = datetime.now(timezone.utc) - timedelta(seconds=10)
+
+    doc_ids = [uuid.uuid4() for _ in range(3)]
+    job_ids = [uuid.uuid4() for _ in range(3)]
+
+    with SessionLocal() as session:
+        for idx, (doc_id, job_id) in enumerate(zip(doc_ids, job_ids)):
+            pdf_bytes = _make_valid_pdf_bytes(title=f"Doc {idx}")
+            test_storage.storage.put_object(test_storage.quarantine, f"{doc_id}.pdf", pdf_bytes)
+
+            doc = DocumentORM(
+                document_id=doc_id,
+                filename=f"doc_{idx}.pdf",
+                file_size=len(pdf_bytes),
+                status="QUARANTINED",
+                quarantine_path=f"{test_storage.quarantine}/{doc_id}.pdf",
+            )
+            job = JobORM(
+                job_id=job_id,
+                document_id=doc_id,
+                stage="SCAN",
+                status="PENDING",
+                priority=0,
+                scheduled_at=base_time + timedelta(seconds=idx * 2),
+            )
+            session.add_all([doc, job])
+        session.commit()
+
+    worker = ScanWorker(session_factory=SessionLocal, bucket_manager=test_storage)
+
+    # Pick up 3 jobs sequentially
+    j1 = worker.run_once()
+    j2 = worker.run_once()
+    j3 = worker.run_once()
+
+    assert j1 is not None and j1.job_id == job_ids[0]
+    assert j2 is not None and j2.job_id == job_ids[1]
+    assert j3 is not None and j3.job_id == job_ids[2]
+

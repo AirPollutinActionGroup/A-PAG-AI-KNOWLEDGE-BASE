@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.testclient import TestClient
 
-from src.api.v1.ingestion import get_upload_service
+from src.api.v1.ingestion import get_document_repository, get_upload_service
 from src.api.v1.router import app
 from src.db.engine import get_db
 from src.db.models import Document as DocumentORM, Job as JobORM
@@ -38,12 +38,17 @@ def test_upload_returns_202_before_scan_completes(postgres_engine, tmp_path):
         with SessionLocal() as session:
             yield session
 
+    def override_repo():
+        session = SessionLocal()
+        return PostgreSQLDocumentRepository(session)
+
     def override_upload_service():
         session = SessionLocal()
         repo = PostgreSQLDocumentRepository(session)
         return UploadService(bucket_manager=test_storage, repository=repo, db_session=session)
 
     app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_document_repository] = override_repo
     app.dependency_overrides[get_upload_service] = override_upload_service
 
     try:

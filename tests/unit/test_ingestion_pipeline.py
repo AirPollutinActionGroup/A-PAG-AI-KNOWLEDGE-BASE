@@ -1,9 +1,13 @@
 """Unit Test Suite for Document Ingestion Pipeline (Stages 1–3).
 Fast, in-memory & SQLite verification without requiring real PostgreSQL.
+Updated for asynchronous architecture using ScanJobHandler and test helpers.
 """
 
 import io
+import os
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pypdf
@@ -12,6 +16,7 @@ from sqlalchemy import create_engine, exc, text
 from sqlalchemy.orm import Session
 from starlette.testclient import TestClient
 
+from src.api.v1.ingestion import get_document_repository, get_upload_service
 from src.api.v1.router import app
 from src.db.enums import AuditEventType
 from src.db.models import AuditLog, Base
@@ -23,10 +28,12 @@ from src.modules.document_pipeline.models import (
     UploadRequest,
 )
 from src.modules.document_pipeline.repository import InMemoryDocumentRepository
+from src.modules.document_pipeline.scan_job_handler import ScanJobHandler
 from src.modules.document_pipeline.upload_service import UploadService
 from src.modules.document_pipeline.validation import FileValidator
 from src.storage.bucket_manager import BucketManager
 from src.storage.object_storage import LocalFileSystemStorage
+from tests.helpers import upload_and_process_sync
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pdfs"
 
@@ -60,20 +67,23 @@ def _ensure_fixtures():
     p4 = FIXTURES_DIR / "07_disguised_fake_binary.pdf"
     if not p4.exists():
         with open(p4, "wb") as f:
-            f.write(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00FAKE_EXE_PAYLOAD")
+            f.write(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00\xb8\x00\x00\x00")
 
     # 5. Malicious Script Exploit
     p5 = FIXTURES_DIR / "08_malicious_script_exploit.pdf"
     if not p5.exists():
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(width=595, height=842)
+        writer.add_js("app.alert('Malicious payload execution');")
         with open(p5, "wb") as f:
-            f.write(b"%PDF-1.7\n/Launch (powershell.exe -enc AAAA)\n/OpenAction /JavaScript (eval())\n%%EOF")
+            writer.write(f)
 
-    # 6. Password Protected PDF
+    # 6. Encrypted/Locked
     p6 = FIXTURES_DIR / "10_password_protected.pdf"
     if not p6.exists():
         writer = pypdf.PdfWriter()
         writer.add_blank_page(width=595, height=842)
-        writer.encrypt("super_secret_password")
+        writer.encrypt("topsecret_password_2026")
         with open(p6, "wb") as f:
             writer.write(f)
 
@@ -86,8 +96,6 @@ _test_storage = LocalFileSystemStorage(base_dir="./storage_data/test_unit")
 _test_buckets = BucketManager(storage=_test_storage)
 _test_upload_service = UploadService(bucket_manager=_test_buckets, repository=_test_repo)
 
-from src.api.v1.ingestion import get_document_repository, get_upload_service
-
 app.dependency_overrides[get_document_repository] = lambda: _test_repo
 app.dependency_overrides[get_upload_service] = lambda: _test_upload_service
 
@@ -95,7 +103,7 @@ client = TestClient(app)
 
 
 # ==============================================================================
-# 1. CORE PIPELINE UNIT TESTS (Quarantine -> Validation -> Promotion/Rejection)
+# 1. CORE PIPELINE UNIT TESTS (Category A: End-to-end promotion & versioning)
 # ==============================================================================
 
 def test_valid_policy_pdf_promoted_to_raw(tmp_path):
@@ -104,11 +112,14 @@ def test_valid_policy_pdf_promoted_to_raw(tmp_path):
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
 
     with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
         data = f.read()
 
-    resp = service.upload(
+    resp = upload_and_process_sync(
+        upload_service=service,
+        scan_handler=handler,
         filename="caqm_directive.pdf",
         data=data,
         request_meta=UploadRequest(classification=Classification.PUBLIC),
@@ -121,7 +132,6 @@ def test_valid_policy_pdf_promoted_to_raw(tmp_path):
     # Verify storage layout
     raw_key = f"{resp.checksum}.pdf"
     assert storage.object_exists(buckets.raw, raw_key)
-    # Verify quarantine is purged
     assert not storage.object_exists(buckets.quarantine, resp.quarantine_key)
 
     # Verify repository record
@@ -138,16 +148,17 @@ def test_sha256_deduplication_match(tmp_path):
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
 
     with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
         data = f.read()
 
-    # First upload
-    res1 = service.upload(filename="doc1.pdf", data=data)
+    # First upload & process
+    res1 = upload_and_process_sync(service, handler, filename="doc1.pdf", data=data)
     assert res1.status == DocumentStatus.AWAITING_CLASSIFICATION
 
-    # Second upload with same bytes
-    res2 = service.upload(filename="doc2.pdf", data=data)
+    # Second upload with same bytes processed through pipeline
+    res2 = upload_and_process_sync(service, handler, filename="doc2.pdf", data=data)
     assert res2.status == DocumentStatus.DUPLICATE
     assert res2.checksum == res1.checksum
 
@@ -158,6 +169,7 @@ def test_document_versioning_and_superseding(tmp_path):
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
 
     # Generate valid PDF Version 1
     w1 = pypdf.PdfWriter()
@@ -176,12 +188,14 @@ def test_document_versioning_and_superseding(tmp_path):
     data_v2 = b2.getvalue()
 
     # Upload Version 1
-    res1 = service.upload(filename="delhi_policy.pdf", data=data_v1)
+    res1 = upload_and_process_sync(service, handler, filename="delhi_policy.pdf", data=data_v1)
     doc_v1 = repo.get_by_id(res1.document_id)
     assert doc_v1.version == 1
 
     # Upload Version 2 superseding Version 1
-    res2 = service.upload(
+    res2 = upload_and_process_sync(
+        upload_service=service,
+        scan_handler=handler,
         filename="delhi_policy.pdf",
         data=data_v2,
         request_meta=UploadRequest(
@@ -199,7 +213,7 @@ def test_document_versioning_and_superseding(tmp_path):
 
 
 # ==============================================================================
-# 2. SECURITY & VALIDATION (Rejection Paths)
+# 2. SECURITY & VALIDATION (Category A: Scan-time rejection paths)
 # ==============================================================================
 
 def test_reject_empty_zero_byte_file():
@@ -244,50 +258,66 @@ def test_reject_non_pdf_files():
 
 def test_reject_corrupted_header_pdf(tmp_path):
     """Test rejection when missing %PDF- header."""
-    service = UploadService(bucket_manager=BucketManager(storage=LocalFileSystemStorage(str(tmp_path))))
+    buckets = BucketManager(storage=LocalFileSystemStorage(str(tmp_path)))
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
     with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
         data = f.read()
 
-    res = service.upload("bad_header.pdf", data)
+    res = upload_and_process_sync(service, handler, "bad_header.pdf", data)
     assert res.status == DocumentStatus.REJECTED
     assert "CORRUPTED_PDF_STRUCTURE" in res.rejection_reason
 
 
 def test_reject_truncated_eof_pdf(tmp_path):
     """Test rejection when missing %%EOF trailer."""
-    service = UploadService(bucket_manager=BucketManager(storage=LocalFileSystemStorage(str(tmp_path))))
+    buckets = BucketManager(storage=LocalFileSystemStorage(str(tmp_path)))
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
     with open(FIXTURES_DIR / "06_truncated_eof_missing.pdf", "rb") as f:
         data = f.read()
 
-    res = service.upload("bad_eof.pdf", data)
+    res = upload_and_process_sync(service, handler, "bad_eof.pdf", data)
     assert res.status == DocumentStatus.REJECTED
     assert "CORRUPTED_PDF_STRUCTURE" in res.rejection_reason
 
 
 def test_reject_structural_threats(tmp_path):
     """Test threat scanner rejects PDFs containing /Launch, /JavaScript, powershell.exe markers."""
-    service = UploadService(bucket_manager=BucketManager(storage=LocalFileSystemStorage(str(tmp_path))))
+    buckets = BucketManager(storage=LocalFileSystemStorage(str(tmp_path)))
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
     with open(FIXTURES_DIR / "08_malicious_script_exploit.pdf", "rb") as f:
         data = f.read()
 
-    res = service.upload("malicious.pdf", data)
+    res = upload_and_process_sync(service, handler, "malicious.pdf", data)
     assert res.status == DocumentStatus.REJECTED
     assert "MALICIOUS_THREAT_DETECTED" in res.rejection_reason
 
 
 def test_reject_encrypted_pdf(tmp_path):
     """Test password protected PDF rejection."""
-    service = UploadService(bucket_manager=BucketManager(storage=LocalFileSystemStorage(str(tmp_path))))
+    buckets = BucketManager(storage=LocalFileSystemStorage(str(tmp_path)))
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
     with open(FIXTURES_DIR / "10_password_protected.pdf", "rb") as f:
         data = f.read()
 
-    res = service.upload("locked.pdf", data)
+    res = upload_and_process_sync(service, handler, "locked.pdf", data)
     assert res.status == DocumentStatus.REJECTED
     assert "ENCRYPTED_PDF" in res.rejection_reason
 
 
 # ==============================================================================
-# 3. BEHAVIOURAL SIDE-EFFECT TESTS
+# 3. BEHAVIOURAL SIDE-EFFECT TESTS (Category A & B)
 # ==============================================================================
 
 def test_quarantine_deleted_after_promotion(tmp_path):
@@ -296,11 +326,12 @@ def test_quarantine_deleted_after_promotion(tmp_path):
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
 
     with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
         data = f.read()
 
-    resp = service.upload(filename="promote_test.pdf", data=data)
+    resp = upload_and_process_sync(service, handler, filename="promote_test.pdf", data=data)
     assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
 
     quarantine_key = resp.quarantine_key
@@ -314,11 +345,12 @@ def test_quarantine_deleted_after_rejection(tmp_path):
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
 
     with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
         data = f.read()
 
-    resp = service.upload(filename="reject_cleanup.pdf", data=data)
+    resp = upload_and_process_sync(service, handler, filename="reject_cleanup.pdf", data=data)
     assert resp.status == DocumentStatus.REJECTED
 
     quarantine_key = resp.quarantine_key
@@ -332,13 +364,13 @@ def test_rejected_pdf_never_reaches_raw(tmp_path):
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
 
     with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
         data = f.read()
-    resp = service.upload(filename="should_not_land_in_raw.pdf", data=data)
+    resp = upload_and_process_sync(service, handler, filename="should_not_land_in_raw.pdf", data=data)
     assert resp.status == DocumentStatus.REJECTED
 
-    import os
     raw_dir = os.path.join(str(tmp_path), buckets.raw)
     if os.path.exists(raw_dir):
         raw_files = os.listdir(raw_dir)
@@ -352,17 +384,17 @@ def test_dedup_short_circuits_storage(tmp_path):
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
 
     with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
         data = f.read()
 
-    res1 = service.upload(filename="original.pdf", data=data)
+    res1 = upload_and_process_sync(service, handler, filename="original.pdf", data=data)
     assert res1.status == DocumentStatus.AWAITING_CLASSIFICATION
 
-    res2 = service.upload(filename="copy.pdf", data=data)
+    res2 = upload_and_process_sync(service, handler, filename="copy.pdf", data=data)
     assert res2.status == DocumentStatus.DUPLICATE
 
-    import os
     raw_dir = os.path.join(str(tmp_path), buckets.raw)
     raw_files = os.listdir(raw_dir)
     assert len(raw_files) == 1, \
@@ -408,7 +440,7 @@ def test_audit_log_immutability():
 
 
 # ==============================================================================
-# 4. FASTAPI INTEGRATION ENDPOINTS
+# 4. FASTAPI INTEGRATION ENDPOINTS (Category B: Async API contract)
 # ==============================================================================
 
 def test_api_health():
@@ -419,7 +451,7 @@ def test_api_health():
 
 
 def test_api_upload_returns_202():
-    """Test POST /upload returns 202 Accepted with AWAITING_CLASSIFICATION status."""
+    """Test POST /upload returns 202 Accepted immediately with QUARANTINED status and status_url."""
     pdf_path = FIXTURES_DIR / "01_standard_digital_policy.pdf"
     with open(pdf_path, "rb") as f:
         res = client.post(
@@ -428,24 +460,25 @@ def test_api_upload_returns_202():
             data={"classification": "PUBLIC"},
         )
     assert res.status_code == 202
-    doc_id = res.json()["document_id"]
-    assert res.json()["status"] == "AWAITING_CLASSIFICATION"
+    body = res.json()
+    assert body["status"] == "QUARANTINED"
+    assert "document_id" in body
+    assert "status_url" in body
 
+    doc_id = body["document_id"]
     status_res = client.get(f"/api/v1/documents/{doc_id}/status")
     assert status_res.status_code == 200
-    assert status_res.json()["status"] == "AWAITING_CLASSIFICATION"
+    assert status_res.json()["status"] == "QUARANTINED"
 
 
 def test_api_upload_rejection_422():
-    """Test POST /upload with corrupt PDF returns HTTP 422."""
-    pdf_path = FIXTURES_DIR / "05_corrupted_header_missing.pdf"
-    with open(pdf_path, "rb") as f:
-        res = client.post(
-            "/api/v1/documents/upload",
-            files={"file": ("corrupt.pdf", f, "application/pdf")},
-        )
+    """Test POST /upload with empty 0-byte payload is rejected on fast-path with HTTP 422."""
+    res = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("empty.pdf", b"", "application/pdf")},
+    )
     assert res.status_code == 422
-    assert "CORRUPTED_PDF_STRUCTURE" in res.json()["detail"] or "Validation failed" in res.json()["detail"]
+    assert "EMPTY_FILE" in res.json()["detail"]
 
 
 def test_api_list_documents():
@@ -505,15 +538,12 @@ def test_check_constraint_rejects_invalid_enum_values():
 # ==============================================================================
 
 def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
-    """Test that N simultaneous uploads of the exact same PDF race safely."""
-    import os
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-
+    """Test that N simultaneous uploads of the exact same PDF race safely when processed."""
     storage = LocalFileSystemStorage(base_dir=str(tmp_path))
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
     service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
 
     with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
         pdf_bytes = f.read()
@@ -524,7 +554,9 @@ def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
 
     def upload_worker(idx: int):
         barrier.wait()
-        resp = service.upload(
+        resp = upload_and_process_sync(
+            upload_service=service,
+            scan_handler=handler,
             filename=f"concurrent_doc_{idx}.pdf",
             data=pdf_bytes,
             request_meta=UploadRequest(classification=Classification.PUBLIC),
@@ -555,7 +587,7 @@ def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
 
 
 # ==============================================================================
-# 7. AUDIT WIRING INTEGRATION
+# 7. AUDIT WIRING INTEGRATION (Category C: Audit event ordering)
 # ==============================================================================
 
 def test_upload_writes_audit_events_on_promotion(tmp_path):
@@ -567,14 +599,13 @@ def test_upload_writes_audit_events_on_promotion(tmp_path):
         storage = LocalFileSystemStorage(base_dir=str(tmp_path))
         buckets = BucketManager(storage=storage)
         repo = InMemoryDocumentRepository()
-        service = UploadService(
-            bucket_manager=buckets, repository=repo, db_session=db,
-        )
+        service = UploadService(bucket_manager=buckets, repository=repo, db_session=db)
+        handler = ScanJobHandler(bucket_manager=buckets, repository=repo, db_session=db)
 
         with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
             data = f.read()
 
-        resp = service.upload(filename="audit_test.pdf", data=data)
+        resp = upload_and_process_sync(service, handler, filename="audit_test.pdf", data=data)
         assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
 
         events = db.query(AuditLog).filter(
@@ -610,14 +641,13 @@ def test_upload_writes_audit_events_on_rejection(tmp_path):
         storage = LocalFileSystemStorage(base_dir=str(tmp_path))
         buckets = BucketManager(storage=storage)
         repo = InMemoryDocumentRepository()
-        service = UploadService(
-            bucket_manager=buckets, repository=repo, db_session=db,
-        )
+        service = UploadService(bucket_manager=buckets, repository=repo, db_session=db)
+        handler = ScanJobHandler(bucket_manager=buckets, repository=repo, db_session=db)
 
         with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
             data = f.read()
 
-        resp = service.upload(filename="corrupt_audit.pdf", data=data)
+        resp = upload_and_process_sync(service, handler, filename="corrupt_audit.pdf", data=data)
         assert resp.status == DocumentStatus.REJECTED
 
         events = db.query(AuditLog).filter(
