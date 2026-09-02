@@ -1,74 +1,57 @@
 # Known Technical Debts
 
-Debts carried forward intentionally. Not urgent. All will bite if forgotten.
+Technical debts and trade-offs tracked deliberately. Each debt is annotated with its rationale, impact, and the specific trigger for when it must be resolved.
 
 ---
 
-## 1. Audit writes are best-effort, not transactionally guaranteed
+## 1. Closed Debts (Resolved in Phase C - Async Foundation)
 
-**Status**: Shortcut — accepted for Phase 1-3, must fix before production.
+### ✅ Sync architecture limits concurrency (Closed)
+- **Resolution**: Refactored ingestion pipeline to asynchronous background execution in Phase C.
+- `POST /api/v1/documents/upload` accepts uploads in `<500ms` returning `202 Accepted`.
+- Background worker consumes jobs via `SELECT ... FOR UPDATE SKIP LOCKED` with automatic lease management and dead-worker reaper.
 
-`UploadService._audit()` catches exceptions and logs at ERROR level. The state change (e.g., `doc.status = PROMOTED`) commits in one transaction, the audit write commits in a separate transaction. If the audit write fails, the state change still succeeds — meaning there can be state transitions without corresponding audit rows.
+### ✅ UploadService monolithic validation/scanning (Closed)
+- **Resolution**: Separated into fast-path `UploadService.receive()` (quarantine landing + DB insertion + job enqueue) and standalone `ScanJobHandler.process()` (validation, ClamAV structural threat scanning, deduplication, promotion, and audit logging).
 
-**Why this matters**: The audit trail is a compliance guarantee. If a senior or auditor asks "did event X happen?", the honest answer is "probably, unless the audit write silently failed." That's not good enough.
-
-**Fix**: Make `AuditService.log_event()` join the same DB session/transaction as the state change. Commit once at the end. `InMemory` path passes `None` and skips audit (already correct). This is a Phase 4 refactor item — when `PostgreSQLDocumentRepository` is wired to the API layer with a proper session, share that session with audit.
-
----
-
-## 2. Separate-transaction pattern is a test-double workaround
-
-**Status**: Shortcut — not a chosen design.
-
-The reason audit writes are in a separate transaction is that `UploadService` uses `InMemoryDocumentRepository` (no DB session) in tests, but `AuditService.log_event()` requires a `Session`. We pass `db_session` as a separate parameter to `UploadService.__init__()` because the repository abstraction doesn't expose a session.
-
-**Why this matters**: If anyone defends this as a deliberate pattern in a code review, that's wrong. The honest answer is: "We took a shortcut because of the test double, and it's on the list to fix."
-
-**Fix**: When `PostgreSQLDocumentRepository` becomes the default in the API layer, extract the session from the repo and share it with `AuditService`. One session, one transaction, one commit.
+### ✅ No integration tests against real PostgreSQL (Closed)
+- **Resolution**: Added 19 PostgreSQL integration tests using `testcontainers-python` verifying `FOR UPDATE SKIP LOCKED` concurrency, partial unique index deduplication, check constraints, lease reclamation, and transaction isolation.
 
 ---
 
-## 3. No integration tests against real PostgreSQL
+## 2. Active Technical Debts
 
-**Status**: Gap — SQLite is used as a stand-in for all DB tests.
+### 1. Audit writes are best-effort, not transactionally guaranteed
+- **Status**: Accepted trade-off.
+- **Context**: State changes and audit events commit in separate transaction boundaries. If an audit write encounters an unhandled exception, the document state change remains committed while an ERROR log is written.
+- **Trigger to address**: When unifying database session orchestration across Phase 4 extraction pipelines.
 
-All DB-related tests (`audit_log_immutability`, `check_constraint_rejects_invalid_enum_values`, audit wiring tests) use `sqlite:///:memory:`. SQLite doesn't validate real Postgres behavior:
-- `FOR UPDATE SKIP LOCKED` (job queue pattern)
-- `JSONB` operators
-- Partial unique index behavior under concurrent transactions
-- `TIMESTAMPTZ` precision
+### 2. Separate-transaction pattern for repository test-doubles
+- **Status**: Maintained for in-memory unit tests.
+- **Context**: `InMemoryDocumentRepository` does not bind a SQLAlchemy session, necessitating optional `db_session` injection for `AuditService`.
+- **Trigger to address**: When all pipeline integration layers standardize exclusively on session-bound repositories.
 
-**Fix**: Add at least one test suite that runs against actual Postgres. `testcontainers-python` does this cleanly. Budget 30-60 minutes for test fixture setup. Do this before Phase 4.
+### 3. Idempotency is application-layer, not DB-enforced
+- **Status**: Application-guarded.
+- **Context**: `ScanJobHandler` and `ScanWorker` query document status (`doc.status != "QUARANTINED"`) and existing audit records before executing promotions. A race between two workers on duplicate jobs is handled cleanly in application logic, but there is no database-level unique constraint on `(document_id, event_type)` in `audit_log`.
+- **Trigger to address**: Before introducing multi-stage pipeline workflows (e.g. OCR/Extraction/Chunking) where pipeline stages can be dynamically retried.
 
----
+### 4. Retry failure classification is coarse
+- **Status**: Two-tier (`TransientProcessingError` vs `PermanentProcessingError`).
+- **Context**: Network timeouts and database locks trigger exponential backoff retries, while corrupted PDF syntax and malware trigger immediate `FAILED`/`REJECTED` status. Edge cases (e.g., malformed scanner daemon responses) default to transient retry.
+- **Trigger to address**: When production monitoring highlights specific scanner or storage edge cases requiring custom retry policies.
 
-## 4. UploadService validation/scanning must be extracted for Phase 6 workers
+### 5. Single-worker container healthcheck model
+- **Status**: Heartbeat file (`/tmp/worker_alive`).
+- **Context**: Docker container healthcheck inspects file modification time (`stat -c %Y /tmp/worker_alive < 30s`). This model assumes one worker daemon per container.
+- **Trigger to address**: When scaling to multiple worker subprocesses within a single container.
 
-**Status**: Future refactor — not a bug today.
+### 6. Observability and queue metrics
+- **Status**: Structured application logging only.
+- **Context**: Queue depth, job duration, lease renewals, and dead-letter counts are logged at INFO/DEBUG levels, but no Prometheus metrics endpoint is exposed yet.
+- **Trigger to address**: Prior to user-facing production release.
 
-The `Job` table schema is ready for `SELECT ... FOR UPDATE SKIP LOCKED` workers (`idx_jobs_pickup` partial index, `worker_id`, `lease_expires_at`, `retry_count`). But the actual validation and scanning logic lives inside `UploadService.upload()` — a synchronous, monolithic method.
-
-For Phase 6 (async workers), the validation/scanning needs to be extracted into a worker handler that consumes jobs independently. This is a real refactor of `UploadService`, not a slot-in.
-
-**Fix**: When starting Phase 6, extract validation into a standalone handler (e.g., `ScanWorkerHandler`) that the worker loop invokes. Don't try to reuse `UploadService.upload()` directly from a background worker.
-
----
-
-## 5. Synchronous architecture limits concurrency
-
-**Status**: By design for Phase 1-3. Blocks production scale.
-
-Everything is synchronous: SQLAlchemy sessions, file I/O, validation. The system cannot handle 50 concurrent uploads efficiently. `threading.Lock` in `UploadService._promotion_lock` serializes all promotions.
-
-**Honest scalability scores**:
-- As-built: 6/10
-- As-designed (after Phase 6 workers): 8/10
-
-**Fix**: Phase 6 async workers handle the heavy lifting. Phase 7 may require `asyncpg` migration for the API layer — that's a real migration (rewriting every DB call site, session management, and test), not a checkbox.
-
----
-
-## 6. Repository test rule (Effective after Step 6)
-
-**Rule**: After Step 6, `InMemoryDocumentRepository` should still exist but only be used in explicitly-marked unit tests (e.g. `tests/unit/`). Any new integration, service, or API test must default to real PostgreSQL. This prevents in-memory mock drift.
-
+### 7. Studio UI expects synchronous upload response
+- **Status**: Fast-follow UI task.
+- **Context**: The testing Studio UI at `/` was written for the synchronous pipeline and expects terminal `AWAITING_CLASSIFICATION` immediately from `POST /upload`. It needs to be updated to poll `GET /api/v1/documents/{id}/status` every 500ms until terminal state.
+- **Trigger to address**: Before internal user onboarding.

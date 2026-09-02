@@ -1,12 +1,12 @@
-# A-PAG AI Platform
+# A-PAG AI Knowledge Base Platform
 
-> A secure, scalable AI knowledge and data platform for the **Air Pollution Action Group (A-PAG)**, providing employees with a single natural-language interface to query organizational documents and structured data.
+> Async ingestion foundation for a governed RAG platform, verified for 50 internal users, designed to scale to 500 without architectural changes.
 
 ---
 
 ## 🎯 What We Are Building
 
-A unified AI system that handles two primary types of questions:
+A unified AI system for the **Air Pollution Action Group (A-PAG)** that handles two primary types of organizational questions:
 
 1. **Document Knowledge (RAG)**: Answering policy and project questions from unstructured PDFs using vector search.
 2. **Structured Data (Text-to-SQL)**: Answering financial and operational metrics from PostgreSQL using validated natural-language-to-SQL generation.
@@ -34,32 +34,34 @@ A unified AI system that handles two primary types of questions:
 
 ---
 
-## 🏗️ Core Architecture & Pipelines
+## 🏗️ Core Ingestion Architecture (Asynchronous)
 
-### 1. Document Ingestion & Processing Pipeline
-An asynchronous, multi-stage pipeline designed for safety, deduplication, and accuracy:
+The ingestion pipeline executes asynchronously to protect API responsiveness, isolate CPU-heavy scanning/validation, and ensure resilience against service interruptions:
 
 ```text
-PDF Upload ──► Quarantine ──► 8-Point Validation & Scan ──► Raw Storage
-                                                                 │
-  Knowledge Base ◄── Qdrant Index ◄── Chunking ◄── Normalization ◄── Extraction (Native + OCR)
+Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres (documents + jobs + audit)
+                  │                                                          │
+             202 Accepted (<500ms)                                           │
+                                                                             ▼
+                                                               ScanWorker Daemon
+                                                     (SELECT ... FOR UPDATE SKIP LOCKED)
+                                                                             │
+                                                              8-Point Validation + ClamAV Scan
+                                                                             │
+                                                        ┌────────────────────┴────────────────────┐
+                                                        ▼                                         ▼
+                                                [Validation Passed]                       [Threat/Corrupt]
+                                                        │                                         │
+                                                Promote to Raw Bucket                     Purge Quarantine
+                                                Set Status AWAITING_CLASS                 Set Status REJECTED
+                                                Emit DOCUMENT_PROMOTED                    Emit DOCUMENT_REJECTED
 ```
 
-- **Quarantine-First Isolation**: Files land in temporary storage before validation.
-- **Fail-Fast Security**: Strict checks for MIME type, 100MB ceiling, header/trailer integrity, and malware.
-- **SHA-256 Deduplication & Versioning**: Prevents redundant storage and tracks historical policy versions (`supersedes_id`).
-- **Extraction with OCR Fallback**: Native PDF text extraction with automatic OCR fallback for scanned pages.
-- **Structured Normalization**: Cleans text, extracts tables (Markdown/HTML), and detects entities (CAQM, GRAP, CPCB, pollutants).
-
-### 2. Text-to-SQL Engine
-- Converts natural-language questions (e.g., *"How much was spent on Project X last year?"*) into SQL.
-- Provides only relevant schema context to the model (data minimization).
-- Validates SQL syntax and ensures strict **read-only execution** against PostgreSQL.
-
-### 3. Permission-Aware Security & Data Sovereignty
-- **Hard Pre-Filtering**: Permissions are applied directly during the vector/database search—restricted data is never loaded or retrieved.
-- **Classification Gate**: Mandatory check before any document is indexed into the searchable knowledge base.
-- **Sovereign Inference**: Evaluated with India-based models (Sarvam AI) with zero-data-retention and data minimization principles.
+- **Quarantine-First Isolation**: Files land in isolated temporary storage before any parsing or scanning.
+- **Immediate 202 Accepted**: API returns document UUID, status URL, and correlation ID in under 500ms.
+- **SKIP LOCKED Worker Pool**: Background workers pull jobs without blocking, managed by 60s leases and a 30s dead-worker reaper.
+- **SHA-256 Deduplication & Partial Unique Index**: Hardware-accelerated hashing prevents duplicate storage while permitting superseded version history.
+- **Append-Only Audit Trail**: Every document lifecycle event is immutably logged with correlation IDs.
 
 ---
 
@@ -67,81 +69,70 @@ PDF Upload ──► Quarantine ──► 8-Point Validation & Scan ──► Ra
 
 | System | Role | Contents |
 |---|---|---|
-| **PostgreSQL** | Relational Database | Document metadata, background job queues, audit trails, and structured operational data. |
+| **PostgreSQL 16** | Relational Database | Document metadata, background job queues, audit logs, and operational data. |
 | **MinIO** | Object Storage | PDF artifacts across buckets (`quarantine/`, `raw/`, `extracted/`, `normalized/`). |
 | **Qdrant** | Vector Database | Document embeddings, chunk payloads, and permission metadata for semantic search. |
 
 ---
 
-## 🚀 Project Setup & Quick Start Guide
+## ⚠️ Current Limitations
+
+- **Testing Studio UI**: The interactive web UI currently expects a synchronous response from `/upload`; polling integration against `GET /api/v1/documents/{id}/status` is queued as a fast-follow.
+- **Authentication**: Role-based access control (RBAC) and user authentication are planned for Phase 6.
+- **Single-Tenant Deployment**: Multi-organization partitioning is deferred to later milestones.
+- **Text Extraction & OCR**: Pipeline currently implements Stages 1–3 (quarantine, validation, scanning, promotion); Stage 4 (OCR / extraction) is the next phase.
+
+---
+
+## 🗺️ Roadmap & Phase Status
+
+| Phase | Description | Status |
+|---|---|---|
+| **Phase 1** | Ingestion & Quarantine Pipeline (Validation, Structure Checks) | ✅ Completed |
+| **Phase 2** | Threat Scanning & Deduplication Engine (ClamAV, SHA-256) | ✅ Completed |
+| **Phase 3** | Storage Promotion, DB Migrations & Immutable Audit Log | ✅ Completed |
+| **Phase C** | Asynchronous Architecture Refactor (SKIP LOCKED Workers, 202 Contract) | ✅ Completed |
+| **Phase 4** | Document Text Extraction (Native PDF parsing + OCR fallback) | ⏳ Next |
+| **Phase 5** | Chunking, Entity Normalization & Vector Indexing (Qdrant) | 📋 Planned |
+| **Phase 6** | Permission Governance, Hard Pre-Filtering & RBAC | 📋 Planned |
+| **Phase 7** | Text-to-SQL Engine & Sovereign RAG Query Layer | 📋 Planned |
+
+---
+
+## 🚀 Quick Start Guide
 
 ### 1. Prerequisites
 - **Python 3.12+**
-- **uv** (recommended) or **pip**
 - **Docker & Docker Compose**
 
 ### 2. Environment Configuration
 ```bash
-# Clone the repository
-git clone https://github.com/AirPollutinActionGroup/A-PAG-AI-KNOWLEDGE-BASE.git
-cd A-PAG-AI-KNOWLEDGE-BASE
-
-# Copy environment variables
 cp .env.example .env
 ```
 
-### 3. Virtual Environment & Dependencies
-**Option A: Using `uv` (Fastest)**
+### 3. Start Infrastructure & Background Services
 ```bash
-uv venv
-.venv\Scripts\activate      # Windows (or 'source .venv/bin/activate' on Linux/macOS)
-uv pip install -r requirements.txt
-```
-
-**Option B: Using standard `pip`**
-```bash
-python -m venv .venv
-.venv\Scripts\activate      # Windows (or 'source .venv/bin/activate' on Linux/macOS)
-pip install -r requirements.txt
-```
-
-### 4. Start Infrastructure & Database Migrations
-```bash
-# Start background services (PostgreSQL 16 + MinIO Object Storage)
+# Starts PostgreSQL, MinIO, API, and Background Worker
 docker compose up -d
 
 # Run database schema migrations
 alembic upgrade head
-# or with uv:
-uv run alembic upgrade head
 ```
 
-### 5. Start Development Server & Testing Studio UI
-```bash
-# Start server with auto-reload
-python main.py
-# or using uvicorn directly:
-uvicorn src.api.v1.router:app --reload --host 0.0.0.0 --port 8000
-```
-
-### 6. Interactive Web Access
-- **Testing Studio UI**: [http://localhost:8000](http://localhost:8000)
-  - Features 9 one-click preset test scenarios (Valid V1/V2, Duplicates, Bad Headers, Encrypted PDFs, Exploits, Zero-byte files).
-  - Real-time 8-check validation indicator matrix.
-  - Ingested documents ledger displaying exact rejection reasons and raw storage paths.
-- **Interactive Swagger API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Health Check Probe**: [http://localhost:8000/health](http://localhost:8000/health)
+### 4. Interactive Endpoints
+- **API Documentation (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
+- **Upload Document (Async 202)**: `POST /api/v1/documents/upload`
+- **Query Status**: `GET /api/v1/documents/{document_id}/status`
 
 ---
 
 ## 🧪 Testing & Verification
 
 ```bash
-# Run the complete test suite (22 tests, ~2.0s)
+# Run the complete test suite (47 tests: 28 unit + 19 PostgreSQL integration, ~7.0s)
 pytest tests/ -v
 
-# Run code linter
+# Run linter
 ruff check src/ tests/ main.py
 ```
-*(Detailed test descriptions and execution logs available in [`TEST_REPORT.md`](TEST_REPORT.md))*
-
