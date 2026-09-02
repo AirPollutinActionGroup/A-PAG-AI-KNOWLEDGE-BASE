@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from src.db.enums import AuditEventType
+from src.db.models import Job as JobORM
 from src.modules.audit.service import AuditService
 from src.modules.document_pipeline.models import (
     Document,
@@ -20,33 +21,26 @@ from src.modules.document_pipeline.repository import (
     DocumentRepository,
     InMemoryDocumentRepository,
 )
-from src.modules.document_pipeline.scan_job_handler import ScanJobHandler
-from src.modules.document_pipeline.validation import ValidationService
 from src.storage.bucket_manager import BucketManager
 
 logger = logging.getLogger(__name__)
 
+# Fast-path constraints
+MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
+
 
 class UploadService:
-    """Orchestrates PDF upload, quarantine storage, and delegates scan/promotion jobs."""
+    """Fast-path asynchronous ingestion receiver."""
 
     def __init__(
         self,
         bucket_manager: BucketManager | None = None,
         repository: DocumentRepository | None = None,
-        validation_service: ValidationService | None = None,
         db_session: Session | None = None,
     ):
         self.buckets = bucket_manager or BucketManager()
         self.repo = repository or InMemoryDocumentRepository()
-        self.validator = validation_service or ValidationService()
         self._db = db_session
-        self.scan_handler = ScanJobHandler(
-            bucket_manager=self.buckets,
-            repository=self.repo,
-            validation_service=self.validator,
-            db_session=self._db,
-        )
 
     def _audit(
         self,
@@ -82,8 +76,8 @@ class UploadService:
         data: bytes,
         request_meta: UploadRequest | None = None,
         correlation_id: uuid.UUID | None = None,
-    ) -> tuple[Document, uuid.UUID]:
-        """Stage 1: Fast API path — writes PDF to quarantine, creates DB record, and logs audit."""
+    ) -> UploadResponse:
+        """Stage 1: Fast API path — writes PDF to quarantine, creates DB record + job, and returns 202."""
         meta = request_meta or UploadRequest()
         document_id = uuid.uuid4()
         corr_id = correlation_id or uuid.uuid4()
@@ -114,29 +108,40 @@ class UploadService:
             version=1,
             quarantine_path=f"{self.buckets.quarantine}/{quarantine_key}",
         )
-        created_doc = self.repo.create(doc)
+        self.repo.create(doc)
 
-        # 3. AUDIT: Document received and quarantined
-        self._audit(document_id, AuditEventType.DOCUMENT_QUARANTINED, details={
-            "filename": filename, "size_bytes": len(data),
-            "classification": meta.classification.value if meta.classification else None,
-            "quarantine_key": quarantine_key,
-        }, correlation_id=corr_id)
+        # 3. Enqueue Job in jobs queue table if database session is active
+        if self._db is not None:
+            job = JobORM(
+                job_id=uuid.uuid4(),
+                document_id=document_id,
+                stage="SCAN",
+                status="PENDING",
+            )
+            self._db.add(job)
+            self._db.commit()
 
-        return created_doc, corr_id
-
-    def upload(
-        self,
-        filename: str,
-        data: bytes,
-        request_meta: UploadRequest | None = None,
-    ) -> UploadResponse:
-        """Synchronous facade for Commit 1: receive() + ScanJobHandler.process() inline."""
-        meta = request_meta or UploadRequest()
-        doc, corr_id = self.receive(filename=filename, data=data, request_meta=meta)
-        return self.scan_handler.process(
-            document_id=doc.id,
+        # 4. AUDIT: Document received and quarantined
+        self._audit(
+            document_id,
+            AuditEventType.DOCUMENT_QUARANTINED,
+            details={
+                "filename": filename,
+                "size_bytes": len(data),
+                "classification": meta.classification.value if meta.classification else None,
+                "quarantine_key": quarantine_key,
+            },
             correlation_id=corr_id,
-            request_meta=meta,
         )
 
+        return UploadResponse(
+            document_id=document_id,
+            filename=filename,
+            status=DocumentStatus.QUARANTINED,
+            quarantine_key=quarantine_key,
+            checksum=None,
+            was_duplicate=False,
+            status_url=f"/api/v1/documents/{document_id}/status",
+            correlation_id=corr_id,
+            message="Document accepted for asynchronous scanning and processing.",
+        )

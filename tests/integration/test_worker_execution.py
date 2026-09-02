@@ -33,6 +33,21 @@ def test_storage(tmp_path):
     return buckets
 
 
+@pytest.fixture(autouse=True)
+def clean_jobs_tables(postgres_engine):
+    """Ensures jobs and documents tables are clean before and after each test."""
+    SessionLocal = sessionmaker(bind=postgres_engine)
+    with SessionLocal() as session:
+        session.query(JobORM).delete()
+        session.query(DocumentORM).delete()
+        session.commit()
+    yield
+    with SessionLocal() as session:
+        session.query(JobORM).delete()
+        session.query(DocumentORM).delete()
+        session.commit()
+
+
 def test_worker_completes_successful_job(postgres_engine, test_storage):
     """Verifies that a valid PDF job is claimed, processed, document promoted, and job marked COMPLETED."""
     SessionLocal = sessionmaker(bind=postgres_engine)

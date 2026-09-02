@@ -1,15 +1,18 @@
 """FastAPI Ingestion Endpoints (Stage 1 & Stage 3).
-Handles document upload, quarantine validation, status queries, and versioning.
+Handles asynchronous document upload, quarantine validation, status queries, and versioning.
 """
 
 import logging
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.db.engine import get_db
+from src.db.models import AuditLog as AuditORM
 from src.modules.document_pipeline.models import (
     Classification,
     UploadRequest,
@@ -19,7 +22,10 @@ from src.modules.document_pipeline.repository import (
     DocumentRepository,
     PostgreSQLDocumentRepository,
 )
-from src.modules.document_pipeline.upload_service import UploadService
+from src.modules.document_pipeline.upload_service import (
+    MAX_FILE_SIZE_BYTES,
+    UploadService,
+)
 from src.storage.bucket_manager import BucketManager
 
 logger = logging.getLogger(__name__)
@@ -52,7 +58,7 @@ def get_upload_service(
     "/upload",
     response_model=UploadResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Upload PDF document to quarantine and process ingestion checks",
+    summary="Upload PDF document to quarantine for asynchronous processing",
 )
 async def upload_document(
     file: UploadFile = File(..., description="PDF document binary stream"),
@@ -70,7 +76,7 @@ async def upload_document(
     ),
     upload_service: UploadService = Depends(get_upload_service),
 ):
-    """Stage 1: Ingests PDF into quarantine, runs validation, and promotes or rejects."""
+    """Stage 1: Fast-path asynchronous upload — accepts PDF, places in quarantine, enqueues SCAN job, and returns 202."""
     # 1. MIME type validation check
     if file.content_type != "application/pdf":
         raise HTTPException(
@@ -81,44 +87,82 @@ async def upload_document(
     # 2. Read contents
     content = await file.read()
 
+    # 3. Fast-path size checks
+    if len(content) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="EMPTY_FILE: Document payload is 0 bytes.",
+        )
+
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"OVERSIZED_FILE: Document exceeds maximum limit of {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB.",
+        )
+
     req_meta = UploadRequest(
         classification=classification,
         supersedes_doc_id=supersedes_doc_id,
         keep_previous_version=keep_previous_version,
     )
 
-    # 3. Process through upload service
-    result = upload_service.upload(
+    # 4. Fast-path quarantine landing + job enqueue
+    result = upload_service.receive(
         filename=file.filename or "unknown.pdf",
         data=content,
         request_meta=req_meta,
     )
-
-    if result.status == "REJECTED":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Validation failed: {result.rejection_reason}",
-        )
 
     return result
 
 
 @router.get(
     "/{document_id}/status",
-    summary="Query document processing and validation status",
+    summary="Query document processing status and latest lifecycle audit event",
 )
 async def get_document_status(
     document_id: uuid.UUID,
     repo: DocumentRepository = Depends(get_document_repository),
+    db: Session = Depends(get_db),
 ):
-    """Returns the current lifecycle status, storage location, and version details."""
+    """Returns the current lifecycle status, metadata, and latest audit trail event."""
     doc = repo.get_by_id(document_id)
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document with ID {document_id} not found.",
         )
-    return doc
+
+    # Fetch latest audit log event
+    latest_event = None
+    try:
+        audit_entry = (
+            db.query(AuditORM)
+            .filter(AuditORM.document_id == document_id)
+            .order_by(desc(AuditORM.event_time))
+            .first()
+        )
+        if audit_entry:
+            latest_event = {
+                "event_type": audit_entry.event_type,
+                "event_time": audit_entry.event_time.isoformat() if audit_entry.event_time else None,
+                "details": audit_entry.details,
+            }
+    except Exception as e:
+        logger.debug("Could not query audit log for status: %s", e)
+
+    return {
+        "document_id": doc.id,
+        "filename": doc.filename,
+        "status": doc.status.value,
+        "classification": doc.classification.value if doc.classification else None,
+        "version": doc.version,
+        "rejection_reason": doc.rejection_reason,
+        "raw_path": doc.raw_path,
+        "created_at": doc.created_at.isoformat() if doc.created_at else None,
+        "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
+        "latest_event": latest_event,
+    }
 
 
 @router.get(
@@ -172,4 +216,3 @@ async def get_test_preset(preset_name: str):
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
     )
-

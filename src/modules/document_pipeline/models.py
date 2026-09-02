@@ -29,6 +29,8 @@ class UploadResponse(BaseModel):
     checksum: str | None = None
     rejection_reason: str | None = None
     was_duplicate: bool = False
+    status_url: str | None = None
+    correlation_id: uuid.UUID | None = None
     message: str
 
 

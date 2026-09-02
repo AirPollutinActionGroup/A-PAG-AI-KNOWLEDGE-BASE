@@ -8,8 +8,24 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
+import pytest
 from src.db.models import Document as DocumentORM, Job as JobORM
 from src.workers.scan_worker import ScanWorker
+
+
+@pytest.fixture(autouse=True)
+def clean_jobs_tables(postgres_engine):
+    """Ensures jobs and documents tables are clean before and after each test."""
+    SessionLocal = sessionmaker(bind=postgres_engine)
+    with SessionLocal() as session:
+        session.query(JobORM).delete()
+        session.query(DocumentORM).delete()
+        session.commit()
+    yield
+    with SessionLocal() as session:
+        session.query(JobORM).delete()
+        session.query(DocumentORM).delete()
+        session.commit()
 
 
 def test_two_workers_do_not_pick_same_job(postgres_engine):
