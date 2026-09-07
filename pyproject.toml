@@ -16,8 +16,16 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     "alembic>=1.13.0",
     "pytest>=8.0.0",
+    # Integration tests MUST get a throwaway Postgres. Without this installed,
+    # tests/integration/conftest.py falls back to the dev DATABASE_URL and the
+    # worker tests' table-wide DELETEs destroy real development data.
+    "testcontainers[postgres]>=4.0.0",
     "httpx>=0.27.0",
     "ruff>=0.3.0",
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.1.0",
+    "slowapi>=0.1.9",
+    "pydantic[email]>=2.6.0",
 ]
 
 [tool.pytest.ini_options]

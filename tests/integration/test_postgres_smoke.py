@@ -3,7 +3,9 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from src.db.models import Document as DocORM, Job as JobORM, AuditLog as AuditORM
+from src.db.models import AuditLog as AuditORM
+from src.db.models import Document as DocORM
+from src.db.models import Job as JobORM
 
 
 def test_postgres_connection_and_tables_exist(db_session: Session):

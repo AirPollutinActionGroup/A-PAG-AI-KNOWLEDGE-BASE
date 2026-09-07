@@ -1,7 +1,7 @@
 """Scan Worker for Stage 2 (Validation/Threat Scan) & Stage 3 (Promote/Reject)."""
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
@@ -67,7 +67,9 @@ class ScanWorker(BaseWorker):
                 if response.rejection_reason and "DOCUMENT_NOT_FOUND" in response.rejection_reason:
                     raise PermanentProcessingError(response.rejection_reason)
                 if response.rejection_reason and "STORAGE_ERROR" in response.rejection_reason:
-                    raise PermanentProcessingError(response.rejection_reason)
+                    # Storage I/O blips (network partition, MinIO restart) are transient —
+                    # the file is preserved in quarantine specifically so a retry can succeed.
+                    raise TransientProcessingError(response.rejection_reason)
                 raise PermanentProcessingError(response.rejection_reason or "Validation failed")
 
             logger.info(

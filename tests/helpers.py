@@ -1,14 +1,12 @@
 """Test helper utilities for driving asynchronous background workers in integration/unit tests."""
 
-import time
 import uuid
-from typing import Callable
+from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
 from src.db.models import Job as JobORM
 from src.modules.document_pipeline.models import (
-    DocumentStatus,
     UploadRequest,
     UploadResponse,
 )

@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -18,17 +19,49 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from src.db.enums import Classification, DocumentStatus, JobStage, JobStatus
+from src.db.enums import DocumentStatus, JobStage, JobStatus, UserRole
 
 # JSON type that uses PostgreSQL JSONB in production and standard JSON in SQLite
 JSONType = JSON().with_variant(JSONB, "postgresql")
 
+# Full-text search vector: real TSVECTOR on PostgreSQL (maintained by a DB trigger, see
+# migration 0006), inert Text on SQLite (unit tests never exercise search against SQLite).
+SearchVectorType = Text().with_variant(TSVECTOR, "postgresql")
+
 
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
+
+
+class User(Base):
+    """Employee account. Auth identity for uploads, ownership, and audit attribution."""
+
+    __tablename__ = "users"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=UserRole.USER.value, server_default=UserRole.USER.value
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('ADMIN', 'USER')",
+            name="chk_users_role",
+        ),
+    )
 
 
 class Document(Base):
@@ -41,8 +74,20 @@ class Document(Base):
     )
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     uploader_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True), nullable=True
+        Uuid(as_uuid=True), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
     )
+
+    # Descriptive metadata (searchable)
+    title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="application/pdf", server_default="application/pdf"
+    )
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Groups documents submitted together in one multi-file upload request
+    upload_batch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True
@@ -92,6 +137,16 @@ class Document(Base):
         onupdate=func.now(),
         nullable=False,
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set when the promoted object was actually erased from `raw/`. The row survives as a
+    # tombstone (supersedes chains and audit_log rows reference it), but sha256/raw_path are
+    # nulled — see migration 0010.
+    purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Full-text search over title + filename + description, maintained by a DB trigger
+    # (see migration 0006) rather than a SQLAlchemy-computed column, so it stays correct
+    # even for rows updated outside the ORM (raw SQL, psql, future services).
+    search_vector: Mapped[Any | None] = mapped_column(SearchVectorType, nullable=True)
 
     # Relationships
     jobs: Mapped[list["Job"]] = relationship(
@@ -113,6 +168,7 @@ class Document(Base):
             unique=True,
             postgresql_where=text("status NOT IN ('SUPERSEDED', 'ARCHIVED', 'REJECTED', 'DUPLICATE')"),
         ),
+        Index("idx_documents_search_vector", "search_vector", postgresql_using="gin"),
     )
 
 
@@ -233,7 +289,7 @@ class AuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED')",
+            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED')",
             name="chk_audit_log_event_type",
         ),
     )

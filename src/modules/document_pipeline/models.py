@@ -17,6 +17,9 @@ class UploadRequest(BaseModel):
     supersedes_doc_id: uuid.UUID | None = None
     keep_previous_version: bool = True
     owner_id: uuid.UUID | None = None
+    title: str | None = None
+    description: str | None = None
+    upload_batch_id: uuid.UUID | None = None
 
 
 class UploadResponse(BaseModel):
@@ -31,6 +34,7 @@ class UploadResponse(BaseModel):
     was_duplicate: bool = False
     status_url: str | None = None
     correlation_id: uuid.UUID | None = None
+    upload_batch_id: uuid.UUID | None = None
     message: str
 
 
@@ -60,6 +64,11 @@ class Document(BaseModel):
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
     filename: str
     owner_id: uuid.UUID | None = None
+    title: str | None = None
+    description: str | None = None
+    mime_type: str = "application/pdf"
+    page_count: int | None = None
+    upload_batch_id: uuid.UUID | None = None
     size: int
     checksum: str | None = None
     status: DocumentStatus = DocumentStatus.UPLOADED
@@ -71,3 +80,5 @@ class Document(BaseModel):
     rejection_reason: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    deleted_at: datetime | None = None
+    purged_at: datetime | None = None
