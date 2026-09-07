@@ -1,13 +1,19 @@
 """Unit tests for BaseWorker and ScanWorker skeleton."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
-from src.db.models import Base, Document as DocumentORM, Job as JobORM
+from src.core.errors import PermanentProcessingError
+from src.db.models import Base
+from src.db.models import Document as DocumentORM
+from src.db.models import Job as JobORM
+from src.storage.bucket_manager import BucketManager
+from src.storage.object_storage import LocalFileSystemStorage
+from src.workers.base_worker import JobItem
 from src.workers.scan_worker import ScanWorker
 
 
@@ -67,7 +73,7 @@ def test_worker_respects_scheduled_at(sqlite_session_factory):
     """Verifies worker respects scheduled_at in the future (backoff delay)."""
     doc_id = uuid.uuid4()
     job_id = uuid.uuid4()
-    future_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+    future_time = datetime.now(UTC) + timedelta(minutes=5)
 
     with sqlite_session_factory() as session:
         doc = DocumentORM(document_id=doc_id, filename="delayed.pdf", file_size=100, status="QUARANTINED")
@@ -84,6 +90,34 @@ def test_worker_respects_scheduled_at(sqlite_session_factory):
     worker = ScanWorker(session_factory=sqlite_session_factory, worker_id="test-worker-3")
     claimed = worker.pick_job()
     assert claimed is None
+
+
+def test_scan_worker_treats_missing_document_as_permanent_failure(tmp_path, sqlite_session_factory):
+    """Verifies a job referencing a document_id with no matching `documents` row raises
+    PermanentProcessingError (DOCUMENT_NOT_FOUND) — never retried, since no retry could fix it.
+
+    Uses SQLite directly (FKs not enforced by default) rather than a real Postgres worker test,
+    because jobs.document_id carries an ON DELETE CASCADE FK to documents in Postgres — a job
+    can never actually reference a nonexistent document there, so this path is only reachable
+    here or via a genuine InMemoryDocumentRepository/PostgreSQL repository divergence.
+    """
+    missing_doc_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+
+    bucket_manager = BucketManager(storage=LocalFileSystemStorage(base_dir=str(tmp_path)))
+    worker = ScanWorker(session_factory=sqlite_session_factory, bucket_manager=bucket_manager)
+
+    job = JobItem(
+        job_id=job_id,
+        document_id=missing_doc_id,
+        stage="SCAN",
+        status="RUNNING",
+        worker_id="test-worker",
+        retry_count=0,
+    )
+
+    with pytest.raises(PermanentProcessingError, match="DOCUMENT_NOT_FOUND"):
+        worker.process_job(job)
 
 
 def test_worker_touches_heartbeat_file(tmp_path, sqlite_session_factory):

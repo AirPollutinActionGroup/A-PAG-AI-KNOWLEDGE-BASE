@@ -1,9 +1,9 @@
 """Integration tests for AuditLog immutability and PostgreSQL trigger protection."""
 
 import uuid
+
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.db.enums import AuditEventType

@@ -70,3 +70,4 @@ qdrant_data/
 # OS generated files
 .DS_Store
 Thumbs.db
+TEST_SUITE_OVERVIEW.md

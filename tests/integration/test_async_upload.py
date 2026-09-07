@@ -3,19 +3,33 @@
 import io
 import time
 import uuid
+
 import pypdf
-import pytest
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 from starlette.testclient import TestClient
 
 from src.api.v1.ingestion import get_document_repository, get_upload_service
 from src.api.v1.router import app
 from src.db.engine import get_db
-from src.db.models import Document as DocumentORM, Job as JobORM
+from src.db.models import Document as DocumentORM
+from src.db.models import Job as JobORM
+from src.db.models import User as UserORM
+from src.modules.auth.dependencies import get_current_user
 from src.modules.document_pipeline.repository import PostgreSQLDocumentRepository
 from src.modules.document_pipeline.upload_service import UploadService
 from src.storage.bucket_manager import BucketManager
 from src.storage.object_storage import LocalFileSystemStorage
+
+
+class _FakeUser:
+    """Mirrors a real `users` row's identity fields — documents.uploader_user_id carries a
+    real FK to users(user_id) (migration 0006), so this test must persist a matching row
+    rather than fabricate an unrelated UUID."""
+
+    def __init__(self, user_id: uuid.UUID):
+        self.user_id = user_id
+        self.role = "ADMIN"
+        self.is_active = True
 
 
 def _generate_valid_pdf_stream() -> bytes:
@@ -34,6 +48,19 @@ def test_upload_returns_202_before_scan_completes(postgres_engine, tmp_path):
     SessionLocal = sessionmaker(bind=postgres_engine)
     test_storage = BucketManager(storage=LocalFileSystemStorage(base_dir=str(tmp_path / "async_storage")))
 
+    test_user_id = uuid.uuid4()
+    with SessionLocal() as session:
+        session.add(
+            UserORM(
+                user_id=test_user_id,
+                email=f"async-test-{test_user_id}@apag.org",
+                full_name="Async Test User",
+                hashed_password="not-a-real-hash",
+                role="ADMIN",
+            )
+        )
+        session.commit()
+
     def override_db():
         with SessionLocal() as session:
             yield session
@@ -47,9 +74,16 @@ def test_upload_returns_202_before_scan_completes(postgres_engine, tmp_path):
         repo = PostgreSQLDocumentRepository(session)
         return UploadService(bucket_manager=test_storage, repository=repo, db_session=session)
 
+    # Save/restore only the keys this test itself sets — `app` is a shared singleton across
+    # the whole pytest session, so a blanket `.clear()` in `finally` would wipe out other test
+    # modules' overrides (e.g. tests/unit/test_ingestion_pipeline.py's module-level overrides).
+    keys = (get_db, get_document_repository, get_upload_service, get_current_user)
+    previous = {k: app.dependency_overrides.get(k) for k in keys}
+
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_document_repository] = override_repo
     app.dependency_overrides[get_upload_service] = override_upload_service
+    app.dependency_overrides[get_current_user] = lambda: _FakeUser(test_user_id)
 
     try:
         client = TestClient(app)
@@ -58,7 +92,7 @@ def test_upload_returns_202_before_scan_completes(postgres_engine, tmp_path):
         start_time = time.perf_counter()
         response = client.post(
             "/api/v1/documents/upload",
-            files={"file": ("async_test.pdf", pdf_bytes, "application/pdf")},
+            files=[("files", ("async_test.pdf", pdf_bytes, "application/pdf"))],
         )
         elapsed = time.perf_counter() - start_time
 
@@ -66,7 +100,9 @@ def test_upload_returns_202_before_scan_completes(postgres_engine, tmp_path):
         assert response.status_code == 202
         assert elapsed < 0.500, f"Upload took too long: {elapsed:.3f}s"
 
-        body = response.json()
+        results = response.json()
+        assert isinstance(results, list) and len(results) == 1
+        body = results[0]
         assert "document_id" in body
         assert body["status"] == "QUARANTINED"
         assert "status_url" in body
@@ -91,9 +127,14 @@ def test_upload_returns_202_before_scan_completes(postgres_engine, tmp_path):
         assert status_body["latest_event"] is not None
         assert status_body["latest_event"]["event_type"] == "DOCUMENT_QUARANTINED"
     finally:
-        app.dependency_overrides.clear()
-        if "doc_id" in locals():
-            with SessionLocal() as session:
+        for k in keys:
+            if previous[k] is None:
+                app.dependency_overrides.pop(k, None)
+            else:
+                app.dependency_overrides[k] = previous[k]
+        with SessionLocal() as session:
+            if "doc_id" in locals():
                 session.query(JobORM).filter(JobORM.document_id == doc_id).delete()
                 session.query(DocumentORM).filter(DocumentORM.document_id == doc_id).delete()
-                session.commit()
+            session.query(UserORM).filter(UserORM.user_id == test_user_id).delete()
+            session.commit()

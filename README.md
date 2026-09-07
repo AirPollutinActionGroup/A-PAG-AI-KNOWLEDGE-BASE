@@ -69,7 +69,7 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 
 | System | Role | Contents |
 |---|---|---|
-| **PostgreSQL 16** | Relational Database | Document metadata, background job queues, audit logs, and operational data. |
+| **PostgreSQL 16** | Relational Database | Document metadata (incl. full-text search index), users, background job queues, audit logs, and operational data. |
 | **MinIO** | Object Storage | PDF artifacts across buckets (`quarantine/`, `raw/`, `extracted/`, `normalized/`). |
 | **Qdrant** | Vector Database | Document embeddings, chunk payloads, and permission metadata for semantic search. |
 
@@ -77,8 +77,8 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 
 ## ⚠️ Current Limitations
 
-- **Testing Studio UI**: The interactive web UI currently expects a synchronous response from `/upload`; polling integration against `GET /api/v1/documents/{id}/status` is queued as a fast-follow.
-- **Authentication**: Role-based access control (RBAC) and user authentication are planned for Phase 6.
+- **Open registration**: `POST /auth/register` has no invite gate yet — acceptable only for the internal, not-internet-exposed bootstrap phase. See `KNOWN_DEBTS.md`.
+- **2-tier classification only**: `RESTRICTED` = uploader + ADMIN (owner-scoped, not department-based); no per-document ACLs. See `ARCHITECTURE.md` §6b.
 - **Single-Tenant Deployment**: Multi-organization partitioning is deferred to later milestones.
 - **Text Extraction & OCR**: Pipeline currently implements Stages 1–3 (quarantine, validation, scanning, promotion); Stage 4 (OCR / extraction) is the next phase.
 
@@ -122,15 +122,22 @@ alembic upgrade head
 ### 4. Interactive Endpoints
 - **API Documentation (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
 - **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
-- **Upload Document (Async 202)**: `POST /api/v1/documents/upload`
+- **Register**: `POST /api/v1/auth/register`
+- **Login (OAuth2 password flow)**: `POST /api/v1/auth/login` — form fields `username` (email), `password`
+- **Current user**: `GET /api/v1/auth/me`
+- **Upload Document(s) (Async 202)**: `POST /api/v1/documents/upload` — multipart `files` (1–10), requires bearer token
 - **Query Status**: `GET /api/v1/documents/{document_id}/status`
+- **List Documents (paginated)**: `GET /api/v1/documents?limit=&offset=`
+- **Full-Text Search**: `GET /api/v1/documents/search?q=`
+
+All `/api/v1/documents/*` endpoints require `Authorization: Bearer <token>` from `/auth/login`.
 
 ---
 
 ## 🧪 Testing & Verification
 
 ```bash
-# Run the complete test suite (47 tests: 28 unit + 19 PostgreSQL integration, ~7.0s)
+# Run the complete test suite (52 tests: 33 unit + 19 PostgreSQL integration, ~5s)
 pytest tests/ -v
 
 # Run linter

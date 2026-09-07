@@ -19,11 +19,21 @@ class DocumentStatus(str, Enum):
 
 
 class Classification(str, Enum):
-    """2-tier data access classification."""
+    """2-tier data access classification. PUBLIC = any authenticated employee;
+    RESTRICTED = uploader (owner-scoped) + ADMIN role only."""
 
     PUBLIC = "PUBLIC"
     RESTRICTED = "RESTRICTED"
-    NULL = "NULL"
+
+
+class UserRole(str, Enum):
+    """Application-wide role. Deliberately 2-tier: ADMIN (sees/deletes every document,
+    RESTRICTED included) vs USER (everyone else — upload, search, and manage only their own
+    documents). A prior CONTRIBUTOR/VIEWER split existed but was never actually enforced
+    anywhere in the code, so it was collapsed — see KNOWN_DEBTS.md."""
+
+    ADMIN = "ADMIN"
+    USER = "USER"
 
 
 class JobStage(str, Enum):
@@ -54,3 +64,4 @@ class AuditEventType(str, Enum):
     DOCUMENT_REJECTED = "DOCUMENT_REJECTED"
     DOCUMENT_SUPERSEDED = "DOCUMENT_SUPERSEDED"
     DOCUMENT_ARCHIVED = "DOCUMENT_ARCHIVED"
+    DOCUMENT_DELETED = "DOCUMENT_DELETED"

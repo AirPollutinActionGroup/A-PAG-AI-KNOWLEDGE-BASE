@@ -4,7 +4,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from src.api.v1.auth import router as auth_router
+from src.api.v1.ingestion import limiter as upload_limiter
 from src.api.v1.ingestion import router as ingestion_router
 
 app = FastAPI(
@@ -13,7 +17,11 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.state.limiter = upload_limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
 # API v1 routes
+app.include_router(auth_router, prefix="/api/v1")
 app.include_router(ingestion_router, prefix="/api/v1")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"

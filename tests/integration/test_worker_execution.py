@@ -1,17 +1,18 @@
 """PostgreSQL integration tests for worker lifecycle, retries, reaper, and idempotency."""
 
+import io
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
-import io
 import pypdf
 import pytest
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from src.core.errors import TransientProcessingError
-from src.db.models import AuditLog as AuditORM, Document as DocumentORM, Job as JobORM
-from src.modules.document_pipeline.models import DocumentStatus, ValidationResult
+from src.db.models import AuditLog as AuditORM
+from src.db.models import Document as DocumentORM
+from src.db.models import Job as JobORM
 from src.storage.bucket_manager import BucketManager
 from src.storage.object_storage import LocalFileSystemStorage
 from src.workers.scan_worker import ScanWorker
@@ -97,23 +98,34 @@ def test_worker_completes_successful_job(postgres_engine, test_storage):
         assert final_doc.raw_path is not None
 
 
-def test_worker_marks_permanent_failure_as_failed(postgres_engine, test_storage):
-    """Verifies that a non-existent document results in job marked FAILED permanently with error message."""
+def test_worker_retries_on_missing_storage_object(postgres_engine, test_storage):
+    """Verifies that a document row exists but its quarantine object is missing from storage
+    is treated as a TRANSIENT failure (scheduled for retry), not a permanent one.
+
+    This is deliberately transient rather than permanent: a missing storage blob can be a
+    network blip or delayed replication, and the file may still show up on retry. (A prior
+    version of this test asserted FAILED here — that was itself the bug this fix corrects;
+    see ScanWorker.process_job's STORAGE_ERROR branch and KNOWN_DEBTS.md.)
+
+    Note: jobs.document_id carries an ON DELETE CASCADE foreign key to documents, so a job
+    referencing a genuinely nonexistent document_id cannot exist in Postgres — the
+    DOCUMENT_NOT_FOUND permanent-failure path is covered at the unit level instead (see
+    tests/unit/test_worker_unit.py::test_scan_worker_treats_missing_document_as_permanent_failure).
+    """
     SessionLocal = sessionmaker(bind=postgres_engine)
-    missing_doc_id = uuid.uuid4()
+    doc_id = uuid.uuid4()
     job_id = uuid.uuid4()
 
-    # Create orphan job without document in storage or db
     with SessionLocal() as session:
         doc = DocumentORM(
-            document_id=missing_doc_id,
-            filename="missing.pdf",
+            document_id=doc_id,
+            filename="missing_blob.pdf",
             file_size=1024,
             status="QUARANTINED",
         )
         job = JobORM(
             job_id=job_id,
-            document_id=missing_doc_id,
+            document_id=doc_id,
             stage="SCAN",
             status="PENDING",
         )
@@ -123,15 +135,15 @@ def test_worker_marks_permanent_failure_as_failed(postgres_engine, test_storage)
     worker = ScanWorker(
         session_factory=SessionLocal,
         bucket_manager=test_storage,
-        worker_id="test-fail-worker",
+        worker_id="test-transient-worker",
     )
     worker.run_once()
 
     with SessionLocal() as session:
         final_job = session.query(JobORM).filter(JobORM.job_id == job_id).first()
-        assert final_job.status == "FAILED"
-        assert final_job.finished_at is not None
-        assert "STORAGE_ERROR" in final_job.error_message or "Failed" in final_job.error_message
+        assert final_job.status == "PENDING"
+        assert final_job.retry_count == 1
+        assert "STORAGE_ERROR" in final_job.error_message
 
 
 def test_worker_retries_transient_failure(postgres_engine, test_storage):
@@ -173,7 +185,7 @@ def test_worker_retries_transient_failure(postgres_engine, test_storage):
         assert retried_job.retry_count == 1
         assert retried_job.worker_id is None
         assert retried_job.lease_expires_at is None
-        assert retried_job.scheduled_at > datetime.now(timezone.utc)
+        assert retried_job.scheduled_at > datetime.now(UTC)
         assert "ClamAV daemon timeout" in retried_job.error_message
 
 
@@ -222,7 +234,7 @@ def test_reaper_reclaims_stuck_running_job(postgres_engine):
     SessionLocal = sessionmaker(bind=postgres_engine)
     doc_id = uuid.uuid4()
     job_id = uuid.uuid4()
-    past_lease = datetime.now(timezone.utc) - timedelta(minutes=5)
+    past_lease = datetime.now(UTC) - timedelta(minutes=5)
 
     with SessionLocal() as session:
         doc = DocumentORM(
@@ -261,7 +273,7 @@ def test_reaper_ignores_active_running_job(postgres_engine):
     SessionLocal = sessionmaker(bind=postgres_engine)
     doc_id = uuid.uuid4()
     job_id = uuid.uuid4()
-    future_lease = datetime.now(timezone.utc) + timedelta(minutes=5)
+    future_lease = datetime.now(UTC) + timedelta(minutes=5)
 
     with SessionLocal() as session:
         doc = DocumentORM(
@@ -341,7 +353,7 @@ def test_worker_idempotent_on_retry(postgres_engine, test_storage):
 def test_worker_processes_jobs_in_order_within_priority(postgres_engine, test_storage):
     """Verifies that jobs with equal priority are picked up in chronological scheduled_at order."""
     SessionLocal = sessionmaker(bind=postgres_engine)
-    base_time = datetime.now(timezone.utc) - timedelta(seconds=10)
+    base_time = datetime.now(UTC) - timedelta(seconds=10)
 
     doc_ids = [uuid.uuid4() for _ in range(3)]
     job_ids = [uuid.uuid4() for _ in range(3)]

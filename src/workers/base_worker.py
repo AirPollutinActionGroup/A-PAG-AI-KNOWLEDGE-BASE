@@ -1,15 +1,14 @@
 """Base Worker implementation providing SKIP LOCKED polling, lease management, heartbeat, retry backoff, and reaper."""
 
 import logging
-import os
 import signal
-import sys
 import time
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -282,9 +281,9 @@ class BaseWorker(ABC):
             with self.session_factory() as session:
                 bind = session.get_bind()
                 if bind and bind.dialect.name == "postgresql":
-                    sched_expr = f"NOW() + (INTERVAL '1 second' * :backoff_sec)"
+                    sched_expr = "NOW() + (INTERVAL '1 second' * :backoff_sec)"
                 else:
-                    sched_expr = f"datetime(CURRENT_TIMESTAMP, '+' || :backoff_sec || ' seconds')"
+                    sched_expr = "datetime(CURRENT_TIMESTAMP, '+' || :backoff_sec || ' seconds')"
 
                 sql = text(f"""
                     UPDATE jobs
@@ -321,7 +320,7 @@ class BaseWorker(ABC):
             logger.error("Job %s permanent failure: %s", job.job_id, e)
             self._mark_job_failed(job, str(e))
         except Exception as e:
-            logger.exception("Job %s unexpected failure: %s", job.job_id, e)
+            logger.exception("Job %s unexpected failure", job.job_id)
             self._handle_job_retry_or_fail(job, f"Unexpected error: {e}")
 
     @abstractmethod
@@ -367,11 +366,14 @@ class BaseWorker(ABC):
             self.stage, self.worker_id, self.poll_interval, self.lease_seconds,
         )
 
+        # signal.signal() only works on the main thread of the main interpreter — it raises
+        # when a worker is constructed inside a thread (as the concurrency tests do). Losing
+        # graceful shutdown there is harmless, so this is best-effort rather than fatal.
         try:
             signal.signal(signal.SIGINT, self._handle_signal)
             signal.signal(signal.SIGTERM, self._handle_signal)
-        except Exception:
-            pass
+        except (ValueError, OSError, RuntimeError) as e:
+            logger.debug("Signal handlers not installed (not on main thread?): %s", e)
 
         while not self._shutdown_requested:
             self.touch_heartbeat()

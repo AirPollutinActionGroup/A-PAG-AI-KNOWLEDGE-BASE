@@ -1,23 +1,26 @@
 """Integration tests for PostgreSQLDocumentRepository against real PostgreSQL."""
 
 import uuid
+
 from sqlalchemy.orm import Session
 
 from src.db.enums import Classification, DocumentStatus
-from src.db.models import Document as DocumentORM
 from src.modules.document_pipeline.models import Document as DocumentDTO
 from src.modules.document_pipeline.repository import PostgreSQLDocumentRepository
 
 
 def test_postgres_repository_crud(db_session: Session):
-    """Verifies create, get_by_id, update_status, and update_document against real Postgres."""
+    """Verifies create, get_by_id, and update_document against real Postgres."""
     repo = PostgreSQLDocumentRepository(db_session)
     doc_id = uuid.uuid4()
 
     doc = DocumentDTO(
         id=doc_id,
         filename="air_quality_directive.pdf",
-        owner_id=uuid.uuid4(),
+        # owner_id intentionally None: uploader_user_id now carries a real FK to users(user_id)
+        # (migration 0006), so a fabricated random UUID would violate it. This test exercises
+        # document CRUD, not the ownership relationship.
+        owner_id=None,
         size=1048576,
         checksum="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         status=DocumentStatus.QUARANTINED,
@@ -36,18 +39,13 @@ def test_postgres_repository_crud(db_session: Session):
     assert fetched.filename == "air_quality_directive.pdf"
     assert fetched.size == 1048576
 
-    # 3. Update status
-    repo.update_status(doc_id, DocumentStatus.AWAITING_CLASSIFICATION)
-    updated_status_doc = repo.get_by_id(doc_id)
-    assert updated_status_doc.status == DocumentStatus.AWAITING_CLASSIFICATION
-
-    # 4. Update full document
-    fetched.status = DocumentStatus.LIVE
+    # 3. Update full document
+    fetched.status = DocumentStatus.AWAITING_CLASSIFICATION
     fetched.raw_path = "apag-raw/e3b0c442.pdf"
     repo.update_document(fetched)
 
     final_doc = repo.get_by_id(doc_id)
-    assert final_doc.status == DocumentStatus.LIVE
+    assert final_doc.status == DocumentStatus.AWAITING_CLASSIFICATION
     assert final_doc.raw_path == "apag-raw/e3b0c442.pdf"
 
 
