@@ -566,10 +566,142 @@
         }
 
         .mono { font-family: var(--font-mono); font-size: 0.78rem; }
+
+        /* Login Gate */
+        .login-overlay {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .login-card {
+            width: 100%;
+            max-width: 380px;
+        }
+
+        .login-card h2 {
+            margin-bottom: 0.35rem;
+        }
+
+        .login-card p.hint {
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .login-error {
+            display: none;
+            background: rgba(239, 68, 68, 0.12);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #fca5a5;
+            padding: 0.6rem 0.85rem;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            margin-bottom: 0.85rem;
+        }
+
+        .password-field { position: relative; }
+        .password-field input { padding-right: 2.4rem; }
+        .password-toggle {
+            position: absolute;
+            right: 0.5rem;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 0.95rem;
+            padding: 0.2rem;
+            line-height: 1;
+            opacity: 0.65;
+        }
+        .password-toggle:hover { opacity: 1; }
+
+        .user-pill {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .btn-logout {
+            background: none;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            padding: 0.35rem 0.7rem;
+            border-radius: 8px;
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
+
+        .btn-logout:hover { color: var(--text-main); border-color: var(--accent-red); }
+
+        .btn-replace {
+            background: none;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            padding: 0.25rem 0.55rem;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .btn-replace:hover { color: var(--text-main); border-color: var(--accent-blue, #60a5fa); }
     </style>
 </head>
 <body>
-    <div class="container">
+    <!-- Login Gate (shown until a token is present) -->
+    <div class="login-overlay" id="login-overlay">
+        <div class="card login-card" id="signin-view">
+            <h2>🔐 Sign in</h2>
+            <p class="hint">A-PAG AI Knowledge Base — every upload is attributed to your account.</p>
+            <div class="login-error" id="login-error"></div>
+            <div class="form-group" style="margin-bottom: 0.85rem;">
+                <label for="login-email">Email</label>
+                <input type="text" id="login-email" placeholder="you@a-pag.org" style="width:100%;">
+            </div>
+            <div class="form-group" style="margin-bottom: 1rem;">
+                <label for="login-password">Password</label>
+                <div class="password-field">
+                    <input type="password" id="login-password" placeholder="••••••••" style="width:100%;">
+                    <button type="button" class="password-toggle" onclick="togglePasswordVisibility('login-password', this)" aria-label="Show password">👁</button>
+                </div>
+            </div>
+            <button class="btn-primary" onclick="login()">Sign In</button>
+            <p class="hint" style="margin-top:0.85rem; margin-bottom:0;">
+                No account yet? <a href="#" onclick="showRegister(); return false;" style="color:#60a5fa;">Create one</a>
+            </p>
+        </div>
+
+        <div class="card login-card" id="register-view" style="display:none;">
+            <h2>📝 Create account</h2>
+            <p class="hint">Restricted to A-PAG email addresses.</p>
+            <div class="login-error" id="register-error"></div>
+            <div class="form-group" style="margin-bottom: 0.85rem;">
+                <label for="register-name">Full name</label>
+                <input type="text" id="register-name" placeholder="Jane Doe" style="width:100%;">
+            </div>
+            <div class="form-group" style="margin-bottom: 0.85rem;">
+                <label for="register-email">Email</label>
+                <input type="text" id="register-email" placeholder="you@a-pag.org" style="width:100%;">
+            </div>
+            <div class="form-group" style="margin-bottom: 1rem;">
+                <label for="register-password">Password</label>
+                <div class="password-field">
+                    <input type="password" id="register-password" placeholder="••••••••" style="width:100%;">
+                    <button type="button" class="password-toggle" onclick="togglePasswordVisibility('register-password', this)" aria-label="Show password">👁</button>
+                </div>
+                <p class="hint" style="margin: 0.35rem 0 0;">8+ characters, with uppercase, lowercase, a digit, and a special character.</p>
+            </div>
+            <button class="btn-primary" onclick="register()">Create Account</button>
+            <p class="hint" style="margin-top:0.85rem; margin-bottom:0;">
+                Already have an account? <a href="#" onclick="showSignin(); return false;" style="color:#60a5fa;">Sign in</a>
+            </p>
+        </div>
+    </div>
+
+    <div class="container" id="main-app" style="display:none;">
         <!-- Header -->
         <header>
             <div class="logo-group">
@@ -591,6 +723,10 @@
                 <a href="/docs" target="_blank" style="color: var(--text-muted); font-size: 0.8rem; text-decoration: none; border: 1px solid var(--border-color); padding: 0.35rem 0.65rem; border-radius: 8px;">
                     Swagger Docs ↗
                 </a>
+                <div class="user-pill stat-pill">
+                    <span id="current-user-email">—</span>
+                    <button class="btn-logout" onclick="logout()">Sign out</button>
+                </div>
             </div>
         </header>
 
@@ -604,10 +740,10 @@
 
                 <!-- Dropzone -->
                 <div class="dropzone" id="dropzone">
-                    <input type="file" id="file-input" accept=".pdf,application/pdf">
+                    <input type="file" id="file-input" accept=".pdf,application/pdf" multiple>
                     <div class="dropzone-icon">📄</div>
-                    <p class="primary">Drag & drop policy PDF here, or browse</p>
-                    <p class="secondary">Max size: 100MB • Standard PDF format (Fail-fast validated)</p>
+                    <p class="primary">Drag & drop policy PDFs here, or browse</p>
+                    <p class="secondary">Up to 5 files per upload • Max size: 100MB each (Fail-fast validated)</p>
                     <div class="selected-file-banner" id="file-banner"></div>
                 </div>
 
@@ -622,8 +758,13 @@
                     </div>
                     <div class="form-group">
                         <label for="supersedes-id">Supersedes Doc ID (Optional)</label>
-                        <input type="text" id="supersedes-id" placeholder="UUID of older document">
+                        <input type="text" id="supersedes-id" placeholder="Use “Replace” in the table below">
                     </div>
+                </div>
+
+                <div class="form-group" style="margin-bottom: 0.75rem;">
+                    <label for="description">Description (Optional — indexed for search)</label>
+                    <input type="text" id="description" placeholder="e.g. CAQM directive on stubble burning, Nov 2026">
                 </div>
 
                 <div class="checkbox-group">
@@ -733,7 +874,7 @@
                     <button class="tab-btn" onclick="setFilter('REJECTED', this)">Rejected (Failed)</button>
                     <button class="tab-btn" onclick="setFilter('SUPERSEDED', this)">Superseded</button>
                 </div>
-                <input type="text" id="search-input" placeholder="🔍 Search by name, ID or rejection reason..." oninput="renderTable()" style="max-width: 320px; font-size: 0.8rem; padding: 0.45rem 0.75rem;">
+                <input type="text" id="search-input" placeholder="🔍 Search title, filename & description..." oninput="onSearchInput()" style="max-width: 320px; font-size: 0.8rem; padding: 0.45rem 0.75rem;">
             </div>
 
             <div class="table-container">
@@ -742,17 +883,19 @@
                         <tr>
                             <th>Doc ID</th>
                             <th>Filename</th>
+                            <th>Uploaded by</th>
                             <th>Size</th>
                             <th>Class</th>
                             <th>Ver</th>
                             <th>Status</th>
                             <th>Storage / Rejection Reason</th>
                             <th>Checksum (SHA-256)</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="docs-table-body">
                         <tr>
-                            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading documents...</td>
+                            <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading documents...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -761,10 +904,154 @@
     </div>
 
     <script>
-        let selectedFile = null;
+        const MAX_FILES_PER_UPLOAD = 5;
+        let selectedFiles = [];
         let allDocuments = [];
         let currentFilter = 'ALL';
         let lastIngestedDocId = null;
+        let authToken = localStorage.getItem('apag_token') || null;
+        let currentUserEmail = localStorage.getItem('apag_user_email') || null;
+
+        function togglePasswordVisibility(inputId, btn) {
+            const input = document.getElementById(inputId);
+            const showing = input.type === 'text';
+            input.type = showing ? 'password' : 'text';
+            btn.textContent = showing ? '👁' : '🙈';
+            btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+        }
+
+        function authHeaders() {
+            return authToken ? { 'Authorization': 'Bearer ' + authToken } : {};
+        }
+
+        function showApp() {
+            document.getElementById('login-overlay').style.display = 'none';
+            document.getElementById('main-app').style.display = 'block';
+            document.getElementById('current-user-email').innerText = currentUserEmail || '';
+            loadDocuments();
+        }
+
+        function showLogin(message) {
+            authToken = null;
+            localStorage.removeItem('apag_token');
+            localStorage.removeItem('apag_user_email');
+            document.getElementById('login-overlay').style.display = 'flex';
+            document.getElementById('main-app').style.display = 'none';
+            showSignin();
+            const err = document.getElementById('login-error');
+            if (message) {
+                err.innerText = message;
+                err.style.display = 'block';
+            } else {
+                err.style.display = 'none';
+            }
+        }
+
+        // Toggles between the sign-in and create-account cards within the same overlay —
+        // no page navigation, so a partially-filled form on one side is never lost mid-flow.
+        function showSignin() {
+            document.getElementById('signin-view').style.display = 'block';
+            document.getElementById('register-view').style.display = 'none';
+        }
+
+        function showRegister() {
+            document.getElementById('signin-view').style.display = 'none';
+            document.getElementById('register-view').style.display = 'block';
+            document.getElementById('register-error').style.display = 'none';
+        }
+
+        async function register() {
+            const fullName = document.getElementById('register-name').value.trim();
+            const email = document.getElementById('register-email').value.trim();
+            const password = document.getElementById('register-password').value;
+            const err = document.getElementById('register-error');
+
+            const showRegisterError = (msg) => {
+                err.innerText = msg;
+                err.style.display = 'block';
+            };
+
+            if (!fullName || !email || !password) {
+                showRegisterError('Full name, email, and password are all required.');
+                return;
+            }
+            // Mirrors UserRegister's server-side complexity rule for instant feedback — the
+            // server re-validates regardless, so this is a UX nicety, not the real check.
+            const missing = [];
+            if (password.length < 8) missing.push('at least 8 characters');
+            if (!/[A-Z]/.test(password)) missing.push('an uppercase letter');
+            if (!/[a-z]/.test(password)) missing.push('a lowercase letter');
+            if (!/\d/.test(password)) missing.push('a digit');
+            if (!/[^A-Za-z0-9]/.test(password)) missing.push('a special character');
+            if (missing.length > 0) {
+                showRegisterError('Password needs: ' + missing.join(', ') + '.');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/v1/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ full_name: fullName, email: email, password: password })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    const detail = data.detail;
+                    showRegisterError(typeof detail === 'string' ? detail : 'Could not create account.');
+                    return;
+                }
+                // Account created — sign the user straight in rather than making them
+                // re-type their credentials on a second screen.
+                document.getElementById('login-email').value = email;
+                document.getElementById('login-password').value = password;
+                showSignin();
+                await login();
+            } catch (e) {
+                showRegisterError('Could not reach the API: ' + e.message);
+            }
+        }
+
+        async function login() {
+            const email = document.getElementById('login-email').value.trim();
+            const password = document.getElementById('login-password').value;
+            if (!email || !password) {
+                showLogin('Email and password are required.');
+                return;
+            }
+            try {
+                const body = new URLSearchParams();
+                body.append('username', email);
+                body.append('password', password);
+                const res = await fetch('/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: body.toString()
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    showLogin(data.detail || 'Login failed.');
+                    return;
+                }
+                authToken = data.access_token;
+                currentUserEmail = email;
+                localStorage.setItem('apag_token', authToken);
+                localStorage.setItem('apag_user_email', email);
+                showApp();
+            } catch (err) {
+                showLogin('Could not reach the API: ' + err.message);
+            }
+        }
+
+        function logout() {
+            showLogin();
+        }
+
+        // Boot: try the stored token; if any authenticated call comes back 401, fall back to login.
+        if (authToken) {
+            showApp();
+        } else {
+            showLogin();
+        }
 
         const fileInput = document.getElementById('file-input');
         const dropzone = document.getElementById('dropzone');
@@ -772,7 +1059,7 @@
         const inspector = document.getElementById('inspector-output');
 
         fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) setFile(e.target.files[0]);
+            if (e.target.files.length > 0) setFiles(e.target.files);
         });
 
         dropzone.addEventListener('dragover', (e) => {
@@ -785,13 +1072,25 @@
         dropzone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropzone.classList.remove('dragover');
-            if (e.dataTransfer.files.length > 0) setFile(e.dataTransfer.files[0]);
+            if (e.dataTransfer.files.length > 0) setFiles(e.dataTransfer.files);
         });
 
-        function setFile(file) {
-            selectedFile = file;
+        // Accepts a FileList (or plain array) of 1-5 PDFs. Silently caps at
+        // MAX_FILES_PER_UPLOAD rather than rejecting the whole selection, since dropping
+        // "a few too many" is a much likelier mistake than needing exactly 6+.
+        function setFiles(fileList) {
+            const files = Array.from(fileList).slice(0, MAX_FILES_PER_UPLOAD);
+            selectedFiles = files;
             fileBanner.style.display = 'block';
-            fileBanner.innerText = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+            if (files.length === 1) {
+                fileBanner.innerText = `Selected: ${files[0].name} (${(files[0].size / 1024).toFixed(1)} KB)`;
+            } else {
+                const names = files.map(f => f.name).join(', ');
+                fileBanner.innerText = `Selected ${files.length} files: ${names}`;
+            }
+            if (fileList.length > MAX_FILES_PER_UPLOAD) {
+                fileBanner.innerText += ` — only the first ${MAX_FILES_PER_UPLOAD} were kept (limit per upload).`;
+            }
         }
 
         function resetPipelineVisuals() {
@@ -861,8 +1160,8 @@
         }
 
         async function handleUpload() {
-            if (!selectedFile) {
-                alert("Please select or drop a PDF file first.");
+            if (selectedFiles.length === 0) {
+                alert("Please select or drop at least one PDF file first.");
                 return;
             }
 
@@ -871,28 +1170,39 @@
             setRunningPipeline();
 
             const formData = new FormData();
-            formData.append('file', selectedFile);
+            selectedFiles.forEach(f => formData.append('files', f));
             formData.append('classification', document.getElementById('classification').value);
 
+            const description = document.getElementById('description').value.trim();
+            if (description) formData.append('description', description);
+
             const supersedes = document.getElementById('supersedes-id').value.trim();
-            if (supersedes) formData.append('supersedes_doc_id', supersedes);
+            if (supersedes && selectedFiles.length === 1) formData.append('supersedes_doc_id', supersedes);
             formData.append('keep_previous_version', document.getElementById('keep-previous').checked);
 
             try {
                 const res = await fetch('/api/v1/documents/upload', {
                     method: 'POST',
+                    headers: authHeaders(),
                     body: formData
                 });
 
-                const data = await res.json();
-                inspector.innerText = JSON.stringify(data, null, 2);
+                if (res.status === 401) {
+                    showLogin('Session expired — please sign in again.');
+                    return;
+                }
+
+                const responseBody = await res.json();
+                inspector.innerText = JSON.stringify(responseBody, null, 2);
 
                 if (res.ok) {
+                    // 202 response is a list — one UploadResponse per uploaded file.
+                    const data = Array.isArray(responseBody) ? responseBody[0] : responseBody;
                     lastIngestedDocId = data.document_id;
                     updatePipelineResult(data.status, data.rejection_reason, data);
                 } else {
-                    const detail = data.detail || 'Validation failed';
-                    updatePipelineResult('REJECTED', detail, data);
+                    const detail = responseBody.detail || 'Validation failed';
+                    updatePipelineResult('REJECTED', typeof detail === 'string' ? detail : JSON.stringify(detail), responseBody);
                 }
 
                 await loadDocuments();
@@ -948,15 +1258,21 @@
             }
 
             const file = new File([blob], filename, { type: 'application/pdf' });
-            setFile(file);
+            setFiles([file]);
             await handleUpload();
         }
 
         async function loadDocuments() {
             try {
-                const res = await fetch('/api/v1/documents');
+                const res = await fetch('/api/v1/documents?limit=200', { headers: authHeaders() });
+                if (res.status === 401) {
+                    showLogin('Session expired — please sign in again.');
+                    return;
+                }
                 if (!res.ok) return;
-                allDocuments = await res.json();
+                const body = await res.json();
+                // GET /documents now returns {total, limit, offset, documents}, not a bare array.
+                allDocuments = body.documents || [];
                 updateStats();
                 renderTable();
             } catch (err) {
@@ -971,6 +1287,11 @@
             document.getElementById('stat-rejected').innerText = allDocuments.filter(d => d.status === 'REJECTED').length;
         }
 
+        // null = no active search, show allDocuments; otherwise the ranked results from
+        // GET /documents/search (title/filename/description via Postgres full-text search).
+        let searchResults = null;
+        let searchDebounceTimer = null;
+
         function setFilter(filter, btn) {
             currentFilter = filter;
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -978,25 +1299,39 @@
             renderTable();
         }
 
+        function onSearchInput() {
+            const q = document.getElementById('search-input').value.trim();
+            clearTimeout(searchDebounceTimer);
+            if (!q) {
+                searchResults = null;
+                renderTable();
+                return;
+            }
+            searchDebounceTimer = setTimeout(() => performBackendSearch(q), 300);
+        }
+
+        async function performBackendSearch(q) {
+            try {
+                const res = await fetch(`/api/v1/documents/search?q=${encodeURIComponent(q)}&limit=200`, { headers: authHeaders() });
+                if (res.status === 401) { showLogin('Session expired — please sign in again.'); return; }
+                if (!res.ok) { searchResults = []; renderTable(); return; }
+                const body = await res.json();
+                searchResults = body.documents || [];
+                renderTable();
+            } catch (err) {
+                console.error('Search failed:', err);
+            }
+        }
+
         function renderTable() {
             const tbody = document.getElementById('docs-table-body');
-            const search = document.getElementById('search-input').value.toLowerCase().trim();
-
-            let filtered = allDocuments;
+            let filtered = searchResults !== null ? searchResults : allDocuments;
             if (currentFilter !== 'ALL') {
                 filtered = filtered.filter(d => d.status === currentFilter);
             }
-            if (search) {
-                filtered = filtered.filter(d => 
-                    d.filename.toLowerCase().includes(search) || 
-                    d.id.toLowerCase().includes(search) ||
-                    (d.rejection_reason && d.rejection_reason.toLowerCase().includes(search)) ||
-                    (d.checksum && d.checksum.toLowerCase().includes(search))
-                );
-            }
 
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">No documents matching current view.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 2rem;">No documents matching current view.</td></tr>';
                 return;
             }
 
@@ -1017,19 +1352,96 @@
                     reasonHtml = `<span class="storage-text" style="color:#34d399;">📦 ${d.raw_path || 'apag-raw/' + (d.checksum ? d.checksum.substring(0,12) + '.pdf' : '')}</span>`;
                 }
 
+                // Only a live document can be replaced — a rejected/duplicate/already-superseded
+                // one has no successor semantics worth offering.
+                const replaceable = ['AWAITING_CLASSIFICATION', 'LIVE', 'VALIDATED'].includes(d.status);
+                const safeName = (d.filename || '').replace(/'/g, "\\'");
+                const actions = [];
+                if (replaceable) {
+                    actions.push(`<button class="btn-replace" onclick="event.stopPropagation(); startReplace('${d.id}', '${safeName}')" title="Upload a new version of this document">⤴ Replace</button>`);
+                }
+                if (d.raw_path) {
+                    actions.push(`<button class="btn-replace" onclick="event.stopPropagation(); downloadDocument('${d.id}')" title="Download the promoted PDF">⬇ Open</button>`);
+                }
+                actions.push(`<button class="btn-replace" onclick="event.stopPropagation(); deleteDocument('${d.id}', '${safeName}')" title="Permanently delete this document and erase the file from storage (owner or admin only)">🗑</button>`);
+
                 return `
                     <tr onclick="inspectDocument('${d.id}')" style="cursor: pointer;" title="Click to inspect JSON">
                         <td class="mono" title="${d.id}">${d.id.substring(0, 8)}...</td>
                         <td><strong>${d.filename}</strong></td>
+                        <td style="font-size: 0.75rem; color: var(--text-muted);">${d.uploaded_by || '—'}</td>
                         <td class="mono">${(d.size / 1024).toFixed(1)} KB</td>
                         <td><span style="font-size: 0.75rem; color: var(--text-muted);">${d.classification}</span></td>
                         <td>v${d.version}</td>
                         <td><span class="pill ${pillClass}">${d.status}</span></td>
                         <td>${reasonHtml}</td>
                         <td class="mono" title="${d.checksum || 'N/A'}">${d.checksum ? d.checksum.substring(0, 10) + '...' : '—'}</td>
+                        <td style="display:flex; gap:0.35rem; flex-wrap:wrap;">${actions.join('')}</td>
                     </tr>
                 `;
             }).join('');
+        }
+
+        // Streams the actual PDF from GET /documents/{id}/download and hands the browser a
+        // blob URL to open in a new tab — the API route itself requires the bearer token,
+        // so a plain <a href> can't be used.
+        async function downloadDocument(docId) {
+            try {
+                const res = await fetch(`/api/v1/documents/${docId}/download`, { headers: authHeaders() });
+                if (res.status === 401) { showLogin('Session expired — please sign in again.'); return; }
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    alert(body.detail || 'Could not download this document.');
+                    return;
+                }
+                const blob = await res.blob();
+                window.open(URL.createObjectURL(blob), '_blank');
+            } catch (err) {
+                alert('Error downloading document: ' + err.message);
+            }
+        }
+
+        // Delete is permanent — the file is erased from object storage, not just hidden.
+        // A plain confirm() is dismissed on muscle memory, so the word DELETE must be typed
+        // back before an irreversible destruction goes through.
+        async function deleteDocument(docId, filename) {
+            const typed = prompt(
+                `PERMANENTLY DELETE "${filename}"?\n\n` +
+                `The file will be erased from storage and cannot be recovered.\n\n` +
+                `Type DELETE to confirm:`
+            );
+            if (typed === null) return;
+            if (typed.trim().toUpperCase() !== 'DELETE') {
+                alert('Confirmation text did not match — nothing was deleted.');
+                return;
+            }
+            try {
+                const res = await fetch(`/api/v1/documents/${docId}`, { method: 'DELETE', headers: authHeaders() });
+                if (res.status === 401) { showLogin('Session expired — please sign in again.'); return; }
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    alert(body.detail || 'Could not delete this document (owner or admin only).');
+                    return;
+                }
+                await loadDocuments();
+            } catch (err) {
+                alert('Error deleting document: ' + err.message);
+            }
+        }
+
+        // Versioning: pre-fills supersedes_doc_id from the row the user clicked, so nobody
+        // ever has to copy a UUID by hand. The actual upload still goes through
+        // handleUpload() — one code path for every upload.
+        function startReplace(docId, filename) {
+            document.getElementById('supersedes-id').value = docId;
+            document.getElementById('keep-previous').checked = true;
+
+            const banner = document.getElementById('file-banner');
+            banner.innerHTML = `⤴ Replacing <strong>${filename}</strong> — choose the new version below.`;
+            banner.classList.add('visible');
+
+            document.getElementById('file-input').click();
+            document.getElementById('dropzone').scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
 
         function inspectDocument(id) {

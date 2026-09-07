@@ -2,14 +2,13 @@
 
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
-from sqlalchemy import text
-from sqlalchemy.orm import Session, sessionmaker
-
 import pytest
-from src.db.models import Document as DocumentORM, Job as JobORM
+from sqlalchemy.orm import sessionmaker
+
+from src.db.models import Document as DocumentORM
+from src.db.models import Job as JobORM
 from src.workers.scan_worker import ScanWorker
 
 

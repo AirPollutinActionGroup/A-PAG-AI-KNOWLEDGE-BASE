@@ -1,6 +1,7 @@
 """Integration tests for partial unique index uq_documents_active_sha256 under PostgreSQL."""
 
 import uuid
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session

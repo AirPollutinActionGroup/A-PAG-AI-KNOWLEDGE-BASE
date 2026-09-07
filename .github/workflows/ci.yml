@@ -1,0 +1,144 @@
+name: CI
+
+# Runs on feature branches (fast feedback while working) and on everything targeting the
+# main_ci gate. Deliberately does NOT run on pushes to `main` — by the time code reaches
+# main it has already passed here; main's job is releasing, not re-verifying.
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - main_ci
+  pull_request:
+    branches:
+      - main_ci
+      - main
+
+# A new push to the same branch cancels the previous in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Matches the Dockerfile, so CI tests the interpreter that actually ships.
+  PYTHON_VERSION: '3.13'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: ruff
+        run: uv run ruff check src/ tests/ main.py worker_main.py
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    # Two of the tests in tests/unit reach a real database through the app's get_db
+    # dependency rather than an override, so a Postgres has to be reachable at
+    # localhost:5432. These credentials intentionally match the defaults in
+    # src/core/config.py, which means neither pytest nor Alembic needs any env override.
+    # This is a throwaway CI database — the committed dev password is fine here.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: apag_knowledge_base
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: apag_secure_password_2026
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # The service container above starts empty. Two tests in tests/unit reach it through
+      # the app's real get_db dependency, so the schema has to exist before pytest runs or
+      # they fail with 'relation "users" does not exist'. Locally these pass only because
+      # the dev database already has tables — those two tests arguably don't belong in
+      # tests/unit at all, but that's a separate cleanup.
+      - name: Create schema in the service database
+        run: uv run alembic upgrade head
+
+      # tests/integration spins up its own disposable Postgres via testcontainers, which
+      # needs a working Docker daemon. GitHub-hosted ubuntu runners provide one, so the
+      # conftest safety net (which skips rather than touching DATABASE_URL) stays dormant.
+      - name: Run full suite
+        run: uv run pytest tests/ -v
+
+  migrations:
+    name: Migration chain
+    runs-on: ubuntu-latest
+
+    # This job exists because the test suite CANNOT catch migration bugs: conftest.py
+    # builds the schema with Base.metadata.create_all() straight from the ORM models,
+    # bypassing Alembic entirely. A broken revision chain, a too-long revision id, or bad
+    # DDL would pass all tests and only surface on a real deployment.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: apag_knowledge_base
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: apag_secure_password_2026
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Apply every migration to an empty database
+        run: uv run alembic upgrade head
+
+      - name: Verify the newest migration is reversible
+        run: |
+          uv run alembic downgrade -1
+          uv run alembic upgrade head
+
+      - name: Assert the ORM models match the migrated schema
+        # If this fails, models.py and the migrations have drifted — someone changed a
+        # model without writing the matching migration (or vice versa).
+        run: uv run alembic check
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both api and worker share one image, so a single build proves both still build.
+      - name: Build application image
+        run: docker build -t apag-kb:ci .

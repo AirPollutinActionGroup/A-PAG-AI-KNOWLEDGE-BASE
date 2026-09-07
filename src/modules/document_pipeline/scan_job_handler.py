@@ -9,12 +9,12 @@ import threading
 import uuid
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.db.enums import AuditEventType
 from src.modules.audit.service import AuditService
 from src.modules.document_pipeline.models import (
-    Document,
     DocumentStatus,
     UploadRequest,
     UploadResponse,
@@ -85,9 +85,9 @@ class ScanJobHandler:
                 correlation_id=correlation_id,
             )
         except Exception:
-            logger.error(
+            logger.exception(
                 "AUDIT WRITE FAILED: doc_id=%s event=%s — compliance gap, investigate immediately",
-                document_id, event_type.value, exc_info=True,
+                document_id, event_type.value,
             )
 
     def process(
@@ -295,7 +295,41 @@ class ScanJobHandler:
             doc.status = DocumentStatus.AWAITING_CLASSIFICATION
             doc.raw_path = f"{self.buckets.raw}/{raw_key}"
             doc.quarantine_path = None
-            self.repo.update_document(doc)
+            try:
+                self.repo.update_document(doc)
+            except IntegrityError:
+                # Lost a race against another worker promoting the same sha256 concurrently.
+                # The DB partial unique index (uq_documents_active_sha256) is the real guard;
+                # the in-process lock above only protects a single worker process.
+                if self._db is not None:
+                    self._db.rollback()
+                doc.status = DocumentStatus.DUPLICATE
+                doc.raw_path = None
+                self.repo.update_document(doc)
+
+                # Note: the shared/content-addressed raw object (raw_key = sha256.pdf) is left in
+                # place — it belongs to the canonical document that won the race, not this one.
+                canonical = self.repo.get_by_checksum(validation.sha256)
+                self._audit(document_id, AuditEventType.DOCUMENT_REJECTED, details={
+                    "filename": filename, "reason": "DUPLICATE_RACE",
+                    "canonical_document_id": str(canonical.id) if canonical else None,
+                    "sha256": validation.sha256,
+                }, correlation_id=corr_id)
+
+                logger.info(
+                    "DUPLICATE (race): corr_id=%s doc_id=%s sha256=%s",
+                    corr_id, document_id, validation.sha256,
+                )
+
+                return UploadResponse(
+                    document_id=canonical.id if canonical else document_id,
+                    filename=filename,
+                    status=DocumentStatus.DUPLICATE,
+                    quarantine_key=quarantine_key,
+                    checksum=validation.sha256,
+                    was_duplicate=True,
+                    message="Duplicate document detected (concurrent upload of identical content).",
+                )
 
             # AUDIT: Validation passed + promoted to raw
             self._audit(document_id, AuditEventType.VALIDATION_PASSED, details={

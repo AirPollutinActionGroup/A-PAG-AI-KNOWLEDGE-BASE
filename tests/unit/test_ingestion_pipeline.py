@@ -9,6 +9,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pypdf
 import pytest
@@ -16,17 +17,21 @@ from sqlalchemy import create_engine, exc, text
 from sqlalchemy.orm import Session
 from starlette.testclient import TestClient
 
+import src.api.v1.ingestion as ingestion_module
 from src.api.v1.ingestion import get_document_repository, get_upload_service
 from src.api.v1.router import app
-from src.db.enums import AuditEventType
+from src.db.engine import get_db
+from src.db.enums import AuditEventType, UserRole
 from src.db.models import AuditLog, Base
 from src.db.models import Document as DocORM
 from src.modules.audit.service import AuditService
+from src.modules.auth.dependencies import get_current_user
 from src.modules.document_pipeline.models import (
     Classification,
     DocumentStatus,
     UploadRequest,
 )
+from src.modules.document_pipeline.models import Document as DocumentDTO
 from src.modules.document_pipeline.repository import InMemoryDocumentRepository
 from src.modules.document_pipeline.scan_job_handler import ScanJobHandler
 from src.modules.document_pipeline.upload_service import UploadService
@@ -96,8 +101,20 @@ _test_storage = LocalFileSystemStorage(base_dir="./storage_data/test_unit")
 _test_buckets = BucketManager(storage=_test_storage)
 _test_upload_service = UploadService(bucket_manager=_test_buckets, repository=_test_repo)
 
+class _FakeUser:
+    """Minimal stand-in for src.db.models.User — avoids hitting Postgres for unit tests."""
+
+    def __init__(self, role: str = UserRole.ADMIN.value, user_id: uuid.UUID | None = None):
+        self.user_id = user_id or uuid.uuid4()
+        self.role = role
+        self.is_active = True
+
+
+_test_user = _FakeUser()
+
 app.dependency_overrides[get_document_repository] = lambda: _test_repo
 app.dependency_overrides[get_upload_service] = lambda: _test_upload_service
+app.dependency_overrides[get_current_user] = lambda: _test_user
 
 client = TestClient(app)
 
@@ -430,13 +447,12 @@ def test_audit_log_immutability():
         )
         event_id = entry.event_id
 
-    with Session(engine) as session:
-        with pytest.raises(exc.IntegrityError, match="AUDIT_LOG_IMMUTABLE"):
-            session.execute(
-                text("UPDATE audit_log SET event_type = 'TAMPERED' WHERE event_id = :eid"),
-                {"eid": event_id},
-            )
-            session.commit()
+    with Session(engine) as session, pytest.raises(exc.IntegrityError, match="AUDIT_LOG_IMMUTABLE"):
+        session.execute(
+            text("UPDATE audit_log SET event_type = 'TAMPERED' WHERE event_id = :eid"),
+            {"eid": event_id},
+        )
+        session.commit()
 
 
 # ==============================================================================
@@ -456,36 +472,73 @@ def test_api_upload_returns_202():
     with open(pdf_path, "rb") as f:
         res = client.post(
             "/api/v1/documents/upload",
-            files={"file": ("policy.pdf", f, "application/pdf")},
+            files=[("files", ("policy.pdf", f, "application/pdf"))],
             data={"classification": "PUBLIC"},
         )
     assert res.status_code == 202
     body = res.json()
-    assert body["status"] == "QUARANTINED"
-    assert "document_id" in body
-    assert "status_url" in body
+    assert isinstance(body, list) and len(body) == 1
+    assert body[0]["status"] == "QUARANTINED"
+    assert "document_id" in body[0]
+    assert "status_url" in body[0]
 
-    doc_id = body["document_id"]
+    doc_id = body[0]["document_id"]
     status_res = client.get(f"/api/v1/documents/{doc_id}/status")
     assert status_res.status_code == 200
     assert status_res.json()["status"] == "QUARANTINED"
+
+
+def test_api_upload_multiple_files_share_batch_id():
+    """Test uploading several files in one request returns one result per file with a shared upload_batch_id."""
+    pdf_path = FIXTURES_DIR / "01_standard_digital_policy.pdf"
+    with open(pdf_path, "rb") as f1, open(pdf_path, "rb") as f2:
+        data1 = f1.read()
+        data2 = f2.read()
+
+    res = client.post(
+        "/api/v1/documents/upload",
+        files=[
+            ("files", ("multi_a.pdf", data1, "application/pdf")),
+            ("files", ("multi_b.pdf", data2, "application/pdf")),
+        ],
+    )
+    assert res.status_code == 202
+    body = res.json()
+    assert len(body) == 2
+    assert body[0]["upload_batch_id"] is not None
+    assert body[0]["upload_batch_id"] == body[1]["upload_batch_id"]
 
 
 def test_api_upload_rejection_422():
     """Test POST /upload with empty 0-byte payload is rejected on fast-path with HTTP 422."""
     res = client.post(
         "/api/v1/documents/upload",
-        files={"file": ("empty.pdf", b"", "application/pdf")},
+        files=[("files", ("empty.pdf", b"", "application/pdf"))],
     )
     assert res.status_code == 422
     assert "EMPTY_FILE" in res.json()["detail"]
 
 
+def test_api_upload_unauthenticated_rejected_401():
+    """Test POST /upload without a bearer token is rejected — auth is mandatory, not optional."""
+    app.dependency_overrides.pop(get_current_user, None)
+    try:
+        res = client.post(
+            "/api/v1/documents/upload",
+            files=[("files", ("policy.pdf", b"%PDF-1.4\n%%EOF", "application/pdf"))],
+        )
+        assert res.status_code == 401
+    finally:
+        app.dependency_overrides[get_current_user] = lambda: _test_user
+
+
 def test_api_list_documents():
-    """Test GET /api/v1/documents lists repository documents."""
+    """Test GET /api/v1/documents lists repository documents (paginated envelope)."""
     res = client.get("/api/v1/documents")
     assert res.status_code == 200
-    assert isinstance(res.json(), list)
+    body = res.json()
+    assert "documents" in body and isinstance(body["documents"], list)
+    assert "total" in body
 
 
 # ==============================================================================
@@ -579,7 +632,9 @@ def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
     quarantine_files = os.listdir(quarantine_dir) if os.path.exists(quarantine_dir) else []
     assert len(quarantine_files) == 0
 
-    winner_doc_id = [r.document_id for r in results if r.status == DocumentStatus.AWAITING_CLASSIFICATION][0]
+    winner_doc_id = next(
+        r.document_id for r in results if r.status == DocumentStatus.AWAITING_CLASSIFICATION
+    )
     for r in results:
         if r.status == DocumentStatus.DUPLICATE:
             assert r.document_id == winner_doc_id
@@ -629,7 +684,7 @@ def test_upload_writes_audit_events_on_promotion(tmp_path):
 
         corr_ids = [e.correlation_id for e in events]
         assert all(c is not None for c in corr_ids)
-        assert len(set(str(c) for c in corr_ids)) == 1
+        assert len({str(c) for c in corr_ids}) == 1
 
 
 def test_upload_writes_audit_events_on_rejection(tmp_path):
@@ -666,4 +721,220 @@ def test_upload_writes_audit_events_on_rejection(tmp_path):
 
         corr_ids = [e.correlation_id for e in events]
         assert all(c is not None for c in corr_ids)
-        assert len(set(str(c) for c in corr_ids)) == 1
+        assert len({str(c) for c in corr_ids}) == 1
+
+
+def test_accept_normal_pdf_with_reasonable_compression(tmp_path):
+    """Regression guard: test that normal PDFs with standard stream compression are accepted."""
+    buckets = BucketManager(storage=LocalFileSystemStorage(str(tmp_path)))
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
+    with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+        pdf_data = f.read()
+
+    res = upload_and_process_sync(service, handler, "normal_policy.pdf", pdf_data)
+    assert res.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert res.rejection_reason is None
+
+
+
+# ==============================================================================
+# 7. PERMANENT DELETE / PURGE TESTS (DELETE /documents/{id})
+# ==============================================================================
+
+@pytest.fixture
+def purge_stack(tmp_path, monkeypatch):
+    """Wires the API onto an isolated storage + repo + SQLite-audit stack.
+
+    DELETE erases real objects and writes audit rows, so it can't run against the shared
+    module-level fixtures. The endpoint reaches for the `_buckets` singleton directly (it is
+    not an injectable dependency), hence the monkeypatch rather than an override.
+    """
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path / "objects"))
+    buckets = BucketManager(storage=storage)
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'audit.db'}")
+    Base.metadata.create_all(bind=engine)
+
+    def _get_db():
+        with Session(engine) as session:
+            yield session
+
+    monkeypatch.setattr(ingestion_module, "_buckets", buckets)
+    app.dependency_overrides[get_document_repository] = lambda: repo
+    app.dependency_overrides[get_upload_service] = lambda: service
+    app.dependency_overrides[get_db] = _get_db
+    try:
+        yield SimpleNamespace(
+            storage=storage, buckets=buckets, repo=repo,
+            service=service, handler=handler, engine=engine,
+        )
+    finally:
+        app.dependency_overrides[get_document_repository] = lambda: _test_repo
+        app.dependency_overrides[get_upload_service] = lambda: _test_upload_service
+        app.dependency_overrides[get_current_user] = lambda: _test_user
+        app.dependency_overrides.pop(get_db, None)
+
+
+def _promote_fixture(stack, filename="delete_me.pdf", owner_id=None):
+    """Uploads + synchronously processes a valid fixture PDF, returning the terminal response."""
+    with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+        data = f.read()
+    meta = UploadRequest(owner_id=owner_id or _test_user.user_id)
+    resp = upload_and_process_sync(stack.service, stack.handler, filename, data, request_meta=meta)
+    assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
+    return resp
+
+
+def test_delete_erases_object_from_storage(purge_stack):
+    """DELETE must actually erase the promoted object — a delete that leaves bytes in the
+    bucket makes the UI's "cannot be recovered" warning a lie."""
+    resp = _promote_fixture(purge_stack)
+    raw_key = f"{resp.checksum}.pdf"
+    assert purge_stack.storage.object_exists(purge_stack.buckets.raw, raw_key), \
+        "Precondition failed: object was never promoted to raw."
+
+    res = client.delete(f"/api/v1/documents/{resp.document_id}")
+    assert res.status_code == 200
+    assert res.json()["permanent"] is True
+
+    assert not purge_stack.storage.object_exists(purge_stack.buckets.raw, raw_key), \
+        "Object still present in raw bucket after permanent delete."
+
+
+def test_delete_tombstones_row_without_removing_it(purge_stack):
+    """The row must survive as a tombstone (supersedes chains and audit rows reference this
+    document_id) with purged_at/deleted_at stamped and sha256/raw_path cleared."""
+    resp = _promote_fixture(purge_stack)
+    client.delete(f"/api/v1/documents/{resp.document_id}")
+
+    doc = purge_stack.repo.get_by_id(resp.document_id)
+    assert doc is not None, "Row was hard-deleted — audit trail and version chains would dangle."
+    assert doc.purged_at is not None
+    assert doc.deleted_at is not None
+    assert doc.checksum is None
+    assert doc.raw_path is None
+
+
+def test_delete_frees_sha256_for_reupload(purge_stack):
+    """Nulling sha256 on purge is load-bearing: the dedup index is partial on
+    `sha256 IS NOT NULL`, so an erased file must be re-uploadable rather than flagged
+    DUPLICATE against a document whose bytes no longer exist."""
+    first = _promote_fixture(purge_stack, filename="v1.pdf")
+    client.delete(f"/api/v1/documents/{first.document_id}")
+
+    second = _promote_fixture(purge_stack, filename="v1_again.pdf")
+    assert second.was_duplicate is False, \
+        "Re-upload after permanent delete was flagged DUPLICATE — purge did not free the hash."
+    assert second.checksum == first.checksum
+
+
+def test_delete_writes_permanent_audit_event(purge_stack):
+    """The audit row is the only surviving record of what was destroyed, so it must capture
+    the erased hash and filename."""
+    resp = _promote_fixture(purge_stack)
+    client.delete(f"/api/v1/documents/{resp.document_id}")
+
+    with Session(purge_stack.engine) as session:
+        events = (
+            session.query(AuditLog)
+            .filter(AuditLog.document_id == resp.document_id)
+            .filter(AuditLog.event_type == AuditEventType.DOCUMENT_DELETED.value)
+            .all()
+        )
+    assert len(events) == 1
+    details = events[0].details
+    assert details["permanent"] is True
+    assert details["erased_sha256"] == resp.checksum
+    assert details["erased_filename"] == "delete_me.pdf"
+
+
+def test_delete_forbidden_for_non_owner_non_admin(purge_stack):
+    """A plain USER who did not upload the document may not delete it — and nothing may be
+    destroyed on the way to that 403."""
+    resp = _promote_fixture(purge_stack, owner_id=uuid.uuid4())
+    stranger = _FakeUser(role=UserRole.USER.value)
+    app.dependency_overrides[get_current_user] = lambda: stranger
+
+    res = client.delete(f"/api/v1/documents/{resp.document_id}")
+    assert res.status_code == 403
+    assert "FORBIDDEN" in res.json()["detail"]
+
+    assert purge_stack.repo.get_by_id(resp.document_id).purged_at is None, \
+        "Row was purged despite a 403."
+    assert purge_stack.storage.object_exists(purge_stack.buckets.raw, f"{resp.checksum}.pdf"), \
+        "Object was erased despite a 403."
+
+
+def test_delete_allowed_for_owner_who_is_not_admin(purge_stack):
+    """The uploader can delete their own document without being an ADMIN."""
+    owner = _FakeUser(role=UserRole.USER.value)
+    resp = _promote_fixture(purge_stack, owner_id=owner.user_id)
+    app.dependency_overrides[get_current_user] = lambda: owner
+
+    res = client.delete(f"/api/v1/documents/{resp.document_id}")
+    assert res.status_code == 200
+    assert purge_stack.repo.get_by_id(resp.document_id).purged_at is not None
+
+
+def test_delete_allowed_for_admin_who_is_not_owner(purge_stack):
+    """ADMINs can delete anyone's document — the second half of the owner-or-admin rule."""
+    resp = _promote_fixture(purge_stack, owner_id=uuid.uuid4())
+    res = client.delete(f"/api/v1/documents/{resp.document_id}")
+    assert res.status_code == 200
+
+
+def test_delete_twice_returns_404(purge_stack):
+    """An already-purged document is indistinguishable from a missing one."""
+    resp = _promote_fixture(purge_stack)
+    assert client.delete(f"/api/v1/documents/{resp.document_id}").status_code == 200
+    assert client.delete(f"/api/v1/documents/{resp.document_id}").status_code == 404
+
+
+def test_download_after_delete_returns_410(purge_stack):
+    """410 rather than 404 — the document demonstrably existed and was deliberately erased."""
+    resp = _promote_fixture(purge_stack)
+    client.delete(f"/api/v1/documents/{resp.document_id}")
+
+    res = client.get(f"/api/v1/documents/{resp.document_id}/download")
+    assert res.status_code == 410
+    assert "GONE" in res.json()["detail"]
+
+
+def test_purged_document_hidden_from_list(purge_stack):
+    """Purged documents must disappear from list/search immediately."""
+    resp = _promote_fixture(purge_stack)
+    before = client.get("/api/v1/documents").json()["documents"]
+    assert any(d["id"] == str(resp.document_id) for d in before)
+
+    client.delete(f"/api/v1/documents/{resp.document_id}")
+
+    after = client.get("/api/v1/documents").json()["documents"]
+    assert not any(d["id"] == str(resp.document_id) for d in after)
+
+
+def test_repo_purge_is_idempotent():
+    """Repository-level: a second purge is a no-op returning False, so a retried delete
+    can't double-stamp or crash."""
+    repo = InMemoryDocumentRepository()
+    doc = repo.create(
+        DocumentDTO(
+            filename="tombstone.pdf",
+            size=470,
+            checksum="a" * 64,
+            status=DocumentStatus.AWAITING_CLASSIFICATION,
+            raw_path=f"apag-raw/{'a' * 64}.pdf",
+        )
+    )
+    assert repo.purge(doc.id) is True
+    assert repo.purge(doc.id) is False
+
+
+def test_repo_purge_returns_false_for_unknown_id():
+    """Guards the endpoint's 404 path — purge must not invent rows."""
+    assert InMemoryDocumentRepository().purge(uuid.uuid4()) is False

@@ -3,7 +3,6 @@
 import logging
 import sys
 
-from src.core.config import settings
 from src.workers.scan_worker import ScanWorker
 
 logging.basicConfig(

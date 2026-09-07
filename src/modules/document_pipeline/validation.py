@@ -4,10 +4,16 @@ Performs fail-fast pre-checks:
 2. File size ceiling (100 MB)
 3. Magic bytes (%PDF-)
 4. Trailer marker (%%EOF)
-5. Threat scanning (ClamAV)
+5. Threat scanning (Heuristic / ClamAV interface)
 6. Password protection / encryption check
 7. Bounded page count limit (<= 5000 pages)
 8. SHA-256 calculation
+
+Decompression-bomb detection (stream expansion ratio) was tried and removed — see
+KNOWN_DEBTS.md. It flagged legitimate highly-compressible content (solid-fill images, blank
+pages, font glyph tables) as false positives regardless of how the ratio threshold or an
+absolute-size floor was tuned. The 100MB file-size ceiling (check #2) remains the actual
+bound on how much data any single upload can cause the worker to process.
 """
 
 import hashlib
@@ -34,11 +40,12 @@ class ThreatScanner(ABC):
 class ClamAVScanner(ThreatScanner):
     """Local / Mock ClamAV scanner checking for exploits and malicious script actions."""
 
+    # /OpenAction and bare /JS are deliberately excluded: /OpenAction is a common, benign PDF
+    # directive (e.g. "open at page 1, fit width") and /JS collides with unrelated binary stream
+    # bytes. /JavaScript (the actual embedded-script marker) is kept.
     MALICIOUS_SIGNATURES: ClassVar[list[bytes]] = [
         b"/Launch",
-        b"/OpenAction",
         b"/JavaScript",
-        b"/JS",
         b"powershell.exe",
         b"cmd.exe",
         b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!",
@@ -144,15 +151,8 @@ class FileValidator:
             )
 
         # 7. Encryption / Password Check & Bounded Page Count
-        # Fast check for encryption marker in PDF dictionary
-        if b"/Encrypt" in data:
-            return ValidationResult(
-                is_valid=False,
-                file_size_bytes=size,
-                mime_type=declared_mime_type,
-                rejection_reason="ENCRYPTED_PDF: Password-protected or encrypted PDFs are not supported.",
-            )
-
+        # (No pre-parse byte-scan for "/Encrypt" here: that token also occurs inside unencrypted
+        # content streams — pypdf's reader.is_encrypted below is the authoritative check.)
         try:
             reader = pypdf.PdfReader(io.BytesIO(data))
             if reader.is_encrypted:
@@ -173,6 +173,7 @@ class FileValidator:
                         f"PAGE_LIMIT_EXCEEDED: PDF has {page_count} pages (Max: {self.MAX_PAGE_COUNT})."
                     ),
                 )
+
         except Exception as e:
             err_str = str(e).lower()
             if "encrypt" in err_str or "password" in err_str:

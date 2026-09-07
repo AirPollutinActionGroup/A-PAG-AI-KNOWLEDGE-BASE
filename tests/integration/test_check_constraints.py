@@ -1,11 +1,13 @@
 """Integration tests for database CHECK constraints under real PostgreSQL."""
 
 import uuid
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.models import Document as DocumentORM, Job as JobORM, AuditLog as AuditORM
+from src.db.models import Document as DocumentORM
+from src.db.models import Job as JobORM
 
 
 def test_postgres_rejects_invalid_document_status(db_session: Session):

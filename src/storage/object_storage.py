@@ -167,9 +167,9 @@ class MinIOStorage(ObjectStorage):
             self.client.remove_object(bucket_name, object_name)
             return True
         except Exception:
-            logger.error(
+            logger.exception(
                 "Failed to delete object '%s' from bucket '%s'",
-                object_name, bucket_name, exc_info=True,
+                object_name, bucket_name,
             )
             return False
 

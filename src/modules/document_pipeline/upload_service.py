@@ -48,6 +48,7 @@ class UploadService:
         event_type: AuditEventType,
         details: dict[str, Any] | None = None,
         correlation_id: uuid.UUID | None = None,
+        user_id: uuid.UUID | None = None,
     ) -> None:
         """Best-effort audit log write. Logs error on failure, never blocks pipeline."""
         if self._db is None:
@@ -62,12 +63,13 @@ class UploadService:
                 document_id=document_id,
                 event_type=event_type,
                 details=details,
+                user_id=str(user_id) if user_id else None,
                 correlation_id=correlation_id,
             )
         except Exception:
-            logger.error(
+            logger.exception(
                 "AUDIT WRITE FAILED: doc_id=%s event=%s — compliance gap, investigate immediately",
-                document_id, event_type.value, exc_info=True,
+                document_id, event_type.value,
             )
 
     def receive(
@@ -102,6 +104,9 @@ class UploadService:
             id=document_id,
             filename=filename,
             owner_id=meta.owner_id,
+            title=meta.title,
+            description=meta.description,
+            upload_batch_id=meta.upload_batch_id,
             size=len(data),
             status=DocumentStatus.QUARANTINED,
             classification=meta.classification,
@@ -132,6 +137,7 @@ class UploadService:
                 "quarantine_key": quarantine_key,
             },
             correlation_id=corr_id,
+            user_id=meta.owner_id,
         )
 
         return UploadResponse(
@@ -143,5 +149,6 @@ class UploadService:
             was_duplicate=False,
             status_url=f"/api/v1/documents/{document_id}/status",
             correlation_id=corr_id,
+            upload_batch_id=meta.upload_batch_id,
             message="Document accepted for asynchronous scanning and processing.",
         )

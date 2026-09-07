@@ -2,6 +2,7 @@
 
 import logging
 
+from src.core.config import settings
 from src.storage.object_storage import (
     LocalFileSystemStorage,
     MinIOStorage,
@@ -12,7 +13,13 @@ logger = logging.getLogger(__name__)
 
 
 class BucketManager:
-    """Manages quarantine and raw storage buckets."""
+    """Manages quarantine and raw storage buckets.
+
+    Defaults are sourced from `settings` (STORAGE_BACKEND, MINIO_*), not hardcoded, so that a
+    bare `BucketManager()` call — as used by default in UploadService/ScanJobHandler/ScanWorker —
+    actually honors STORAGE_BACKEND=minio in docker-compose instead of silently writing to each
+    container's local, non-persisted filesystem.
+    """
 
     QUARANTINE_BUCKET = "apag-quarantine"
     RAW_BUCKET = "apag-raw"
@@ -20,13 +27,20 @@ class BucketManager:
     def __init__(
         self,
         storage: ObjectStorage | None = None,
-        use_local: bool = True,
+        use_local: bool | None = None,
         local_dir: str = "./storage_data",
-        endpoint: str = "localhost:9000",
-        access_key: str = "apag_admin",
-        secret_key: str = "apag_secure_password_2026",
-        secure: bool = False,
+        endpoint: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        secure: bool | None = None,
     ):
+        if use_local is None:
+            use_local = settings.STORAGE_BACKEND != "minio"
+        endpoint = endpoint or settings.MINIO_ENDPOINT
+        access_key = access_key or settings.MINIO_ACCESS_KEY
+        secret_key = secret_key or settings.MINIO_SECRET_KEY
+        secure = settings.MINIO_SECURE if secure is None else secure
+
         if storage:
             self.storage = storage
         elif use_local:
