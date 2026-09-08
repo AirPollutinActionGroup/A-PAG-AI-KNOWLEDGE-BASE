@@ -1,0 +1,145 @@
+# Production / shared-host compose file for the A-PAG AI Knowledge Base.
+#
+# Deliberately a STANDALONE file, not an override of docker-compose.yml. Compose merges
+# `ports` by appending, so an override cannot *remove* a published port — and the entire
+# point of this file is that Postgres (5432) and MinIO (9000/9001) must NOT be reachable
+# from outside the host. Keeping it standalone means what you read here is exactly what runs.
+#
+# Differences from the local docker-compose.yml:
+#   1. No published ports for postgres/minio — they exist only on the internal bridge network.
+#   2. Every credential comes from the environment (a .env file beside this one), never
+#      hardcoded. docker-compose.yml has the dev password inline, which is in git.
+#   3. A one-shot `migrate` service runs `alembic upgrade head` and exits; api and worker
+#      refuse to start until it completes successfully. So bringing the stack up is one
+#      command with no separate migration step.
+#
+# Usage on the server:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Required in .env (see .env.example):
+#   POSTGRES_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, JWT_SECRET_KEY
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: apag-postgres
+    # No `ports:` — intentional. Reachable only as `postgres:5432` inside this network.
+    environment:
+      POSTGRES_DB: apag_knowledge_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d apag_knowledge_base"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: apag-minio
+    # No `ports:` — intentional. The MinIO console is not exposed; use
+    # `docker compose -f docker-compose.prod.yml exec minio mc ...` to inspect buckets.
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set in .env}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot schema migration. Runs to completion then exits; api/worker gate on it via
+  # `service_completed_successfully`, so there is no window where the app serves requests
+  # against a schema that hasn't been migrated yet.
+  migrate:
+    build: .
+    container_name: apag-migrate
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
+      POSTGRES_HOST: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    container_name: apag-api
+    command: python main.py
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: apag_knowledge_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_SECURE: "false"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
+      ENVIRONMENT: staging
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: apag-worker
+    command: python worker_main.py
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: apag_knowledge_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_SECURE: "false"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ENVIRONMENT: staging
+      WORKER_POLL_INTERVAL_SECONDS: "1.0"
+      SCAN_WORKER_LEASE_SECONDS: "60"
+      WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test $$(( $$(date +%s) - $$(stat -c %Y /tmp/worker_alive) )) -lt 30"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  minio_data:
+    driver: local
