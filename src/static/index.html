@@ -1136,6 +1136,13 @@
                     b3.innerText = 'PROMOTED TO RAW';
                     desc3.innerHTML = `<span style="color:#34d399;">Promoted to <code class="mono">apag-raw/${data?.checksum?.substring(0,16)}....pdf</code>. Quarantine copy purged.</span>`;
                 }
+            } else if (status === 'QUARANTINED' || status === 'VALIDATED') {
+                // Upload is async — the worker hasn't picked this job up yet (or is still
+                // running it). Leave stage 2 on its "SCANNING" running state rather than
+                // silently doing nothing; pollDocumentStatus() below calls this function
+                // again once the worker reaches a final state.
+                b2.className = 'stage-badge badge-running';
+                b2.innerText = 'SCANNING';
             } else if (status === 'REJECTED') {
                 b2.className = 'stage-badge badge-fail';
                 b2.innerText = 'VALIDATION FAILED';
@@ -1156,6 +1163,45 @@
                 else {
                     document.getElementById('chk-header').className = 'check-item failed';
                 }
+            }
+        }
+
+        // Upload returns in <500ms by design (fast-path 202, see ARCHITECTURE.md) — the
+        // response's status is whatever it was the instant the row was inserted
+        // (QUARANTINED), before the background worker has actually validated anything.
+        // This polls GET /{id}/status for a few seconds so the Stage 2/3 panel reflects
+        // the worker's real result instead of sitting on "SCANNING" forever, and refreshes
+        // the ledger the moment a final state lands so that table doesn't need a manual
+        // click either.
+        async function pollDocumentStatus(docId, attemptsLeft = 15) {
+            if (attemptsLeft <= 0) {
+                const b2 = document.getElementById('stage-2-badge');
+                b2.className = 'stage-badge badge-idle';
+                b2.innerText = 'STILL PROCESSING…';
+                return;
+            }
+            try {
+                const res = await fetch(`/api/v1/documents/${docId}/status`, { headers: authHeaders() });
+                if (!res.ok) return; // transient — next poll will retry
+                const doc = await res.json();
+
+                if (['QUARANTINED', 'VALIDATED'].includes(doc.status)) {
+                    setTimeout(() => pollDocumentStatus(docId, attemptsLeft - 1), 700);
+                    return;
+                }
+
+                // /status doesn't return `checksum` the way /upload's response does —
+                // derive the same hash preview from raw_path (apag-raw/{sha256}.pdf) so
+                // updatePipelineResult's promoted-file message still renders correctly.
+                const hashFromPath = doc.raw_path ? doc.raw_path.split('/').pop().replace('.pdf', '') : null;
+                updatePipelineResult(doc.status, doc.rejection_reason, {
+                    document_id: doc.document_id,
+                    checksum: hashFromPath,
+                });
+                await loadDocuments();
+            } catch (err) {
+                // Network blip — still counts against attemptsLeft so this can't loop forever.
+                setTimeout(() => pollDocumentStatus(docId, attemptsLeft - 1), 700);
             }
         }
 
@@ -1200,6 +1246,9 @@
                     const data = Array.isArray(responseBody) ? responseBody[0] : responseBody;
                     lastIngestedDocId = data.document_id;
                     updatePipelineResult(data.status, data.rejection_reason, data);
+                    if (['QUARANTINED', 'VALIDATED'].includes(data.status)) {
+                        pollDocumentStatus(data.document_id);
+                    }
                 } else {
                     const detail = responseBody.detail || 'Validation failed';
                     updatePipelineResult('REJECTED', typeof detail === 'string' ? detail : JSON.stringify(detail), responseBody);
