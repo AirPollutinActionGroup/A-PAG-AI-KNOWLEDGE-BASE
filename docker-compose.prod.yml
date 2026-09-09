@@ -23,7 +23,12 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: apag-postgres
-    # No `ports:` — intentional. Reachable only as `postgres:5432` inside this network.
+    # Bound to the VM's loopback only (127.0.0.1), not 0.0.0.0 — reachable from the public
+    # internet under neither address, but an operator can still SSH-tunnel in
+    # (`ssh -L 15432:localhost:5432 ...`) to inspect data with a GUI client, since the
+    # tunnel's far end lands on the VM's own loopback, not the internal Docker network.
+    ports:
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: apag_knowledge_base
       POSTGRES_USER: postgres
@@ -40,8 +45,12 @@ services:
   minio:
     image: minio/minio:latest
     container_name: apag-minio
-    # No `ports:` — intentional. The MinIO console is not exposed; use
-    # `docker compose -f docker-compose.prod.yml exec minio mc ...` to inspect buckets.
+    # Console bound to the VM's loopback only, same reasoning as postgres above: closed to
+    # the internet, reachable via `ssh -L 9001:localhost:9001 ...` for the visual browser.
+    # The S3 API port (9000) stays unpublished — only the api/worker containers use it,
+    # over the internal Docker network, and never need it from outside the VM.
+    ports:
+      - "127.0.0.1:9001:9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set in .env}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set in .env}
