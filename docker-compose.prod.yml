@@ -75,8 +75,12 @@ services:
     build: .
     container_name: apag-api
     command: python main.py
+    # Published on 85, not 8000: A-PAG's network only permits outbound traffic to this host
+    # on port 85, so that is the only port reachable from the office network. uvicorn still
+    # listens on 8000 inside the container — Docker maps the privileged host port for us,
+    # so nothing in the application needs to know about this.
     ports:
-      - "8000:8000"
+      - "85:8000"
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
       POSTGRES_HOST: postgres
