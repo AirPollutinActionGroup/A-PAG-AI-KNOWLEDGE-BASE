@@ -36,10 +36,6 @@ class DocumentRepository(ABC):
         """Updates full document record."""
 
     @abstractmethod
-    def get_all(self) -> list[DocumentDTO]:
-        """Returns all documents in the repository."""
-
-    @abstractmethod
     def list_paginated(self, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
         """Returns (page of documents, total count), newest first."""
 
@@ -155,11 +151,6 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             return self._to_dto(orm)
         return self.create(doc)
 
-    def get_all(self) -> list[DocumentDTO]:
-        stmt = select(DocumentORM).order_by(DocumentORM.created_at.desc())
-        orms = self.db.execute(stmt).scalars().all()
-        return [self._to_dto(o) for o in orms]
-
     def list_paginated(self, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
         base = select(DocumentORM).where(DocumentORM.deleted_at.is_(None))
         total = self.db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
@@ -237,10 +228,6 @@ class InMemoryDocumentRepository(DocumentRepository):
             doc.updated_at = datetime.now(UTC)
             self._storage[doc.id] = doc.model_copy(deep=True)
             return self._storage[doc.id]
-
-    def get_all(self) -> list[DocumentDTO]:
-        with self._lock:
-            return [doc.model_copy(deep=True) for doc in self._storage.values()]
 
     def list_paginated(self, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
         with self._lock:
