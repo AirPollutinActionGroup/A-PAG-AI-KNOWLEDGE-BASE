@@ -13,7 +13,6 @@ from jose import JWTError
 from sqlalchemy.orm import Session
 
 from src.db.engine import get_db
-from src.db.enums import UserRole
 from src.db.models import User
 from src.modules.auth.security import decode_access_token
 
@@ -42,17 +41,3 @@ def get_current_user(
     if user is None or not user.is_active:
         raise unauthorized
     return user
-
-
-def require_role(*allowed_roles: UserRole):
-    """Dependency factory: `Depends(require_role(UserRole.ADMIN))`."""
-
-    def _check(user: User = Depends(get_current_user)) -> User:
-        if user.role not in {r.value for r in allowed_roles}:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Requires one of roles: {[r.value for r in allowed_roles]}.",
-            )
-        return user
-
-    return _check
