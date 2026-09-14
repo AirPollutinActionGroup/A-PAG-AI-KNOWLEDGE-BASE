@@ -51,7 +51,9 @@ class ValidationResult(BaseModel):
 
     is_valid: bool
     sha256: str = ""
-    page_count: int = 0
+    # None where the format has no meaningful count — a .docx has no page count until it is
+    # rendered, so there is nothing honest to store.
+    page_count: int | None = None
     file_size_bytes: int = 0
     mime_type: str = ""
     rejection_reason: str | None = None
