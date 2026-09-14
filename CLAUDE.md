@@ -71,8 +71,8 @@ These two processes never call into each other directly; they communicate only t
    `PermanentProcessingError` (`src/core/errors.py`) to control retry vs. immediate-fail behavior.
 3. **Validate/Scan/Promote** — `src/modules/document_pipeline/scan_job_handler.py`
    `ScanJobHandler.process()`: fetches the document, re-reads bytes from quarantine, runs
-   `ValidationService` (`src/modules/document_pipeline/validation.py` — 8 fail-fast checks: size,
-   MIME, magic bytes, EOF trailer, heuristic threat scan, encryption, page count, SHA-256 — a
+   `ValidationService` (`src/modules/document_pipeline/validation.py` — a fail-fast ladder: size,
+   format lookup, container check, heuristic threat scan, deep structural check, SHA-256 — a
    decompression-bomb ratio check was tried and removed, see `KNOWN_DEBTS.md`), then either
    rejects (purges quarantine object, sets `REJECTED`) or
    promotes (copies to `raw/` bucket keyed by SHA-256, sets `AWAITING_CLASSIFICATION`). Dedup and
@@ -123,6 +123,34 @@ event_type)` row first, since jobs can be retried.
   being populated, making RESTRICTED admin-only in practice — see `KNOWN_DEBTS.md`).
 - Rate limiting: `slowapi` on `POST /documents/upload` (`settings.UPLOAD_RATE_LIMIT`), wired via
   `app.state.limiter` in `src/api/v1/router.py`.
+
+### Supported formats
+
+`src/modules/document_pipeline/formats.py` is the single registry of accepted formats (PDF, DOCX,
+XLSX, PPTX). **Adding a format means adding one `FormatSpec` to `FORMATS`, not editing
+`validation.py`** — the validator owns the shared ladder, the spec owns everything format-specific
+(extension, magic bytes, identifying zip part, unit counting, and the two check callables).
+`storage_keys.py` derives object-key extensions from the same registry, so there is one source of
+truth rather than a second map to keep in sync.
+
+Two structural checks exist, not four: PDF has its own binary layout, while DOCX/XLSX/PPTX are all
+Office Open XML — identical ZIP containers differing only by which XML part they carry. The three
+OOXML specs therefore share one pair of check functions and differ only by data.
+
+Each spec carries **two** callables, and the split is load-bearing: `container_check` (cheap, no
+parsing) runs *before* the threat scan so a disguised binary is reported as corrupt, and
+`structural_check` (deep parse, produces the unit count) runs *after* it so a file carrying a known
+malicious signature is reported as malicious rather than as whatever the parser chokes on first.
+Collapsing these into one call silently reclassifies malicious uploads — there is a regression test
+for this (`test_reject_structural_threats`).
+
+Format is resolved from file **content** via `detect_format()` at the API boundary, not from the
+declared MIME type (browsers send `application/octet-stream` for valid Office files), and the
+worker independently re-verifies content against the stored type before promoting.
+
+`page_count` is really a per-format "unit count": pages for PDF, worksheets for XLSX, slides for
+PPTX, and `None` for DOCX — Word text reflows, so a page count doesn't exist until the document is
+rendered, and faking one from `app.xml` would be wrong. The column is nullable for this reason.
 
 ### Config & enums
 

@@ -137,6 +137,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             if hasattr(doc, "classification") and doc.classification:
                 orm.classification = doc.classification.value if hasattr(doc.classification, "value") else str(doc.classification)
             orm.sha256 = doc.checksum
+            orm.mime_type = doc.mime_type
             orm.raw_path = doc.raw_path
             orm.quarantine_path = doc.quarantine_path
             orm.rejection_reason = doc.rejection_reason

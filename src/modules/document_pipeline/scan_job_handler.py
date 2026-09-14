@@ -23,6 +23,11 @@ from src.modules.document_pipeline.repository import (
     DocumentRepository,
     InMemoryDocumentRepository,
 )
+from src.modules.document_pipeline.storage_keys import (
+    build_quarantine_key,
+    build_raw_key,
+    quarantine_key_for,
+)
 from src.modules.document_pipeline.validation import ValidationService
 from src.storage.bucket_manager import BucketManager
 
@@ -99,7 +104,6 @@ class ScanJobHandler:
         """Processes a quarantined document: validation -> threat scan -> promote/reject."""
         corr_id = correlation_id or uuid.uuid4()
         meta = request_meta or UploadRequest()
-        quarantine_key = f"{document_id}.pdf"
 
         # 1. Fetch document from repository
         doc = self.repo.get_by_id(document_id)
@@ -107,14 +111,15 @@ class ScanJobHandler:
             logger.error("Scan job failed: doc_id=%s not found in repository", document_id)
             return UploadResponse(
                 document_id=document_id,
-                filename="unknown.pdf",
+                filename="unknown",
                 status=DocumentStatus.VALIDATION_FAILED,
-                quarantine_key=quarantine_key,
+                quarantine_key=build_quarantine_key(document_id, "application/pdf"),
                 rejection_reason="DOCUMENT_NOT_FOUND: Document ID not registered in database.",
                 message="Document record not found.",
             )
 
         filename = doc.filename
+        quarantine_key = quarantine_key_for(doc)
 
         # Idempotency guard: If document is already promoted or finalized, return existing state
         if doc.status in (DocumentStatus.AWAITING_CLASSIFICATION, DocumentStatus.LIVE):
@@ -161,7 +166,7 @@ class ScanJobHandler:
         # -------------------------------------------------------------
         # STAGE 2: Fail-Fast Pre-checks & Threat Scan
         # -------------------------------------------------------------
-        validation = self.validator.validate_document(data, mime_type="application/pdf")
+        validation = self.validator.validate_document(data, mime_type=doc.mime_type)
         logger.info(
             "Validation result: corr_id=%s doc_id=%s valid=%s reason=%s",
             corr_id, document_id, validation.is_valid, validation.rejection_reason,
@@ -260,7 +265,7 @@ class ScanJobHandler:
                     )
 
             # Promotion to Raw Bucket — wrapped in error recovery
-            raw_key = f"{validation.sha256}.pdf"
+            raw_key = build_raw_key(validation.sha256, doc.mime_type)
             try:
                 if not self.buckets.storage.object_exists(self.buckets.raw, raw_key):
                     self.buckets.storage.copy_object(
@@ -295,6 +300,7 @@ class ScanJobHandler:
             doc.status = DocumentStatus.AWAITING_CLASSIFICATION
             doc.raw_path = f"{self.buckets.raw}/{raw_key}"
             doc.quarantine_path = None
+            doc.page_count = validation.page_count
             try:
                 self.repo.update_document(doc)
             except IntegrityError:

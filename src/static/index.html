@@ -740,7 +740,7 @@
 
                 <!-- Dropzone -->
                 <div class="dropzone" id="dropzone">
-                    <input type="file" id="file-input" accept=".pdf,application/pdf" multiple>
+                    <input type="file" id="file-input" accept=".pdf,.docx,.xlsx,.pptx" multiple>
                     <div class="dropzone-icon">📄</div>
                     <p class="primary">Drag & drop policy PDFs here, or browse</p>
                     <p class="secondary">Up to 5 files per upload • Max size: 100MB each (Fail-fast validated)</p>
@@ -814,7 +814,7 @@
                             <span class="stage-badge badge-idle" id="stage-1-badge">IDLE</span>
                         </div>
                         <div style="font-size: 0.74rem; color: var(--text-muted); margin-top: 0.35rem;">
-                            Streams byte payload to isolated <code class="mono" style="color:#60a5fa;">apag-quarantine/{uuid}.pdf</code>
+                            Streams byte payload to isolated <code class="mono" style="color:#60a5fa;">apag-quarantine/{uuid}.{ext}</code>
                         </div>
                     </div>
 
@@ -829,7 +829,7 @@
                         <div class="checks-grid" id="checks-grid">
                             <div class="check-item" id="chk-empty"><span class="check-dot"></span> 1. Non-Empty (size > 0)</div>
                             <div class="check-item" id="chk-size"><span class="check-dot"></span> 2. Size &le; 100MB Ceiling</div>
-                            <div class="check-item" id="chk-mime"><span class="check-dot"></span> 3. MIME (application/pdf)</div>
+                            <div class="check-item" id="chk-mime"><span class="check-dot"></span> 3. Format (PDF / DOCX / XLSX / PPTX)</div>
                             <div class="check-item" id="chk-header"><span class="check-dot"></span> 4. Header Marker (%PDF-)</div>
                             <div class="check-item" id="chk-trailer"><span class="check-dot"></span> 5. Trailer Marker (%%EOF)</div>
                             <div class="check-item" id="chk-threat"><span class="check-dot"></span> 6. Threat / Exploit Scan</div>
@@ -847,7 +847,7 @@
                             <span class="stage-badge badge-idle" id="stage-3-badge">IDLE</span>
                         </div>
                         <div style="font-size: 0.74rem; color: var(--text-muted); margin-top: 0.35rem;" id="stage-3-desc">
-                            Promote to <code class="mono" style="color:#34d399;">apag-raw/{hash}.pdf</code> or purge toxic quarantine object
+                            Promote to <code class="mono" style="color:#34d399;">apag-raw/{hash}.{ext}</code> or purge toxic quarantine object
                         </div>
                     </div>
                 </div>
@@ -1100,7 +1100,7 @@
                 el.innerText = 'IDLE';
             });
             document.querySelectorAll('.check-item').forEach(el => el.className = 'check-item');
-            document.getElementById('stage-3-desc').innerText = 'Promote to apag-raw/{hash}.pdf or purge toxic quarantine object';
+            document.getElementById('stage-3-desc').innerText = 'Promote to apag-raw/{hash}.{ext} or purge toxic quarantine object';
         }
 
         function setRunningPipeline() {
@@ -1134,7 +1134,7 @@
                     desc3.innerHTML = `<span style="color:#fbbf24;">Duplicate SHA-256 match. Re-used canonical document ID: <code class="mono">${data?.document_id}</code>. Quarantine copy purged.</span>`;
                 } else {
                     b3.innerText = 'PROMOTED TO RAW';
-                    desc3.innerHTML = `<span style="color:#34d399;">Promoted to <code class="mono">apag-raw/${data?.checksum?.substring(0,16)}....pdf</code>. Quarantine copy purged.</span>`;
+                    desc3.innerHTML = `<span style="color:#34d399;">Promoted to <code class="mono">apag-raw/${data?.checksum?.substring(0,16)}...</code>. Quarantine copy purged.</span>`;
                 }
             } else if (status === 'QUARANTINED' || status === 'VALIDATED') {
                 // Upload is async — the worker hasn't picked this job up yet (or is still
@@ -1193,7 +1193,7 @@
                 // /status doesn't return `checksum` the way /upload's response does —
                 // derive the same hash preview from raw_path (apag-raw/{sha256}.pdf) so
                 // updatePipelineResult's promoted-file message still renders correctly.
-                const hashFromPath = doc.raw_path ? doc.raw_path.split('/').pop().replace('.pdf', '') : null;
+                const hashFromPath = doc.raw_path ? doc.raw_path.split('/').pop().replace(/\.[^.]+$/, '') : null;
                 updatePipelineResult(doc.status, doc.rejection_reason, {
                     document_id: doc.document_id,
                     checksum: hashFromPath,
