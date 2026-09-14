@@ -206,3 +206,26 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Trigger to address**: if a third integration test file needs to commit and the
   copy-the-cleanup-fixture pattern starts feeling repetitive/error-prone, switch to the
   savepoint approach once, for all files, rather than adding a fourth bespoke `DELETE` fixture.
+
+### 11. OOXML files are validated as containers, not inspected as content
+- **Status**: Accepted trade-off, scoped to the current threat model.
+- **Context**: `formats.py` validates DOCX/XLSX/PPTX by reading the zip **central directory only**
+  (`namelist()`): it confirms the container opens, carries `[Content_Types].xml` and the part that
+  identifies its declared type, rejects macro projects (`vbaProject.bin`) and archive entries that
+  would escape an extraction root. It deliberately does **not** parse the XML parts, so none of the
+  following are inspected: XXE / "billion laughs" entity expansion, DDE fields, remote-template and
+  external-workbook references, or embedded OLE objects.
+- **Why that's acceptable today**: nothing in the pipeline parses or renders OOXML content — the
+  bytes are stored and served back untouched. This is the same reasoning as debt #8, and it holds
+  for exactly as long as that stays true. Macro rejection is the one check kept despite it, because
+  unlike a PDF the system never opens, a downloaded `.docx` *is* eventually opened in Word by a
+  person, and that does execute macros.
+- **Trigger to address**: **Phase 4 extraction**, which will parse these XML parts to pull text out
+  of them. At that point an XXE-hardened parser (`defusedxml` or equivalent) and a decision on
+  external references become prerequisites, not optional — and debt #8's "never rendered or
+  executed" premise has to be re-argued rather than inherited.
+- **Not a re-litigation of #9**: the total-uncompressed-size guard available from a zip's central
+  directory is a different technique from the per-stream expansion-ratio check that was tried and
+  removed for PDFs. It is read from declared metadata without decompressing anything, so it has no
+  false-positive mode. It is currently **not** implemented (the 100MB ceiling remains the only
+  bound); it becomes worth adding when extraction starts actually unpacking these archives.

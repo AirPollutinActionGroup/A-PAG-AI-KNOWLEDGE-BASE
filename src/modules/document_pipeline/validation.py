@@ -1,13 +1,16 @@
 """Stage 2: Validation Service and Threat Scanner.
-Performs fail-fast pre-checks:
-1. MIME type validation (application/pdf)
+
+Performs fail-fast pre-checks, in order:
+1. Zero-byte check
 2. File size ceiling (100 MB)
-3. Magic bytes (%PDF-)
-4. Trailer marker (%%EOF)
+3. Format lookup against the registry in `formats.py`
+4. That format's container check (is this plausibly a PDF / OOXML zip at all)
 5. Threat scanning (Heuristic / ClamAV interface)
-6. Password protection / encryption check
-7. Bounded page count limit (<= 5000 pages)
-8. SHA-256 calculation
+6. Deep structural inspection (PDF parse / OOXML inner parts)
+7. SHA-256 calculation
+
+Per-format knowledge lives in `formats.py`, not here — this module owns the shared ladder and the
+threat scanner, and adding a format means adding a `FormatSpec`, not editing this file.
 
 Decompression-bomb detection (stream expansion ratio) was tried and removed — see
 KNOWN_DEBTS.md. It flagged legitimate highly-compressible content (solid-fill images, blank
@@ -17,13 +20,16 @@ bound on how much data any single upload can cause the worker to process.
 """
 
 import hashlib
-import io
 import logging
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
-import pypdf
-
+from src.modules.document_pipeline.formats import (
+    MAX_PDF_PAGES,
+    PDF_MIME,
+    describe_unsupported,
+    spec_for,
+)
 from src.modules.document_pipeline.models import ScanResult, ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -74,12 +80,10 @@ class ClamAVScanner(ThreatScanner):
 
 
 class FileValidator:
-    """Core fail-fast validator for uploaded PDF documents."""
+    """Core fail-fast validator for uploaded documents."""
 
     MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
-    MAX_PAGE_COUNT = 5000
-    PDF_MAGIC_HEADER = b"%PDF-"
-    PDF_EOF_TRAILER = b"%%EOF"
+    MAX_PAGE_COUNT = MAX_PDF_PAGES
 
     def __init__(self, scanner: ThreatScanner | None = None):
         self.scanner = scanner or ClamAVScanner()
@@ -87,7 +91,7 @@ class FileValidator:
     def validate(
         self,
         data: bytes,
-        declared_mime_type: str = "application/pdf",
+        declared_mime_type: str = PDF_MIME,
     ) -> ValidationResult:
         size = len(data)
 
@@ -111,35 +115,30 @@ class FileValidator:
                 ),
             )
 
-        # 3. MIME type check
-        if declared_mime_type != "application/pdf":
+        # 3. Format lookup — the declared type decides which structural check runs, so an
+        #    unsupported one cannot reach a validator that would misread it.
+        spec = spec_for(declared_mime_type)
+        if spec is None:
             return ValidationResult(
                 is_valid=False,
                 file_size_bytes=size,
                 mime_type=declared_mime_type,
-                rejection_reason=f"INVALID_MIME_TYPE: Expected 'application/pdf', got '{declared_mime_type}'.",
+                rejection_reason=f"INVALID_MIME_TYPE: {describe_unsupported(data, declared_mime_type)}",
             )
 
-        # 4. Magic Bytes (%PDF-)
-        if not data.startswith(self.PDF_MAGIC_HEADER):
+        # 4. Container check — cheap confirmation that these bytes are the declared container, so
+        #    a disguised binary is reported as corrupt rather than handed to a parser.
+        container = spec.container_check(data, spec)
+        if not container.ok:
             return ValidationResult(
                 is_valid=False,
                 file_size_bytes=size,
                 mime_type=declared_mime_type,
-                rejection_reason="CORRUPTED_PDF_STRUCTURE: Missing '%PDF-' header marker.",
+                rejection_reason=container.rejection_reason,
             )
 
-        # 5. EOF Trailer (%%EOF)
-        trailer_window = data[-1024:] if size >= 1024 else data
-        if self.PDF_EOF_TRAILER not in trailer_window:
-            return ValidationResult(
-                is_valid=False,
-                file_size_bytes=size,
-                mime_type=declared_mime_type,
-                rejection_reason="CORRUPTED_PDF_STRUCTURE: Missing '%%EOF' end-of-file trailer marker.",
-            )
-
-        # 6. Threat Scan
+        # 5. Threat Scan — deliberately before the deep parse below, so a file carrying a known
+        #    signature is reported as malicious rather than as whatever a parser chokes on first.
         scan_res = self.scanner.scan(data)
         if not scan_res.passed:
             return ValidationResult(
@@ -150,66 +149,37 @@ class FileValidator:
                 scan_result=scan_res,
             )
 
-        # 7. Encryption / Password Check & Bounded Page Count
-        # (No pre-parse byte-scan for "/Encrypt" here: that token also occurs inside unencrypted
-        # content streams — pypdf's reader.is_encrypted below is the authoritative check.)
-        try:
-            reader = pypdf.PdfReader(io.BytesIO(data))
-            if reader.is_encrypted:
-                return ValidationResult(
-                    is_valid=False,
-                    file_size_bytes=size,
-                    mime_type=declared_mime_type,
-                    rejection_reason="ENCRYPTED_PDF: Password-protected or encrypted PDFs are not supported.",
-                )
-
-            page_count = len(reader.pages)
-            if page_count > self.MAX_PAGE_COUNT:
-                return ValidationResult(
-                    is_valid=False,
-                    file_size_bytes=size,
-                    mime_type=declared_mime_type,
-                    rejection_reason=(
-                        f"PAGE_LIMIT_EXCEEDED: PDF has {page_count} pages (Max: {self.MAX_PAGE_COUNT})."
-                    ),
-                )
-
-        except Exception as e:
-            err_str = str(e).lower()
-            if "encrypt" in err_str or "password" in err_str:
-                return ValidationResult(
-                    is_valid=False,
-                    file_size_bytes=size,
-                    mime_type=declared_mime_type,
-                    rejection_reason="ENCRYPTED_PDF: Password-protected or encrypted PDFs are not supported.",
-                )
+        # 6. Deep structural inspection, and the source of the unit count.
+        structural = spec.structural_check(data, spec)
+        if not structural.ok:
             return ValidationResult(
                 is_valid=False,
                 file_size_bytes=size,
                 mime_type=declared_mime_type,
-                rejection_reason=f"CORRUPTED_PDF_STRUCTURE: Malformed internal PDF structure ({e!s}).",
+                rejection_reason=structural.rejection_reason,
+                scan_result=scan_res,
             )
 
-        # 8. SHA-256 Checksum Calculation
+        # 7. SHA-256 Checksum Calculation
         sha256 = hashlib.sha256(data).hexdigest()
         logger.info(
-            "Validation PASSED: size=%d pages=%d sha256=%s",
-            size, page_count, sha256,
+            "Validation PASSED: format=%s size=%d units=%s sha256=%s",
+            spec.label, size, structural.unit_count, sha256,
         )
 
         return ValidationResult(
             is_valid=True,
             sha256=sha256,
-            page_count=page_count,
+            page_count=structural.unit_count,
             file_size_bytes=size,
-            mime_type="application/pdf",
+            mime_type=spec.mime_type,
             rejection_reason=None,
             scan_result=scan_res,
         )
 
 
 class ValidationService:
-    """Service wrapper for PDF validation."""
+    """Service wrapper for document validation."""
 
     def __init__(self, validator: FileValidator | None = None):
         self.validator = validator or FileValidator()
@@ -217,7 +187,7 @@ class ValidationService:
     def validate_document(
         self,
         data: bytes,
-        mime_type: str = "application/pdf",
+        mime_type: str = PDF_MIME,
     ) -> ValidationResult:
         """Runs the complete suite of fail-fast validation checks."""
         return self.validator.validate(data, mime_type)

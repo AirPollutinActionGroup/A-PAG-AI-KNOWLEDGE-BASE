@@ -28,6 +28,11 @@ from src.db.models import AuditLog as AuditORM
 from src.db.models import User
 from src.modules.audit.service import AuditService
 from src.modules.auth.dependencies import get_current_user
+from src.modules.document_pipeline.formats import (
+    FormatSpec,
+    describe_unsupported,
+    detect_format,
+)
 from src.modules.document_pipeline.models import (
     Classification,
     UploadRequest,
@@ -99,12 +104,14 @@ def _with_uploader(doc, emails: dict[uuid.UUID | None, str]) -> dict:
     "/upload",
     response_model=list[UploadResponse],
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Upload one or more PDF documents to quarantine for asynchronous processing",
+    summary="Upload one or more documents to quarantine for asynchronous processing",
 )
 @limiter.limit(settings.UPLOAD_RATE_LIMIT)
 async def upload_documents(
     request: Request,
-    files: list[UploadFile] = File(..., description="One or more PDF document binary streams"),
+    files: list[UploadFile] = File(
+        ..., description="One or more document binary streams (PDF, DOCX, XLSX, PPTX)"
+    ),
     classification: Classification = Form(
         Classification.PUBLIC,
         description="2-Tier security classification (PUBLIC / RESTRICTED)",
@@ -124,7 +131,7 @@ async def upload_documents(
     upload_service: UploadService = Depends(get_upload_service),
     current_user: User = Depends(get_current_user),
 ):
-    """Stage 1: Fast-path asynchronous upload — accepts up to MAX_FILES_PER_UPLOAD PDFs,
+    """Stage 1: Fast-path asynchronous upload — accepts up to MAX_FILES_PER_UPLOAD documents,
     places each in quarantine, enqueues a SCAN job per file, and returns 202 with one
     UploadResponse per file. All files in one request share an upload_batch_id."""
     if not files:
@@ -143,15 +150,10 @@ async def upload_documents(
         )
 
     batch_id = uuid.uuid4()
-    contents: list[tuple[UploadFile, bytes]] = []
+    contents: list[tuple[UploadFile, bytes, FormatSpec]] = []
     total_size = 0
 
     for file in files:
-        if file.content_type != "application/pdf":
-            raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail=f"Invalid MIME type '{file.content_type}' for '{file.filename}'. Only 'application/pdf' documents are accepted.",
-            )
         data = await file.read()
         if len(data) == 0:
             raise HTTPException(
@@ -169,10 +171,19 @@ async def upload_documents(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"BATCH_TOO_LARGE: Combined upload exceeds {settings.MAX_BATCH_SIZE_BYTES // (1024 * 1024)} MB.",
             )
-        contents.append((file, data))
+        # Resolved from the bytes rather than the browser's claim: drag-and-drop and some operating
+        # systems send application/octet-stream for a perfectly valid .docx. The worker re-verifies
+        # the content against this resolved type before anything is promoted.
+        spec = detect_format(data)
+        if spec is None:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=f"'{file.filename}': {describe_unsupported(data, file.content_type)}",
+            )
+        contents.append((file, data, spec))
 
     results: list[UploadResponse] = []
-    for file, data in contents:
+    for file, data, spec in contents:
         req_meta = UploadRequest(
             classification=classification,
             description=description,
@@ -182,9 +193,10 @@ async def upload_documents(
             upload_batch_id=batch_id,
         )
         result = upload_service.receive(
-            filename=file.filename or "unknown.pdf",
+            filename=file.filename or f"unknown{spec.extension}",
             data=data,
             request_meta=req_meta,
+            mime_type=spec.mime_type,
         )
         results.append(result)
 
@@ -257,7 +269,7 @@ async def download_document(
     repo: DocumentRepository = Depends(get_document_repository),
     current_user: User = Depends(get_current_user),
 ):
-    """Streams the actual PDF bytes from the raw/ bucket. Only documents that have been
+    """Streams the actual document bytes from the raw/ bucket. Only documents that have been
     promoted (raw_path set) have content to serve — quarantined/rejected documents don't."""
     doc = repo.get_by_id(document_id)
     if not doc or not _can_view(doc, current_user):
@@ -277,7 +289,7 @@ async def download_document(
     data = _buckets.storage.get_object(bucket_name=_buckets.raw, object_name=doc.raw_path.split("/", 1)[-1])
     return Response(
         content=data,
-        media_type="application/pdf",
+        media_type=doc.mime_type,
         headers={"Content-Disposition": f'inline; filename="{doc.filename}"'},
     )
 

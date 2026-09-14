@@ -70,7 +70,7 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 | System | Role | Contents |
 |---|---|---|
 | **PostgreSQL 16** | Relational Database | Document metadata (incl. full-text search index), users, background job queues, audit logs, and operational data. |
-| **MinIO** | Object Storage | PDF artifacts across buckets (`quarantine/`, `raw/`, `extracted/`, `normalized/`). |
+| **MinIO** | Object Storage | Document artifacts across buckets (`quarantine/`, `raw/`, `extracted/`, `normalized/`). |
 | **Qdrant** | Vector Database | Document embeddings, chunk payloads, and permission metadata for semantic search. |
 
 ---
@@ -80,7 +80,27 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 - **Open registration**: `POST /auth/register` has no invite gate yet — acceptable only for the internal, not-internet-exposed bootstrap phase. See `KNOWN_DEBTS.md`.
 - **2-tier classification only**: `RESTRICTED` = uploader + ADMIN (owner-scoped, not department-based); no per-document ACLs. See `ARCHITECTURE.md` §6b.
 - **Single-Tenant Deployment**: Multi-organization partitioning is deferred to later milestones.
-- **Text Extraction & OCR**: Pipeline currently implements Stages 1–3 (quarantine, validation, scanning, promotion); Stage 4 (OCR / extraction) is the next phase.
+- **Text Extraction & OCR**: Pipeline currently implements Stages 1–3 (quarantine, validation, scanning, promotion); Stage 4 (OCR / extraction) is the next phase. Ingestion accepts the formats below, but no text is extracted from any of them yet.
+
+### Supported upload formats
+
+| Format | Extension | Unit count recorded |
+|---|---|---|
+| PDF | `.pdf` | pages |
+| Word | `.docx` | — (Word text reflows; there is no page count until the document is rendered) |
+| Excel | `.xlsx` | worksheets |
+| PowerPoint | `.pptx` | slides |
+
+The format is resolved from the file's **contents**, not its name or the MIME type the browser
+declares — so a `.docx` that your OS reports as `application/octet-stream` still uploads, and a
+spreadsheet renamed to `.docx` is stored as the spreadsheet it actually is.
+
+Not accepted, with the reason:
+
+- **Macro-enabled files** (`.docm`/`.xlsm`/`.pptm`, or any file containing a macro project) — re-save without macros. This is the one restriction that isn't just plumbing: a downloaded Office file does eventually get opened in Word or Excel by a person, and that executes macros.
+- **Legacy or password-protected Office files** (`.doc`/`.xls`/`.ppt`, encrypted `.docx`) — re-save as the modern format, or remove the password.
+- **Google Docs/Sheets/Slides** — these aren't files; they live in Drive and have no bytes to upload. Use *File → Download → Microsoft Excel (.xlsx)* (or Word/PowerPoint) and upload the result.
+- **CSV** — out of scope for now; it has no container structure to validate and carries a different (formula-injection) risk profile.
 
 ---
 

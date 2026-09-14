@@ -21,6 +21,7 @@ from src.modules.document_pipeline.repository import (
     DocumentRepository,
     InMemoryDocumentRepository,
 )
+from src.modules.document_pipeline.storage_keys import build_quarantine_key
 from src.storage.bucket_manager import BucketManager
 
 logger = logging.getLogger(__name__)
@@ -78,12 +79,13 @@ class UploadService:
         data: bytes,
         request_meta: UploadRequest | None = None,
         correlation_id: uuid.UUID | None = None,
+        mime_type: str = "application/pdf",
     ) -> UploadResponse:
-        """Stage 1: Fast API path — writes PDF to quarantine, creates DB record + job, and returns 202."""
+        """Stage 1: Fast API path — writes bytes to quarantine, creates DB record + job, returns 202."""
         meta = request_meta or UploadRequest()
         document_id = uuid.uuid4()
         corr_id = correlation_id or uuid.uuid4()
-        quarantine_key = f"{document_id}.pdf"
+        quarantine_key = build_quarantine_key(document_id, mime_type)
 
         logger.info(
             "Upload received: corr_id=%s doc_id=%s filename=%s size=%d bytes",
@@ -95,7 +97,7 @@ class UploadService:
             bucket_name=self.buckets.quarantine,
             object_name=quarantine_key,
             data=data,
-            content_type="application/pdf",
+            content_type=mime_type,
         )
         logger.debug("Quarantined: corr_id=%s doc_id=%s key=%s", corr_id, document_id, quarantine_key)
 
@@ -106,6 +108,7 @@ class UploadService:
             owner_id=meta.owner_id,
             title=meta.title,
             description=meta.description,
+            mime_type=mime_type,
             upload_batch_id=meta.upload_batch_id,
             size=len(data),
             status=DocumentStatus.QUARANTINED,
