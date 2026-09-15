@@ -179,6 +179,9 @@ class ScanJobHandler:
             # Rejection Branch
             doc.status = DocumentStatus.REJECTED
             doc.rejection_reason = validation.rejection_reason
+            # Cleared so a later DELETE doesn't try to remove an object that no longer exists
+            # (see the promotion branch below, which clears it the same way on success).
+            doc.quarantine_path = None
             self.repo.update_document(doc)
 
             # AUDIT: Validation failed → document rejected
@@ -213,6 +216,9 @@ class ScanJobHandler:
             existing_doc = self.repo.get_by_checksum(validation.sha256)
             if existing_doc and existing_doc.id != document_id:
                 doc.status = DocumentStatus.DUPLICATE
+                # Cleared for the same reason as the rejection branch above: the object is about
+                # to be deleted, so nothing should keep pointing at it.
+                doc.quarantine_path = None
                 self.repo.update_document(doc)
                 self.buckets.storage.delete_object(self.buckets.quarantine, quarantine_key)
 
