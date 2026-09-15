@@ -43,7 +43,9 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    # MinIO removed minio/minio from Docker Hub in Sept 2026 (anonymous pulls now 401).
+    # quay.io/minio/minio is their current official distribution — same image, same tags.
+    image: quay.io/minio/minio:latest
     container_name: apag-minio
     # Console bound to the VM's loopback only, same reasoning as postgres above: closed to
     # the internet, reachable via `ssh -L 9001:localhost:9001 ...` for the visual browser.
