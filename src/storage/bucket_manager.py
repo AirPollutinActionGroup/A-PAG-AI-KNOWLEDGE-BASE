@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class BucketManager:
-    """Manages quarantine and raw storage buckets.
+    """Manages the pipeline's object storage buckets.
 
     Defaults are sourced from `settings` (STORAGE_BACKEND, MINIO_*), not hardcoded, so that a
     bare `BucketManager()` call — as used by default in UploadService/ScanJobHandler/ScanWorker —
@@ -23,6 +23,8 @@ class BucketManager:
 
     QUARANTINE_BUCKET = "apag-quarantine"
     RAW_BUCKET = "apag-raw"
+    EXTRACTED_BUCKET = "apag-extracted"
+    NORMALIZED_BUCKET = "apag-normalized"
 
     def __init__(
         self,
@@ -64,10 +66,15 @@ class BucketManager:
                 )
                 self.storage = LocalFileSystemStorage(base_dir=local_dir)
 
-        # Ensure both buckets exist
-        self.storage.ensure_bucket_exists(self.QUARANTINE_BUCKET)
-        self.storage.ensure_bucket_exists(self.RAW_BUCKET)
-        logger.info("Buckets ready: [%s, %s]", self.QUARANTINE_BUCKET, self.RAW_BUCKET)
+        # Ensure all buckets exist
+        for bucket in (
+            self.QUARANTINE_BUCKET, self.RAW_BUCKET, self.EXTRACTED_BUCKET, self.NORMALIZED_BUCKET,
+        ):
+            self.storage.ensure_bucket_exists(bucket)
+        logger.info(
+            "Buckets ready: [%s, %s, %s, %s]",
+            self.QUARANTINE_BUCKET, self.RAW_BUCKET, self.EXTRACTED_BUCKET, self.NORMALIZED_BUCKET,
+        )
 
     @property
     def quarantine(self) -> str:
@@ -76,3 +83,11 @@ class BucketManager:
     @property
     def raw(self) -> str:
         return self.RAW_BUCKET
+
+    @property
+    def extracted(self) -> str:
+        return self.EXTRACTED_BUCKET
+
+    @property
+    def normalized(self) -> str:
+        return self.NORMALIZED_BUCKET

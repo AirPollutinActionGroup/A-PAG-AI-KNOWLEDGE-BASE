@@ -41,3 +41,20 @@ def build_raw_key(sha256: str, mime_type: str) -> str:
     Identical bytes hash identically and therefore always carry the same extension.
     """
     return f"{sha256}{extension_for(mime_type)}"
+
+
+def extraction_key_for(document_id: uuid.UUID) -> str:
+    """Key for a document's `extraction.json` in the `extracted/` bucket.
+
+    Keyed by document_id, not content hash: unlike `raw/`, this is a per-document pipeline
+    artifact (two documents with identical bytes were already deduplicated at promotion), and a
+    fixed, predictable key means the extraction and normalization job handlers don't need to look
+    anything up to find each other's output.
+    """
+    return f"{document_id}.json"
+
+
+def normalized_key_for(document_id: uuid.UUID) -> str:
+    """Key for a document's `normalized.json` in the `normalized/` bucket. Same reasoning as
+    `extraction_key_for` — per-document, not content-addressed."""
+    return f"{document_id}.json"
