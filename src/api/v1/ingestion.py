@@ -83,6 +83,13 @@ def _can_view(doc, current_user: User) -> bool:
     return doc.owner_id is not None and doc.owner_id == current_user.user_id
 
 
+def _safe_disposition_filename(filename: str) -> str:
+    """Strips characters that would let a stored filename break out of the header value it's
+    interpolated into (CR/LF for header injection, double quotes to end the quoted-string early).
+    OWASP's file-upload guidance is to never trust a stored filename in output headers verbatim."""
+    return filename.replace("\r", "").replace("\n", "").replace('"', "")
+
+
 def _uploader_emails(db: Session, docs) -> dict[uuid.UUID | None, str]:
     """Resolves uploader_user_id -> email for a page of documents in one query, so the API
     can show a human-readable uploader instead of a raw UUID."""
@@ -290,7 +297,9 @@ async def download_document(
     return Response(
         content=data,
         media_type=doc.mime_type,
-        headers={"Content-Disposition": f'inline; filename="{doc.filename}"'},
+        headers={
+            "Content-Disposition": f'inline; filename="{_safe_disposition_filename(doc.filename)}"'
+        },
     )
 
 

@@ -10,6 +10,7 @@ import zipfile
 
 import pytest
 
+import src.modules.document_pipeline.formats as formats_module
 from src.modules.document_pipeline.formats import (
     DOCX_MIME,
     PDF_MIME,
@@ -116,6 +117,24 @@ def test_macro_enabled_file_is_rejected():
     assert "MACRO_ENABLED_DOCUMENT" in res.rejection_reason
 
 
+def test_macro_enabled_file_is_rejected_regardless_of_case():
+    """OPC part names are case-insensitive (ECMA-376) — Word loads word/vbaproject.bin fine, so
+    the check must not miss it just because it isn't spelled with the usual camel case."""
+    data = build_ooxml(DOCX_MIME, extra={"word/vbaproject.bin": b"\x00macro"})
+    res = FileValidator().validate(data, declared_mime_type=DOCX_MIME)
+    assert not res.is_valid
+    assert "MACRO_ENABLED_DOCUMENT" in res.rejection_reason
+
+
+def test_zip_marker_match_is_case_insensitive():
+    """A real Office file always writes lowercase parts, but valid OPC permits other casing —
+    detection must not 415 a structurally valid file over casing alone."""
+    data = build_ooxml(DOCX_MIME, extra={"Word/Document.xml": b"<xml/>"}, omit="word/document.xml")
+    detected = detect_format(data)
+    assert detected is not None
+    assert detected.mime_type == DOCX_MIME
+
+
 def test_renamed_file_is_rejected_by_content():
     """An .xlsx uploaded as a .docx must not slip through on its declared type alone."""
     res = FileValidator().validate(build_ooxml(XLSX_MIME), declared_mime_type=DOCX_MIME)
@@ -143,6 +162,27 @@ def test_truncated_archive_is_rejected():
     res = FileValidator().validate(data, declared_mime_type=DOCX_MIME)
     assert not res.is_valid
     assert "CORRUPTED_OOXML_STRUCTURE" in res.rejection_reason
+
+
+def test_too_many_archive_entries_is_rejected(monkeypatch):
+    """Bounds entry count from the central directory — no decompression involved, so the cap can
+    be tested with a small, real zip rather than an actual 10,000-entry one."""
+    monkeypatch.setattr(formats_module, "MAX_OOXML_ENTRIES", 3)
+    data = build_ooxml(DOCX_MIME, extra={"extra1.xml": b"<x/>", "extra2.xml": b"<x/>"})
+    res = FileValidator().validate(data, declared_mime_type=DOCX_MIME)
+    assert not res.is_valid
+    assert "TOO_MANY_ARCHIVE_ENTRIES" in res.rejection_reason
+
+
+def test_oversized_declared_uncompressed_content_is_rejected(monkeypatch):
+    """A zip's declared uncompressed size is read from the central directory without
+    decompressing — this is what makes it a false-positive-free check, unlike the compression-
+    ratio heuristic removed for PDFs (see KNOWN_DEBTS.md #9)."""
+    monkeypatch.setattr(formats_module, "MAX_OOXML_UNCOMPRESSED_BYTES", 10)
+    data = build_ooxml(DOCX_MIME, extra={"big.xml": b"x" * 100})
+    res = FileValidator().validate(data, declared_mime_type=DOCX_MIME)
+    assert not res.is_valid
+    assert "ARCHIVE_TOO_LARGE" in res.rejection_reason
 
 
 def test_password_protected_office_file_is_rejected_with_actionable_reason():

@@ -227,5 +227,19 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Not a re-litigation of #9**: the total-uncompressed-size guard available from a zip's central
   directory is a different technique from the per-stream expansion-ratio check that was tried and
   removed for PDFs. It is read from declared metadata without decompressing anything, so it has no
-  false-positive mode. It is currently **not** implemented (the 100MB ceiling remains the only
-  bound); it becomes worth adding when extraction starts actually unpacking these archives.
+  false-positive mode.
+- **Update**: the entry-count (10,000) and total-declared-uncompressed-size (500MB) caps described
+  above are now implemented in `_ooxml_structure()` (`MAX_OOXML_ENTRIES` /
+  `MAX_OOXML_UNCOMPRESSED_BYTES` in `formats.py`), added after an audit found a 6MB `.pptx`
+  declaring 50,000 slides validated cleanly. The rest of this debt — XXE/DDE/external-reference
+  content inside the XML parts — is unaffected and still open; these caps only bound the
+  container's declared size, they don't inspect what's in it.
+
+### 12. Studio UI test presets are PDF-only
+- **Status**: Not addressed — noted while fixing unrelated format-validation bugs.
+- **Context**: `GET /documents/test-preset/{preset_name}` and the Studio UI's preset buttons only
+  serve PDF fixtures (`tests/fixtures/pdfs/`). There's no one-click way to exercise DOCX/XLSX/PPTX
+  validation (e.g. a macro-enabled or path-traversal fixture) from the UI the way PDF has.
+- **Trigger to address**: Before relying on the Studio UI to demo or manually test the
+  DOCX/XLSX/PPTX validation paths — add fixtures under `tests/fixtures/ooxml/` (or generate them
+  in-process, as `tests/unit/test_formats.py` already does) and extend `fixture_map`.

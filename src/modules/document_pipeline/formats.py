@@ -40,6 +40,13 @@ _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 MAX_PDF_PAGES = 5000
 _CONTENT_TYPES_PART = "[Content_Types].xml"
 
+# Bounds read from the zip central directory (ZipInfo metadata) — no decompression, so unlike the
+# per-stream compression-ratio check that was tried and removed for PDFs (see KNOWN_DEBTS.md #9),
+# these have no false-positive mode: a legitimate Office file has a few hundred parts at most and
+# nowhere near this much declared content.
+MAX_OOXML_ENTRIES = 10_000
+MAX_OOXML_UNCOMPRESSED_BYTES = 500 * 1024 * 1024  # 500MB
+
 
 @dataclass(frozen=True)
 class StructuralResult:
@@ -126,6 +133,32 @@ def _ooxml_names(data: bytes) -> list[str] | None:
         return None
 
 
+def _ooxml_infolist(data: bytes) -> list[zipfile.ZipInfo] | None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            return archive.infolist()
+    except (zipfile.BadZipFile, OSError):
+        return None
+
+
+def _has_part(names: list[str], part: str | None) -> bool:
+    """Case-insensitive exact-path membership check for a specific OPC part such as a zip marker.
+    OPC part names are case-insensitive per ECMA-376, so a literal `in` check misses a legitimate
+    part written in another case. `part=None` (PDF has no zip marker) never matches."""
+    if part is None:
+        return False
+    target = part.casefold()
+    return any(name.casefold() == target for name in names)
+
+
+def _has_entry_named(names: list[str], basename: str) -> bool:
+    """Case-insensitive basename match, for parts that can live in more than one directory (a
+    macro project is `word/vbaProject.bin`, `xl/vbaProject.bin` or `ppt/vbaProject.bin` depending
+    on format) — unlike `_has_part`, which is for a single, fully-qualified path."""
+    target = basename.casefold()
+    return any(name.rsplit("/", 1)[-1].casefold() == target for name in names)
+
+
 def _ooxml_container(data: bytes, spec: FormatSpec) -> StructuralResult:
     if data.startswith(_OLE_MAGIC):
         return StructuralResult(
@@ -140,7 +173,7 @@ def _ooxml_container(data: bytes, spec: FormatSpec) -> StructuralResult:
             False, "CORRUPTED_OOXML_STRUCTURE: Not a readable Office file (unreadable archive)."
         )
 
-    if _CONTENT_TYPES_PART not in names:
+    if not _has_part(names, _CONTENT_TYPES_PART):
         return StructuralResult(
             False,
             f"CORRUPTED_OOXML_STRUCTURE: Missing '{_CONTENT_TYPES_PART}' — not a valid Office file.",
@@ -149,13 +182,31 @@ def _ooxml_container(data: bytes, spec: FormatSpec) -> StructuralResult:
 
 
 def _ooxml_structure(data: bytes, spec: FormatSpec) -> StructuralResult:
-    names = _ooxml_names(data)
-    if names is None:
+    infolist = _ooxml_infolist(data)
+    if infolist is None:
         return StructuralResult(
             False, "CORRUPTED_OOXML_STRUCTURE: Not a readable Office file (unreadable archive)."
         )
+    names = [info.filename for info in infolist]
 
-    if any(name.rsplit("/", 1)[-1] == "vbaProject.bin" for name in names):
+    # Bounds read straight from the central directory — no decompression, so a legitimate file
+    # (a few hundred parts at most) never comes close and there is no false-positive mode.
+    if len(infolist) > MAX_OOXML_ENTRIES:
+        return StructuralResult(
+            False,
+            f"TOO_MANY_ARCHIVE_ENTRIES: Office file contains {len(infolist)} archive entries "
+            f"(Max: {MAX_OOXML_ENTRIES}).",
+        )
+    total_uncompressed = sum(info.file_size for info in infolist)
+    if total_uncompressed > MAX_OOXML_UNCOMPRESSED_BYTES:
+        return StructuralResult(
+            False,
+            f"ARCHIVE_TOO_LARGE: Office file declares "
+            f"{total_uncompressed / (1024 * 1024):.0f}MB of uncompressed content "
+            f"(Max: {MAX_OOXML_UNCOMPRESSED_BYTES // (1024 * 1024)}MB).",
+        )
+
+    if _has_entry_named(names, "vbaProject.bin"):
         return StructuralResult(
             False,
             "MACRO_ENABLED_DOCUMENT: This file contains macros. Re-save it without macros "
@@ -170,9 +221,9 @@ def _ooxml_structure(data: bytes, spec: FormatSpec) -> StructuralResult:
 
     # The declared type has to match what is actually inside, so a renamed file is caught here
     # rather than by a later stage that expects a different XML part.
-    if spec.zip_marker not in names:
+    if not _has_part(names, spec.zip_marker):
         actual = next(
-            (other.label for other in _OOXML_SPECS if other.zip_marker in names),
+            (other.label for other in _OOXML_SPECS if _has_part(names, other.zip_marker)),
             None,
         )
         detail = f"file is actually {actual}" if actual else "content does not match any known type"
@@ -256,7 +307,7 @@ def detect_format(data: bytes) -> FormatSpec | None:
                 names = archive.namelist()
         except (zipfile.BadZipFile, OSError):
             return None
-        return next((spec for spec in _OOXML_SPECS if spec.zip_marker in names), None)
+        return next((spec for spec in _OOXML_SPECS if _has_part(names, spec.zip_marker)), None)
     return None
 
 
