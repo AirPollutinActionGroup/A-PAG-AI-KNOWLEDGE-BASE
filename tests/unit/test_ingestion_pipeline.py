@@ -26,6 +26,7 @@ from src.db.models import AuditLog, Base
 from src.db.models import Document as DocORM
 from src.modules.audit.service import AuditService
 from src.modules.auth.dependencies import get_current_user
+from src.modules.document_pipeline.formats import PDF_MIME
 from src.modules.document_pipeline.models import (
     Classification,
     DocumentStatus,
@@ -236,7 +237,7 @@ def test_document_versioning_and_superseding(tmp_path):
 def test_reject_empty_zero_byte_file():
     """Test rejection of empty 0-byte file."""
     validator = FileValidator()
-    res = validator.validate(b"")
+    res = validator.validate(b"", declared_mime_type=PDF_MIME)
     assert not res.is_valid
     assert "EMPTY_FILE" in res.rejection_reason
 
@@ -245,7 +246,7 @@ def test_reject_oversized_file():
     """Test 100MB ceiling rejection."""
     validator = FileValidator()
     huge_data = b"%PDF-1.4\n" + (b"0" * (101 * 1024 * 1024)) + b"\n%%EOF"
-    res = validator.validate(huge_data)
+    res = validator.validate(huge_data, declared_mime_type=PDF_MIME)
     assert not res.is_valid
     assert "FILE_TOO_LARGE" in res.rejection_reason
 
@@ -261,14 +262,14 @@ def test_reject_non_pdf_files():
 
     # Case 2: PNG magic bytes with .pdf extension
     png_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-    res_png = validator.validate(png_header)
+    res_png = validator.validate(png_header, declared_mime_type=PDF_MIME)
     assert not res_png.is_valid
     assert "CORRUPTED_PDF_STRUCTURE" in res_png.rejection_reason
 
     # Case 3: EXE/MZ binary disguised as .pdf
     with open(FIXTURES_DIR / "07_disguised_fake_binary.pdf", "rb") as f:
         exe_data = f.read()
-    res_exe = validator.validate(exe_data)
+    res_exe = validator.validate(exe_data, declared_mime_type=PDF_MIME)
     assert not res_exe.is_valid
     assert "CORRUPTED_PDF_STRUCTURE" in res_exe.rejection_reason
 
@@ -373,6 +374,28 @@ def test_quarantine_deleted_after_rejection(tmp_path):
     quarantine_key = resp.quarantine_key
     assert not storage.object_exists(buckets.quarantine, quarantine_key), \
         "Quarantine object was NOT purged after rejection — toxic file lingering."
+
+
+def test_rejected_document_stays_deletable(tmp_path):
+    """A rejected document's `quarantine_path` must be cleared once its object is purged — the
+    promotion branch already does this, and the reject/duplicate branches must match it, or a
+    later DELETE tries to remove an object that no longer exists and fails against local storage
+    (`LocalFileSystemStorage.delete_object` returns False for a missing file)."""
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+    buckets = BucketManager(storage=storage)
+    repo = InMemoryDocumentRepository()
+    service = UploadService(bucket_manager=buckets, repository=repo)
+    handler = ScanJobHandler(bucket_manager=buckets, repository=repo)
+
+    with open(FIXTURES_DIR / "05_corrupted_header_missing.pdf", "rb") as f:
+        data = f.read()
+
+    resp = upload_and_process_sync(service, handler, filename="reject_then_delete.pdf", data=data)
+    assert resp.status == DocumentStatus.REJECTED
+
+    doc = repo.get_by_id(resp.document_id)
+    assert doc.quarantine_path is None, \
+        "quarantine_path still points at a deleted object — DELETE would fail against it."
 
 
 def test_rejected_pdf_never_reaches_raw(tmp_path):

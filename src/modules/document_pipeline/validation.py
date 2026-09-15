@@ -26,7 +26,6 @@ from typing import ClassVar
 
 from src.modules.document_pipeline.formats import (
     MAX_PDF_PAGES,
-    PDF_MIME,
     describe_unsupported,
     spec_for,
 )
@@ -91,7 +90,7 @@ class FileValidator:
     def validate(
         self,
         data: bytes,
-        declared_mime_type: str = PDF_MIME,
+        declared_mime_type: str,
     ) -> ValidationResult:
         size = len(data)
 
@@ -187,7 +186,7 @@ class ValidationService:
     def validate_document(
         self,
         data: bytes,
-        mime_type: str = PDF_MIME,
+        mime_type: str,
     ) -> ValidationResult:
         """Runs the complete suite of fail-fast validation checks."""
         return self.validator.validate(data, mime_type)
