@@ -53,15 +53,39 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
                                                 [Validation Passed]                       [Threat/Corrupt]
                                                         │                                         │
                                                 Promote to Raw Bucket                     Purge Quarantine
-                                                Set Status AWAITING_CLASS                 Set Status REJECTED
+                                                Set Status VALIDATED                      Set Status REJECTED
                                                 Emit DOCUMENT_PROMOTED                    Emit DOCUMENT_REJECTED
+                                                        │
+                                                        ▼
+                                              ExtractionWorker Daemon
+                                    (pdfplumber / python-docx / python-pptx / openpyxl)
+                                                        │
+                                        ┌───────────────┴───────────────┐
+                                        ▼                               ▼
+                                [Text Extracted]                [Unreadable File]
+                                        │                               │
+                                Write extracted/{id}.json      Set Status EXTRACTION_FAILED
+                                Set Status EXTRACTED
+                                        │
+                                        ▼
+                                NormalizationWorker Daemon
+                        (clean text, detect language, quality gate)
+                                        │
+                            ┌───────────┴───────────┐
+                            ▼                       ▼
+                    [Quality Passed]         [Quality Failed]
+                            │                       │
+                Write normalized/{id}.json   Set Status NORMALIZATION_FAILED
+                Set Status AWAITING_CLASS    (e.g. LOW_TEXT_DENSITY — the signal
+                                               a scanned document reached the system)
 ```
 
 - **Quarantine-First Isolation**: Files land in isolated temporary storage before any parsing or scanning.
 - **Immediate 202 Accepted**: API returns document UUID, status URL, and correlation ID in under 500ms.
-- **SKIP LOCKED Worker Pool**: Background workers pull jobs without blocking, managed by 60s leases and a 30s dead-worker reaper.
+- **SKIP LOCKED Worker Pool**: Background workers pull jobs without blocking, managed by 60s leases and a 30s dead-worker reaper. One worker process per pipeline stage (`WORKER_STAGE=SCAN|EXTRACT|NORMALIZE`), each its own container off the same image.
 - **SHA-256 Deduplication & Partial Unique Index**: Hardware-accelerated hashing prevents duplicate storage while permitting superseded version history.
 - **Append-Only Audit Trail**: Every document lifecycle event is immutably logged with correlation IDs.
+- **Non-ML text extraction**: reads structure each format already states (Word styles, slide titles, worksheet grids) rather than inferring it — no OCR, no layout-inference model. See Current Limitations below.
 
 ---
 
@@ -80,7 +104,8 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 - **Open registration**: `POST /auth/register` has no invite gate yet — acceptable only for the internal, not-internet-exposed bootstrap phase. See `KNOWN_DEBTS.md`.
 - **2-tier classification only**: `RESTRICTED` = uploader + ADMIN (owner-scoped, not department-based); no per-document ACLs. See `ARCHITECTURE.md` §6b.
 - **Single-Tenant Deployment**: Multi-organization partitioning is deferred to later milestones.
-- **Text Extraction & OCR**: Pipeline currently implements Stages 1–3 (quarantine, validation, scanning, promotion); Stage 4 (OCR / extraction) is the next phase. Ingestion accepts the formats below, but no text is extracted from any of them yet.
+- **No OCR**: Pipeline implements Stages 1–5 (quarantine → validation → promotion → text extraction → normalization). Text extraction is deliberate and non-ML — it reads structure each format already states rather than inferring it — and there is no OCR fallback, since this corpus is digitally authored, not scanned. A document with no real text layer is stopped at `NORMALIZATION_FAILED` (`LOW_TEXT_DENSITY`/`EMPTY_TEXT`) rather than silently indexed empty. See `KNOWN_DEBTS.md` #13–14.
+- **No chunking/embedding/classification yet**: extraction and normalization produce clean, structured per-document JSON (`extracted/{id}.json`, `normalized/{id}.json`); nothing downstream of that (chunking, vector indexing, classification) is built yet.
 
 ### Supported upload formats
 
@@ -112,10 +137,11 @@ Not accepted, with the reason:
 | **Phase 2** | Threat Scanning & Deduplication Engine (ClamAV, SHA-256) | ✅ Completed |
 | **Phase 3** | Storage Promotion, DB Migrations & Immutable Audit Log | ✅ Completed |
 | **Phase C** | Asynchronous Architecture Refactor (SKIP LOCKED Workers, 202 Contract) | ✅ Completed |
-| **Phase 4** | Document Text Extraction (Native PDF parsing + OCR fallback) | ⏳ Next |
-| **Phase 5** | Chunking, Entity Normalization & Vector Indexing (Qdrant) | 📋 Planned |
-| **Phase 6** | Permission Governance, Hard Pre-Filtering & RBAC | 📋 Planned |
-| **Phase 7** | Text-to-SQL Engine & Sovereign RAG Query Layer | 📋 Planned |
+| **Phase 4** | Document Text Extraction (native parsing, no OCR — see `KNOWN_DEBTS.md` #14) | ✅ Completed |
+| **Phase 5** | Normalization (cleaning, language detection, quality gate) | ✅ Completed |
+| **Phase 6** | Chunking, Classification & Vector Indexing (Qdrant) | 📋 Planned |
+| **Phase 7** | Permission Governance, Hard Pre-Filtering & RBAC | 📋 Planned |
+| **Phase 8** | Text-to-SQL Engine & Sovereign RAG Query Layer | 📋 Planned |
 
 ---
 
@@ -132,7 +158,8 @@ cp .env.example .env
 
 ### 3. Start Infrastructure & Background Services
 ```bash
-# Starts PostgreSQL, MinIO, API, and Background Worker
+# Starts PostgreSQL, MinIO, API, and one worker container per pipeline stage
+# (scan, extraction, normalization)
 docker compose up -d
 
 # Run database schema migrations

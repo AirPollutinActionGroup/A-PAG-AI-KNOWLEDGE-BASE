@@ -4,13 +4,23 @@ from enum import Enum
 
 
 class DocumentStatus(str, Enum):
-    """Document lifecycle states."""
+    """Document lifecycle states.
+
+    VALIDATED means "promoted to raw/, EXTRACT job pending" — set by ScanJobHandler on
+    successful promotion. AWAITING_CLASSIFICATION means normalization succeeded (set by
+    NormalizationJobHandler), not promotion — the pipeline runs
+    QUARANTINED -> VALIDATED -> EXTRACTED -> AWAITING_CLASSIFICATION, with EXTRACTION_FAILED /
+    NORMALIZATION_FAILED as the failure branches of the two middle stages.
+    """
 
     UPLOADED = "UPLOADED"
     QUARANTINED = "QUARANTINED"
     VALIDATED = "VALIDATED"
     VALIDATION_FAILED = "VALIDATION_FAILED"
     REJECTED = "REJECTED"
+    EXTRACTED = "EXTRACTED"
+    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+    NORMALIZATION_FAILED = "NORMALIZATION_FAILED"
     AWAITING_CLASSIFICATION = "AWAITING_CLASSIFICATION"
     DUPLICATE = "DUPLICATE"
     LIVE = "LIVE"
@@ -65,3 +75,7 @@ class AuditEventType(str, Enum):
     DOCUMENT_SUPERSEDED = "DOCUMENT_SUPERSEDED"
     DOCUMENT_ARCHIVED = "DOCUMENT_ARCHIVED"
     DOCUMENT_DELETED = "DOCUMENT_DELETED"
+    EXTRACTION_COMPLETED = "EXTRACTION_COMPLETED"
+    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+    NORMALIZATION_COMPLETED = "NORMALIZATION_COMPLETED"
+    NORMALIZATION_FAILED = "NORMALIZATION_FAILED"

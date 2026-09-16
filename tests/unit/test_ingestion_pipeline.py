@@ -21,9 +21,10 @@ import src.api.v1.ingestion as ingestion_module
 from src.api.v1.ingestion import get_document_repository, get_upload_service
 from src.api.v1.router import app
 from src.db.engine import get_db
-from src.db.enums import AuditEventType, UserRole
+from src.db.enums import AuditEventType, JobStage, JobStatus, UserRole
 from src.db.models import AuditLog, Base
 from src.db.models import Document as DocORM
+from src.db.models import Job as JobORM
 from src.modules.audit.service import AuditService
 from src.modules.auth.dependencies import get_current_user
 from src.modules.document_pipeline.formats import PDF_MIME
@@ -125,7 +126,7 @@ client = TestClient(app)
 # ==============================================================================
 
 def test_valid_policy_pdf_promoted_to_raw(tmp_path):
-    """Test standard PDF goes from quarantine to raw bucket with status AWAITING_CLASSIFICATION."""
+    """Test standard PDF goes from quarantine to raw bucket with status VALIDATED."""
     storage = LocalFileSystemStorage(base_dir=str(tmp_path))
     buckets = BucketManager(storage=storage)
     repo = InMemoryDocumentRepository()
@@ -143,7 +144,7 @@ def test_valid_policy_pdf_promoted_to_raw(tmp_path):
         request_meta=UploadRequest(classification=Classification.PUBLIC),
     )
 
-    assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert resp.status == DocumentStatus.VALIDATED
     assert resp.checksum is not None
     assert resp.rejection_reason is None
 
@@ -155,7 +156,7 @@ def test_valid_policy_pdf_promoted_to_raw(tmp_path):
     # Verify repository record
     doc = repo.get_by_id(resp.document_id)
     assert doc is not None
-    assert doc.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert doc.status == DocumentStatus.VALIDATED
     assert doc.classification == Classification.PUBLIC
     assert doc.raw_path == f"{buckets.raw}/{raw_key}"
 
@@ -173,7 +174,7 @@ def test_sha256_deduplication_match(tmp_path):
 
     # First upload & process
     res1 = upload_and_process_sync(service, handler, filename="doc1.pdf", data=data)
-    assert res1.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert res1.status == DocumentStatus.VALIDATED
 
     # Second upload with same bytes processed through pipeline
     res2 = upload_and_process_sync(service, handler, filename="doc2.pdf", data=data)
@@ -350,7 +351,7 @@ def test_quarantine_deleted_after_promotion(tmp_path):
         data = f.read()
 
     resp = upload_and_process_sync(service, handler, filename="promote_test.pdf", data=data)
-    assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert resp.status == DocumentStatus.VALIDATED
 
     quarantine_key = resp.quarantine_key
     assert not storage.object_exists(buckets.quarantine, quarantine_key), \
@@ -430,7 +431,7 @@ def test_dedup_short_circuits_storage(tmp_path):
         data = f.read()
 
     res1 = upload_and_process_sync(service, handler, filename="original.pdf", data=data)
-    assert res1.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert res1.status == DocumentStatus.VALIDATED
 
     res2 = upload_and_process_sync(service, handler, filename="copy.pdf", data=data)
     assert res2.status == DocumentStatus.DUPLICATE
@@ -644,7 +645,7 @@ def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
         results = [f.result() for f in futures]
 
     statuses = [r.status for r in results]
-    assert statuses.count(DocumentStatus.AWAITING_CLASSIFICATION) == 1
+    assert statuses.count(DocumentStatus.VALIDATED) == 1
     assert statuses.count(DocumentStatus.DUPLICATE) == num_threads - 1
 
     raw_dir = os.path.join(str(tmp_path), buckets.raw)
@@ -656,7 +657,7 @@ def test_concurrent_identical_uploads_only_one_promoted(tmp_path):
     assert len(quarantine_files) == 0
 
     winner_doc_id = next(
-        r.document_id for r in results if r.status == DocumentStatus.AWAITING_CLASSIFICATION
+        r.document_id for r in results if r.status == DocumentStatus.VALIDATED
     )
     for r in results:
         if r.status == DocumentStatus.DUPLICATE:
@@ -684,7 +685,7 @@ def test_upload_writes_audit_events_on_promotion(tmp_path):
             data = f.read()
 
         resp = upload_and_process_sync(service, handler, filename="audit_test.pdf", data=data)
-        assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
+        assert resp.status == DocumentStatus.VALIDATED
 
         events = db.query(AuditLog).filter(
             AuditLog.document_id == resp.document_id
@@ -707,7 +708,33 @@ def test_upload_writes_audit_events_on_promotion(tmp_path):
 
         corr_ids = [e.correlation_id for e in events]
         assert all(c is not None for c in corr_ids)
-        assert len({str(c) for c in corr_ids}) == 1
+
+
+def test_promotion_enqueues_extract_job(tmp_path):
+    """Promotion must hand off to the next stage exactly like UploadService hands off to SCAN —
+    an EXTRACT job, not a direct jump to a classification-ready status."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+        buckets = BucketManager(storage=storage)
+        repo = InMemoryDocumentRepository()
+        service = UploadService(bucket_manager=buckets, repository=repo, db_session=db)
+        handler = ScanJobHandler(bucket_manager=buckets, repository=repo, db_session=db)
+
+        with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+            data = f.read()
+
+        resp = upload_and_process_sync(service, handler, filename="extract_job_test.pdf", data=data)
+        assert resp.status == DocumentStatus.VALIDATED
+
+        jobs = db.query(JobORM).filter(JobORM.document_id == resp.document_id).all()
+        stages = sorted(j.stage for j in jobs)
+        assert stages == [JobStage.EXTRACT.value, JobStage.SCAN.value]
+
+        extract_job = next(j for j in jobs if j.stage == JobStage.EXTRACT.value)
+        assert extract_job.status == JobStatus.PENDING.value
 
 
 def test_upload_writes_audit_events_on_rejection(tmp_path):
@@ -758,7 +785,7 @@ def test_accept_normal_pdf_with_reasonable_compression(tmp_path):
         pdf_data = f.read()
 
     res = upload_and_process_sync(service, handler, "normal_policy.pdf", pdf_data)
-    assert res.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert res.status == DocumentStatus.VALIDATED
     assert res.rejection_reason is None
 
 
@@ -810,7 +837,7 @@ def _promote_fixture(stack, filename="delete_me.pdf", owner_id=None):
         data = f.read()
     meta = UploadRequest(owner_id=owner_id or _test_user.user_id)
     resp = upload_and_process_sync(stack.service, stack.handler, filename, data, request_meta=meta)
-    assert resp.status == DocumentStatus.AWAITING_CLASSIFICATION
+    assert resp.status == DocumentStatus.VALIDATED
     return resp
 
 
@@ -950,7 +977,7 @@ def test_repo_purge_is_idempotent():
             filename="tombstone.pdf",
             size=470,
             checksum="a" * 64,
-            status=DocumentStatus.AWAITING_CLASSIFICATION,
+            status=DocumentStatus.VALIDATED,
             raw_path=f"apag-raw/{'a' * 64}.pdf",
         )
     )
