@@ -93,9 +93,20 @@ def test_worker_completes_successful_job(postgres_engine, test_storage):
 
         assert final_job.status == "COMPLETED"
         assert final_job.finished_at is not None
-        assert final_doc.status == "AWAITING_CLASSIFICATION"
+        # VALIDATED, not AWAITING_CLASSIFICATION: promotion now hands off to the EXTRACT stage —
+        # AWAITING_CLASSIFICATION is set by NormalizationJobHandler once normalization succeeds.
+        assert final_doc.status == "VALIDATED"
         assert final_doc.sha256 is not None
         assert final_doc.raw_path is not None
+
+        # Promotion enqueues the next stage, mirroring how UploadService hands off to SCAN.
+        extract_job = (
+            session.query(JobORM)
+            .filter(JobORM.document_id == doc_id, JobORM.stage == "EXTRACT")
+            .first()
+        )
+        assert extract_job is not None
+        assert extract_job.status == "PENDING"
 
 
 def test_worker_retries_on_missing_storage_object(postgres_engine, test_storage):
