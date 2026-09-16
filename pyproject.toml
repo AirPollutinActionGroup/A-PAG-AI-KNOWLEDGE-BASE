@@ -11,6 +11,20 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "python-multipart>=0.0.9",
     "pypdf>=4.1.0",
+    # Phase 4 text extraction. Deliberately non-ML: these read what each format already states
+    # (Office formats carry their own structure in XML; typed PDFs carry a real text layer), so
+    # there is nothing for layout inference to recover. Docling was evaluated and rejected for
+    # now — it resolves to 78 packages including torch/transformers/opencv for capabilities this
+    # corpus doesn't need (OCR, multi-column inference). See KNOWN_DEBTS.md for the swap trigger.
+    "pdfplumber>=0.11.0",
+    "python-docx>=1.1.0",
+    "python-pptx>=1.0.0",
+    "openpyxl>=3.1.0",
+    # Language detection for normalization. Chosen over fasttext-based alternatives because it
+    # ships its language profiles inside the package — those download a model on first use, which
+    # inside a worker container means a network fetch at runtime that can fail or stall a cold
+    # start. Whole documents give it plenty of text to work with, which is where it is accurate.
+    "langdetect>=1.0.9",
     "minio>=7.2.5",
     "sqlalchemy>=2.0.28",
     "psycopg2-binary>=2.9.9",

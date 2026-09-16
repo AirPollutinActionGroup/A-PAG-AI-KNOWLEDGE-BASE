@@ -12,7 +12,8 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.enums import AuditEventType
+from src.db.enums import AuditEventType, JobStage, JobStatus
+from src.db.models import Job as JobORM
 from src.modules.audit.service import AuditService
 from src.modules.document_pipeline.models import (
     DocumentStatus,
@@ -121,8 +122,17 @@ class ScanJobHandler:
         filename = doc.filename
         quarantine_key = quarantine_key_for(doc)
 
-        # Idempotency guard: If document is already promoted or finalized, return existing state
-        if doc.status in (DocumentStatus.AWAITING_CLASSIFICATION, DocumentStatus.LIVE):
+        # Idempotency guard: If document is already promoted or finalized, return existing state.
+        # VALIDATED/EXTRACTED/NORMALIZATION_FAILED are all "already past this stage" — re-running
+        # a retried/reaped SCAN job on one of them must not re-validate or re-promote it.
+        if doc.status in (
+            DocumentStatus.VALIDATED,
+            DocumentStatus.EXTRACTED,
+            DocumentStatus.EXTRACTION_FAILED,
+            DocumentStatus.NORMALIZATION_FAILED,
+            DocumentStatus.AWAITING_CLASSIFICATION,
+            DocumentStatus.LIVE,
+        ):
             logger.info("Scan job: doc_id=%s already in %s, skipping re-scan", document_id, doc.status.value)
             return UploadResponse(
                 document_id=document_id,
@@ -303,7 +313,10 @@ class ScanJobHandler:
                     message="Storage error during promotion. File preserved in quarantine for retry.",
                 )
 
-            doc.status = DocumentStatus.AWAITING_CLASSIFICATION
+            # VALIDATED, not AWAITING_CLASSIFICATION: promotion hands off to the EXTRACT stage
+            # next, not straight to classification. AWAITING_CLASSIFICATION is now set by
+            # NormalizationJobHandler once normalization actually succeeds.
+            doc.status = DocumentStatus.VALIDATED
             doc.raw_path = f"{self.buckets.raw}/{raw_key}"
             doc.quarantine_path = None
             doc.page_count = validation.page_count
@@ -353,6 +366,16 @@ class ScanJobHandler:
                 "version": doc.version,
             }, correlation_id=corr_id)
 
+            # Enqueue the next stage — mirrors how UploadService.receive() enqueues the SCAN job.
+            if self._db is not None:
+                self._db.add(JobORM(
+                    job_id=uuid.uuid4(),
+                    document_id=document_id,
+                    stage=JobStage.EXTRACT.value,
+                    status=JobStatus.PENDING.value,
+                ))
+                self._db.commit()
+
             logger.info(
                 "PROMOTED: corr_id=%s doc_id=%s -> %s sha256=%s",
                 corr_id, document_id, doc.raw_path, validation.sha256,
@@ -361,7 +384,7 @@ class ScanJobHandler:
             return UploadResponse(
                 document_id=document_id,
                 filename=filename,
-                status=DocumentStatus.AWAITING_CLASSIFICATION,
+                status=DocumentStatus.VALIDATED,
                 quarantine_key=quarantine_key,
                 checksum=validation.sha256,
                 was_duplicate=False,

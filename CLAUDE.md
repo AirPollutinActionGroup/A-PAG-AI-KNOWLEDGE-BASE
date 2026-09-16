@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A-PAG AI Knowledge Base: an async document ingestion pipeline (Python 3.12, FastAPI) that will
 eventually feed a governed RAG platform (vector search over PDFs) plus a Text-to-SQL layer over
-PostgreSQL. **Currently implemented: Stages 1–3 only** (upload/quarantine → validation/threat scan →
-promotion to raw storage + audit trail), plus JWT auth, multi-file upload, pagination, and
-full-text search on top of it. Text extraction, OCR, chunking, vector indexing, and Text-to-SQL are
-not yet built (see Roadmap in README.md).
+PostgreSQL. **Currently implemented: Stages 1–5** (upload/quarantine → validation/threat scan →
+promotion to raw storage → text extraction → normalization/quality gate), plus JWT auth,
+multi-file upload, pagination, and full-text search on top of it. Classification, chunking,
+vector indexing, and Text-to-SQL are not yet built (see Roadmap in README.md).
 
 ## Commands
 
@@ -25,7 +25,9 @@ alembic upgrade head
 
 # Run app locally (outside docker)
 python main.py            # FastAPI on :8000
-python worker_main.py      # ScanWorker daemon
+python worker_main.py      # runs one stage, selected by WORKER_STAGE (default SCAN)
+WORKER_STAGE=EXTRACT python worker_main.py
+WORKER_STAGE=NORMALIZE python worker_main.py
 
 # Tests
 pytest tests/ -v                              # full suite (unit + Postgres integration)
@@ -44,16 +46,20 @@ see `KNOWN_DEBTS.md`). All `/api/v1/documents/*` endpoints require `Authorizatio
 
 ## Architecture
 
-### Two entrypoints, one shared pipeline
+### One API entrypoint, one worker entrypoint that runs any stage
 
 - `main.py` → FastAPI app (`src/api/v1/router.py`) — handles `POST /documents/upload` (fast path
   only, returns `202` in <500ms) and `GET /documents/{id}/status`.
-- `worker_main.py` → `ScanWorker` daemon — does all the actual heavy lifting (validation, threat
-  scan, dedup, promotion) picked up from a DB-backed job queue.
+- `worker_main.py` → reads `WORKER_STAGE` (`SCAN` default) and runs the matching `BaseWorker`
+  subclass — `ScanWorker`, `ExtractionWorker`, or `NormalizationWorker`. One process handles one
+  stage; each stage runs as its own container in Docker Compose off the same image (see
+  `docker-compose.yml`), because the container healthcheck watches a single heartbeat file, which
+  assumes one worker daemon per container (`KNOWN_DEBTS.md` #5).
 
-These two processes never call into each other directly; they communicate only through the
-`documents` and `jobs` tables in Postgres. When changing pipeline behavior, check both call sites:
-`UploadService.receive()` (API, fast path) and `ScanJobHandler.process()` (worker, heavy path).
+Processes never call into each other directly; they communicate only through the `documents` and
+`jobs` tables in Postgres. When changing pipeline behavior, check both the fast-path call site
+(`UploadService.receive()`, or the previous stage's handler enqueuing the next job) and the heavy
+path (the stage's own `*JobHandler.process()`).
 
 ### Pipeline stages (by module)
 
@@ -64,30 +70,77 @@ These two processes never call into each other directly; they communicate only t
 2. **Claim** — `src/workers/base_worker.py` (`BaseWorker`): generic SKIP LOCKED job-queue engine
    (polling, atomic claim via `UPDATE ... WHERE ... FOR UPDATE SKIP LOCKED RETURNING`, lease
    expiry, exponential-backoff retries, a periodic reaper for stuck/expired leases, and a
-   heartbeat file for container healthchecks). `ScanWorker` (`src/workers/scan_worker.py`)
-   subclasses it and only implements `process_job()`, which opens a session and delegates to
-   `ScanJobHandler`. Any new pipeline stage (e.g. future EXTRACT/NORMALIZE) should follow the same
-   pattern: subclass `BaseWorker`, implement `process_job()`, raise `TransientProcessingError` vs
-   `PermanentProcessingError` (`src/core/errors.py`) to control retry vs. immediate-fail behavior.
+   heartbeat file for container healthchecks). Each stage's worker (`ScanWorker`,
+   `ExtractionWorker`, `NormalizationWorker`, in `src/workers/`) subclasses it and only implements
+   `process_job()`, which opens a session and delegates to that stage's job handler. A new
+   pipeline stage follows the same pattern: subclass `BaseWorker`, implement `process_job()`,
+   raise `TransientProcessingError` vs `PermanentProcessingError` (`src/core/errors.py`) to
+   control retry vs. immediate-fail behavior, and register the worker class in `worker_main.py`'s
+   `WORKERS` dict.
 3. **Validate/Scan/Promote** — `src/modules/document_pipeline/scan_job_handler.py`
    `ScanJobHandler.process()`: fetches the document, re-reads bytes from quarantine, runs
    `ValidationService` (`src/modules/document_pipeline/validation.py` — a fail-fast ladder: size,
    format lookup, container check, heuristic threat scan, deep structural check, SHA-256 — a
    decompression-bomb ratio check was tried and removed, see `KNOWN_DEBTS.md`), then either
-   rejects (purges quarantine object, sets `REJECTED`) or
-   promotes (copies to `raw/` bucket keyed by SHA-256, sets `AWAITING_CLASSIFICATION`). Dedup and
-   promotion are guarded by an in-process lock (`self._promotion_lock`) plus a DB partial unique
-   index (`uq_documents_active_sha256`) as the real guarantee under multi-worker concurrency.
-   Handler methods are idempotent — re-running `process()` on an already-finalized document is a
-   safe no-op that returns the existing state (important since jobs can be retried/reaped).
+   rejects (purges quarantine object, sets `REJECTED`) or promotes (copies to `raw/` bucket keyed
+   by SHA-256, sets `VALIDATED`, enqueues an `EXTRACT` job). Dedup and promotion are guarded by an
+   in-process lock (`self._promotion_lock`) plus a DB partial unique index
+   (`uq_documents_active_sha256`) as the real guarantee under multi-worker concurrency. Handler
+   methods are idempotent — re-running `process()` on an already-finalized (or already-promoted)
+   document is a safe no-op that returns the existing state (important since jobs can be
+   retried/reaped).
+4. **Extract** — `src/modules/document_pipeline/extraction_job_handler.py`
+   `ExtractionJobHandler.process()`: fetches a `VALIDATED` document, reads its `raw/` bytes, and
+   dispatches to the `TextExtractor` registered for its MIME type
+   (`src/modules/document_pipeline/extraction/extractors.py` — one per format, deliberately
+   non-ML; see the "Text extraction" section below). Writes the result to
+   `extracted/{document_id}.json`, sets `EXTRACTED`, enqueues a `NORMALIZE` job. A file that can't
+   be parsed sets `EXTRACTION_FAILED` and stops the pipeline there — no job is queued after a
+   failure at any stage.
+5. **Normalize** — `src/modules/document_pipeline/normalization_job_handler.py`
+   `NormalizationJobHandler.process()`: fetches an `EXTRACTED` document, reads its
+   `extracted/{id}.json`, and runs `NormalizationService` (`src/modules/document_pipeline/normalization/`
+   — text cleaning, language detection, then a quality gate). This stage never opens the original
+   file and has no per-format branching — structure (headings/tables) is carried through from
+   extraction, not re-derived. A passing document is written to `normalized/{id}.json` and set to
+   `AWAITING_CLASSIFICATION` — which now means what it says (normalization succeeded), not "just
+   promoted" as it did before this stage existed. A quality-gate failure sets
+   `NORMALIZATION_FAILED` and is never retried (the content was read correctly; retrying produces
+   the identical verdict). Classification (Stage 6+) isn't built yet, so nothing is queued after
+   this stage.
 
-### Storage: 2-bucket + repository abstraction
+### Text extraction: deliberately non-ML
+
+`src/modules/document_pipeline/extraction/extractors.py` reads what each format already states
+rather than inferring it: Word paragraph styles are headings, slide titles are headings, worksheets
+are already grids. PDF is the only format with no semantic structure, so it gets pdfplumber's
+ruling-line table detection plus a font-size heading heuristic (weighted by character count, not
+line count — see the code comment on why a line-count tie can eat a document's only heading).
+Docling (the design docs' choice, and still current best practice for self-hosted layout parsing)
+was evaluated and rejected for now: it resolves to 78 packages including `torch`/`transformers`/
+`opencv-python` for capabilities — OCR, multi-column layout inference — this corpus doesn't need,
+since A-PAG's documents are typed, not scanned. See `KNOWN_DEBTS.md` #13 before reintroducing it;
+the `TextExtractor` ABC and `EXTRACTORS` registry exist so swapping one format's extractor is a
+one-line registry change, not a pipeline rewrite.
+
+**No OCR** (`KNOWN_DEBTS.md` #14) is the corresponding decision on the input side — this corpus has
+no scanned/photographed documents, so an OCR fallback would be dead code. The safety net for that
+assumption being wrong is the normalization quality gate's `LOW_TEXT_DENSITY`/`EMPTY_TEXT` checks
+(`src/modules/document_pipeline/normalization/quality_checker.py`), scoped to PDF since it's the
+only format that can be a scan — a sparse `.pptx` or `.xlsx` is a legitimate document, not a
+failed extraction.
+
+### Storage: 4-bucket + repository abstraction
 
 - `src/storage/object_storage.py` defines `ObjectStorage` (abstract) with `LocalFileSystemStorage`
   (dev, writes under `./storage_data/`) and `MinIOStorage` (prod) implementations, selected via
   `BucketManager` per `settings.STORAGE_BACKEND`. Buckets: `quarantine/` (untrusted, purged after
-  promotion or rejection) → `raw/` (validated only). `extracted/`/`normalized/` buckets exist in
-  design docs for future stages but aren't wired up yet.
+  promotion or rejection) → `raw/` (validated bytes, permanent) → `extracted/` (per-document
+  `{id}.json`, the raw extraction result) → `normalized/` (per-document `{id}.json`, cleaned +
+  quality-gated — the artifact a future chunking stage will read). `extracted/`/`normalized/` keys
+  are deterministic (`storage_keys.py`'s `extraction_key_for`/`normalized_key_for`), not
+  content-addressed like `raw/` — two documents with identical bytes were already deduplicated at
+  promotion, so keying by document_id needs no lookup for a handler to find its own output.
 - `src/modules/document_pipeline/repository.py` defines `DocumentRepository` (abstract) with
   `PostgreSQLDocumentRepository` (production, wraps a SQLAlchemy `Session`) and
   `InMemoryDocumentRepository` (unit tests / concurrency tests, no DB needed). Both `UploadService`
@@ -179,9 +232,17 @@ RESTRICTED visibility effectively admin-only, and `doc_type` (a content category
 derived from a file and nothing read it. Access control is now owner-scoped — see
 `ARCHITECTURE.md` §6b.
 
+`0011_extract_normalize_statuses` widens `chk_documents_status` (adds `EXTRACTED`,
+`EXTRACTION_FAILED`, `NORMALIZATION_FAILED`) and `chk_audit_log_event_type` (adds the matching
+`EXTRACTION_*`/`NORMALIZATION_*` event types) for Stages 4–5. It repurposes the existing
+`VALIDATED` status rather than adding a new one — defined since `0002`, never assigned by any
+code before this.
+
 **Revision id length**: `alembic_version.version_num` defaults to `VARCHAR(32)` — keep every new
 revision id ≤32 characters, or the final version-bump statement fails and rolls back the entire
-migration transaction (this happened once during 0006's development).
+migration transaction (this happened during `0006`'s development, and again with
+`0011_extract_normalize_statuses`, whose first attempt at a fully descriptive id was 38
+characters).
 
 ### Testing conventions
 
@@ -224,3 +285,11 @@ rationale before "fixing" them:
   50-employee, no-existing-SSO phase. See `ARCHITECTURE.md` §6a.
 - Registration is **open** (`POST /auth/register` has no invite/admin gate) — deliberate only
   while the API is internal-only. See `KNOWN_DEBTS.md` #0.
+- Text extraction is **non-ML** (`pdfplumber`/`python-docx`/`python-pptx`/`openpyxl`), not Docling
+  — deliberate given this corpus is typed documents whose structure the file already states, not
+  scanned/complex-layout PDFs Docling's layout inference exists for. See `KNOWN_DEBTS.md` #13
+  before adding it back; the `TextExtractor` registry is designed for a one-format swap, not a
+  wholesale rewrite, if a real document proves the trade-off wrong.
+- There is **no OCR** — deliberate for the same reason (no scanned documents expected), with the
+  normalization quality gate's `LOW_TEXT_DENSITY` check as the explicit safety net rather than a
+  silent assumption. See `KNOWN_DEBTS.md` #14 for the trigger to revisit.
