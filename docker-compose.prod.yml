@@ -119,11 +119,50 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # One worker process per pipeline stage. The container healthcheck watches a single heartbeat
+  # file, which assumes one worker daemon per container (KNOWN_DEBTS.md #5) — so each stage gets
+  # its own container off the same image, selected by WORKER_STAGE, rather than threads in one.
   worker:
     build: .
     container_name: apag-worker
     command: python worker_main.py
     environment:
+      WORKER_STAGE: SCAN
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: apag_knowledge_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_SECURE: "false"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ENVIRONMENT: staging
+      WORKER_POLL_INTERVAL_SECONDS: "1.0"
+      SCAN_WORKER_LEASE_SECONDS: "60"
+      WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test $$(( $$(date +%s) - $$(stat -c %Y /tmp/worker_alive) )) -lt 30"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  extraction-worker:
+    build: .
+    container_name: apag-extraction-worker
+    command: python worker_main.py
+    environment:
+      WORKER_STAGE: EXTRACT
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
