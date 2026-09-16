@@ -243,3 +243,61 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Trigger to address**: Before relying on the Studio UI to demo or manually test the
   DOCX/XLSX/PPTX validation paths — add fixtures under `tests/fixtures/ooxml/` (or generate them
   in-process, as `tests/unit/test_formats.py` already does) and extend `fixture_map`.
+
+### 13. Extraction is non-ML; Docling deferred until a document proves it necessary
+- **Status**: Deliberate choice, revisit on evidence.
+- **Context**: The design docs specify Docling for layout-aware parsing, and current research
+  still rates it the best self-hosted option. It was evaluated and rejected for now: `docling`
+  resolves to **78 packages** including `torch`, `torchvision`, `transformers`, `opencv-python`
+  and an OCR engine, on a 2 vCPU/8GiB VM already running the whole stack, in a shared worker
+  image every container pulls. What it buys is layout inference for complex PDFs and OCR — and
+  OCR was separately ruled out (debt #14), while this corpus is typed documents whose structure
+  the file already states. The four libraries used instead (`pdfplumber`, `python-docx`,
+  `python-pptx`, `openpyxl`) add 8 small MIT/BSD packages and no ML runtime.
+- **What this costs**: weaker results on genuinely complex PDFs — multi-column layouts where
+  reading order must be inferred, and tables without ruling lines that pdfplumber can't segment.
+- **Trigger to address**: a real document that comes out mangled, not a hypothetical. The
+  `TextExtractor` ABC and the `EXTRACTORS` registry exist precisely so this is a per-format swap:
+  adding a `DoclingExtractor` for `PDF_MIME` alone touches the registry and nothing else — no
+  pipeline, handler, or worker changes. If that happens, consider a separate image for the
+  extraction worker so the scan worker doesn't carry the ML stack.
+
+### 14. No OCR — scanned documents are flagged, not read
+- **Status**: Deliberate, with an explicit detector rather than an assumption.
+- **Context**: OCR exists to recover text from pages that have none — scans and photographs.
+  A-PAG's documents are digitally authored (Word/Excel/PowerPoint, or PDFs exported from them),
+  so every file has a real text layer and the OCR path would never fire. Building it would mean
+  carrying an OCR engine for a code path that never runs.
+- **Why this is safe to assume**: because the assumption is checked rather than trusted. A file
+  with no text layer extracts to near-nothing, and the normalization quality gate stops it at
+  `NORMALIZATION_FAILED` with `EMPTY_TEXT` or `LOW_TEXT_DENSITY`, recording character and unit
+  counts in the audit trail. A scan cannot silently become an empty document in the knowledge
+  base — it fails loudly, naming the check that caught it.
+- **Trigger to address**: `LOW_TEXT_DENSITY`/`EMPTY_TEXT` failures appearing for documents people
+  actually need searchable. That is the signal that scanned material has entered the corpus, and
+  the point to add an OCR extractor behind the same `TextExtractor` interface. Until then the
+  absence of those failures is evidence the decision was right.
+
+### 15. Every worker container carries the full application image
+- **Status**: Accepted for current scale.
+- **Context**: All three stages (SCAN, EXTRACT, NORMALIZE) run the same image, selected by
+  `WORKER_STAGE`. The scan worker therefore ships the extraction libraries it never imports, and
+  the VM now runs six containers instead of four.
+- **Why that's fine today**: the extraction libraries are small and pure-Python-ish, so the image
+  grew marginally. The simplicity of one build, one Dockerfile and one CI path is worth more than
+  trimming tens of megabytes.
+- **Trigger to address**: real memory pressure on the VM, or adopting a heavy extraction
+  dependency (debt #13) that would make the shared image genuinely expensive. Either way the fix
+  is a second Dockerfile for the extraction worker, not a re-architecture.
+
+### 16. Entity extraction (spaCy) not implemented
+- **Status**: Deferred — it serves a feature that doesn't exist yet.
+- **Context**: The design docs' normalization stage includes named-entity extraction. It was left
+  out because nothing consumes entities: search, chunking and embedding don't need them. The
+  features that do — the Compliance Agent that extracts obligations, owners and deadlines, and
+  the field-notes agent that turns observations into structured records — are later phases.
+- **Trigger to address**: building one of those agents. Note that they are schema-guided
+  structured extraction (a defined set of fields pulled from a document), which is a different
+  problem from this pipeline's general-purpose "make everything searchable" extraction, and is
+  likely better served by an LLM against a schema than by spaCy NER — worth re-evaluating the
+  tool at that point rather than inheriting this choice.

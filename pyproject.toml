@@ -20,6 +20,11 @@ dependencies = [
     "python-docx>=1.1.0",
     "python-pptx>=1.0.0",
     "openpyxl>=3.1.0",
+    # Language detection for normalization. Chosen over fasttext-based alternatives because it
+    # ships its language profiles inside the package — those download a model on first use, which
+    # inside a worker container means a network fetch at runtime that can fail or stall a cold
+    # start. Whole documents give it plenty of text to work with, which is where it is accurate.
+    "langdetect>=1.0.9",
     "minio>=7.2.5",
     "sqlalchemy>=2.0.28",
     "psycopg2-binary>=2.9.9",

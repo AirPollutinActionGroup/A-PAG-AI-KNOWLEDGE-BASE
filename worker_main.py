@@ -12,6 +12,7 @@ import sys
 
 from src.workers.base_worker import BaseWorker
 from src.workers.extraction_worker import ExtractionWorker
+from src.workers.normalization_worker import NormalizationWorker
 from src.workers.scan_worker import ScanWorker
 
 logging.basicConfig(
@@ -25,6 +26,7 @@ logger = logging.getLogger("worker_main")
 WORKERS: dict[str, type[BaseWorker]] = {
     "SCAN": ScanWorker,
     "EXTRACT": ExtractionWorker,
+    "NORMALIZE": NormalizationWorker,
 }
 
 
