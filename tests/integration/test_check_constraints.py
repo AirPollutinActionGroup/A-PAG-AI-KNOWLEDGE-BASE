@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from src.db.models import AuditLog as AuditORM
 from src.db.models import Document as DocumentORM
 from src.db.models import Job as JobORM
 
@@ -92,6 +93,54 @@ def test_postgres_classification_nullable_and_constraints(db_session: Session):
     db_session.add(doc_bad)
     with pytest.raises(IntegrityError):
         db_session.flush()
+
+    db_session.rollback()
+
+
+def test_postgres_accepts_document_reclassified_audit_event(db_session: Session):
+    """The CHECK constraint string is duplicated between src/db/models.py and the migration, and
+    they drift silently — the ORM copy is what integration fixtures create tables from, the
+    migration copy is what production actually has. An event type the database rejects means a
+    tier change fails to be recorded, which is the one thing this audit row exists to prevent."""
+    doc = DocumentORM(
+        document_id=uuid.uuid4(),
+        filename="reclassified.pdf",
+        file_size=1024,
+        status="AWAITING_CLASSIFICATION",
+        classification="RESTRICTED",
+    )
+    db_session.add(doc)
+    db_session.flush()
+
+    event = AuditORM(
+        document_id=doc.document_id,
+        event_type="DOCUMENT_RECLASSIFIED",
+        details={"old_tier": "PUBLIC", "new_tier": "RESTRICTED"},
+    )
+    db_session.add(event)
+    db_session.flush()
+    assert event.event_type == "DOCUMENT_RECLASSIFIED"
+
+    db_session.rollback()
+
+
+def test_postgres_stores_document_date_independently_of_created_at(db_session: Session):
+    """document_date is the date on the document; created_at is when it was uploaded. If the
+    column collapsed into a timestamp default, a 2019 policy would look current."""
+    from datetime import date
+
+    doc = DocumentORM(
+        document_id=uuid.uuid4(),
+        filename="old_policy.pdf",
+        file_size=1024,
+        status="AWAITING_CLASSIFICATION",
+        document_date=date(2019, 3, 14),
+    )
+    db_session.add(doc)
+    db_session.flush()
+
+    assert doc.document_date == date(2019, 3, 14)
+    assert doc.created_at.date() != doc.document_date
 
     db_session.rollback()
 

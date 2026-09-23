@@ -110,6 +110,7 @@ class _FakeUser:
         self.user_id = user_id or uuid.uuid4()
         self.role = role
         self.is_active = True
+        self.email = f"{self.user_id}@a-pag.org"
 
 
 _test_user = _FakeUser()

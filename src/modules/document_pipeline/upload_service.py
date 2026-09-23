@@ -113,6 +113,7 @@ class UploadService:
             size=len(data),
             status=DocumentStatus.QUARANTINED,
             classification=meta.classification,
+            document_date=meta.document_date,
             version=1,
             quarantine_path=f"{self.buckets.quarantine}/{quarantine_key}",
         )

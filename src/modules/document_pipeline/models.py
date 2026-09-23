@@ -1,7 +1,7 @@
 """Domain models, enums, and data contracts for the document ingestion pipeline."""
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -19,7 +19,20 @@ class UploadRequest(BaseModel):
     owner_id: uuid.UUID | None = None
     title: str | None = None
     description: str | None = None
+    document_date: date | None = None
     upload_batch_id: uuid.UUID | None = None
+
+
+class ReclassifyRequest(BaseModel):
+    """Payload for changing a document's sensitivity tier after upload.
+
+    `classification` has no default: this endpoint exists to state a new tier, and a caller who
+    names none has asked for nothing. `reason` is optional but worth supplying — a tier change is
+    the kind of thing someone asks about months later, and the audit row is where they will look.
+    """
+
+    classification: Classification
+    reason: str | None = None
 
 
 class UploadResponse(BaseModel):
@@ -75,6 +88,9 @@ class Document(BaseModel):
     checksum: str | None = None
     status: DocumentStatus = DocumentStatus.UPLOADED
     classification: Classification | None = None
+    # The date on the document itself, not the upload date (`created_at`). Set at the
+    # classification gate; None where the document carries no discoverable date.
+    document_date: date | None = None
     version: int = 1
     supersedes_id: uuid.UUID | None = None
     quarantine_path: str | None = None

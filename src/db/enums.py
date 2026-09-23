@@ -11,6 +11,10 @@ class DocumentStatus(str, Enum):
     NormalizationJobHandler), not promotion — the pipeline runs
     QUARANTINED -> VALIDATED -> EXTRACTED -> AWAITING_CLASSIFICATION, with EXTRACTION_FAILED /
     NORMALIZATION_FAILED as the failure branches of the two middle stages.
+
+    There is no separate classification state: a document's sensitivity tier is chosen by the
+    uploader at upload time (defaulting to PUBLIC) and can be changed afterwards through the
+    reclassification endpoint, so nothing in the pipeline ever waits on a human decision.
     """
 
     UPLOADED = "UPLOADED"
@@ -79,3 +83,6 @@ class AuditEventType(str, Enum):
     EXTRACTION_FAILED = "EXTRACTION_FAILED"
     NORMALIZATION_COMPLETED = "NORMALIZATION_COMPLETED"
     NORMALIZATION_FAILED = "NORMALIZATION_FAILED"
+    # The initial tier is recorded in DOCUMENT_QUARANTINED's details at upload; this marks a
+    # later change to it, which is the event worth being able to find on its own.
+    DOCUMENT_RECLASSIFIED = "DOCUMENT_RECLASSIFIED"

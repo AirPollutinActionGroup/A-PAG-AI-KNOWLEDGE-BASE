@@ -4,6 +4,7 @@ Handles asynchronous document upload, quarantine validation, status queries, and
 
 import logging
 import uuid
+from datetime import date
 
 from fastapi import (
     APIRouter,
@@ -35,6 +36,7 @@ from src.modules.document_pipeline.formats import (
 )
 from src.modules.document_pipeline.models import (
     Classification,
+    ReclassifyRequest,
     UploadRequest,
     UploadResponse,
 )
@@ -127,6 +129,13 @@ async def upload_documents(
         None,
         description="Optional notes about the document — indexed for full-text search",
     ),
+    document_date: date | None = Form(
+        None,
+        description=(
+            "The date printed on the document (YYYY-MM-DD), not the upload date. Leave unset "
+            "if the document carries no reliable date."
+        ),
+    ),
     supersedes_doc_id: uuid.UUID | None = Form(
         None,
         description="UUID of earlier document version if updating an existing policy (single-file only)",
@@ -194,6 +203,7 @@ async def upload_documents(
         req_meta = UploadRequest(
             classification=classification,
             description=description,
+            document_date=document_date,
             supersedes_doc_id=supersedes_doc_id,
             keep_previous_version=keep_previous_version,
             owner_id=current_user.user_id,
@@ -255,6 +265,7 @@ async def get_document_status(
         "description": doc.description,
         "status": doc.status.value,
         "classification": doc.classification.value if doc.classification else None,
+        "document_date": doc.document_date.isoformat() if doc.document_date else None,
         "uploaded_by": _uploader_emails(db, [doc]).get(doc.owner_id),
         "version": doc.version,
         "supersedes_id": doc.supersedes_id,
@@ -264,6 +275,92 @@ async def get_document_status(
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
         "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
         "latest_event": latest_event,
+    }
+
+
+@router.post(
+    "/{document_id}/classify",
+    summary="Change a document's sensitivity tier (owner or ADMIN only)",
+)
+async def reclassify_document(
+    document_id: uuid.UUID,
+    payload: ReclassifyRequest,
+    repo: DocumentRepository = Depends(get_document_repository),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Corrects the tier chosen at upload.
+
+    The tier is set at upload and defaults to PUBLIC, so the pipeline never waits on a human.
+    That makes a forgotten RESTRICTED flag the realistic failure mode, and this is how it gets
+    fixed. Widening PUBLIC -> RESTRICTED is the case that matters: the document may already be
+    visible org-wide, so the change takes effect immediately and is recorded against a named
+    user rather than applied silently.
+
+    Does not touch pipeline status. A tier is metadata about who may read a document, not a
+    stage in processing it — a document mid-extraction can be reclassified without disturbing
+    the work in flight.
+    """
+    doc = repo.get_by_id(document_id)
+    if not doc or not _can_view(doc, current_user):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document with ID {document_id} not found.")
+
+    is_owner = doc.owner_id is not None and doc.owner_id == current_user.user_id
+    if not (is_owner or current_user.role == UserRole.ADMIN.value):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="FORBIDDEN: Only the uploader or an ADMIN may reclassify this document.",
+        )
+
+    # A purged document is a tombstone — its bytes are gone, so there is no content left for a
+    # tier to govern. 410 rather than 404 because it demonstrably existed.
+    if doc.purged_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="GONE: This document was permanently deleted and can no longer be reclassified.",
+        )
+
+    previous = doc.classification.value if doc.classification else None
+    if previous == payload.classification.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"NO_CHANGE: Document is already classified '{previous}'.",
+        )
+
+    # Audited before the mutation, matching delete_document: the record of who made this call,
+    # and what they changed it from, must not depend on the write that follows succeeding.
+    try:
+        AuditService.log_event(
+            db=db,
+            document_id=document_id,
+            event_type=AuditEventType.DOCUMENT_RECLASSIFIED,
+            details={
+                "reclassified_by": str(current_user.user_id),
+                "old_tier": previous,
+                "new_tier": payload.classification.value,
+                "reason": payload.reason,
+            },
+            user_id=str(current_user.user_id),
+        )
+    except Exception:
+        logger.exception("AUDIT WRITE FAILED: doc_id=%s event=DOCUMENT_RECLASSIFIED", document_id)
+
+    doc.classification = payload.classification
+    updated = repo.update_document(doc)
+
+    logger.info(
+        "Document reclassified: doc_id=%s %s -> %s by=%s",
+        document_id, previous, payload.classification.value, current_user.user_id,
+    )
+
+    return {
+        "document_id": updated.id,
+        "filename": updated.filename,
+        "status": updated.status.value,
+        "classification": updated.classification.value if updated.classification else None,
+        "previous_classification": previous,
+        "reclassified_by": current_user.email,
+        "message": f"Classification changed from {previous} to {payload.classification.value}.",
     }
 
 
