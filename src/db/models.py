@@ -20,6 +20,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -212,7 +213,9 @@ class DocumentChunk(Base):
     # time, so the eventual fix is to index at several granularities and fuse the results. Having
     # `scale` in the key from the start makes adding a second granularity an INSERT rather than a
     # migration, a backfill and a retrieval rewrite. See KNOWN_DEBTS.md.
-    scale: Mapped[str] = mapped_column(String(32), nullable=False, default="section")
+    scale: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="section", server_default="section"
+    )
 
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -221,7 +224,9 @@ class DocumentChunk(Base):
     # count until it is rendered, and a one-page memo legitimately has no headings.
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     section_heading: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_table: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_table: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_text("false")
+    )
 
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
