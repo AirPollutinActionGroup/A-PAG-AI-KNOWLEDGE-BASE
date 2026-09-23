@@ -68,6 +68,7 @@ def _to_dto(orm: DocumentORM) -> DocumentDTO:
         checksum=orm.sha256,
         status=DocumentStatus(orm.status),
         classification=Classification(orm.classification) if orm.classification else None,
+        document_date=orm.document_date,
         version=orm.version,
         supersedes_id=orm.supersedes_id,
         quarantine_path=orm.quarantine_path,
@@ -105,6 +106,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             sha256=doc.checksum,
             status=status_val,
             classification=class_val,
+            document_date=doc.document_date,
             version=doc.version,
             supersedes_id=doc.supersedes_id,
             quarantine_path=doc.quarantine_path,
@@ -136,6 +138,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             orm.status = doc.status.value if hasattr(doc.status, "value") else str(doc.status)
             if hasattr(doc, "classification") and doc.classification:
                 orm.classification = doc.classification.value if hasattr(doc.classification, "value") else str(doc.classification)
+            orm.document_date = doc.document_date
             orm.sha256 = doc.checksum
             orm.mime_type = doc.mime_type
             orm.raw_path = doc.raw_path

@@ -1,7 +1,7 @@
 """SQLAlchemy 2.0 ORM Models for Document Ingestion Pipeline."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -104,6 +105,12 @@ class Document(Base):
         nullable=True,
         default=None,
     )
+
+    # The date the document itself carries, not when it was uploaded — `created_at` is upload
+    # time, so a 2019 policy ingested today would otherwise look current, and any later attempt
+    # to weight retrieval by recency would be reading the wrong number. Supplied by the uploader.
+    # Nullable: a document with no discoverable date is honest as null, not guessed.
+    document_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Versioning
     version: Mapped[int] = mapped_column(
@@ -289,7 +296,7 @@ class AuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED', 'EXTRACTION_COMPLETED', 'EXTRACTION_FAILED', 'NORMALIZATION_COMPLETED', 'NORMALIZATION_FAILED')",
+            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED', 'EXTRACTION_COMPLETED', 'EXTRACTION_FAILED', 'NORMALIZATION_COMPLETED', 'NORMALIZATION_FAILED', 'DOCUMENT_RECLASSIFIED')",
             name="chk_audit_log_event_type",
         ),
     )
