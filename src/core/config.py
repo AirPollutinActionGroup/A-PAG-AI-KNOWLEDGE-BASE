@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     # (title pages, chart-heavy reports) passes; a real page of prose runs to thousands.
     MIN_PDF_CHARS_PER_PAGE: int = 50
 
+    # Chunking.
+    # Sized in characters rather than tokens: the tokenizer belongs to the embedding model, which
+    # is a stage later, and guessing with a foreign tokenizer is worse than an honest character
+    # budget. CHUNK_TARGET_CHARS is what the packer aims for; CHUNK_MAX_CHARS is the hard ceiling
+    # that forces a split. ~1600 characters is roughly 400 English tokens — deliberately well
+    # under a 512-token window, because Devanagari runs 2-3x more tokens per character and a
+    # budget tuned on English would silently truncate Hindi documents at embed time.
+    CHUNK_TARGET_CHARS: int = 1600
+    CHUNK_MAX_CHARS: int = 2000
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

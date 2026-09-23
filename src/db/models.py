@@ -20,6 +20,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -159,10 +160,13 @@ class Document(Base):
     jobs: Mapped[list["Job"]] = relationship(
         "Job", back_populates="document", cascade="all, delete-orphan"
     )
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        "DocumentChunk", back_populates="document", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('UPLOADED', 'QUARANTINED', 'VALIDATED', 'VALIDATION_FAILED', 'REJECTED', 'EXTRACTED', 'EXTRACTION_FAILED', 'NORMALIZATION_FAILED', 'AWAITING_CLASSIFICATION', 'DUPLICATE', 'LIVE', 'SUPERSEDED', 'ARCHIVED')",
+            "status IN ('UPLOADED', 'QUARANTINED', 'VALIDATED', 'VALIDATION_FAILED', 'REJECTED', 'EXTRACTED', 'EXTRACTION_FAILED', 'NORMALIZATION_FAILED', 'AWAITING_CLASSIFICATION', 'CHUNKED', 'CHUNKING_FAILED', 'DUPLICATE', 'LIVE', 'SUPERSEDED', 'ARCHIVED')",
             name="chk_documents_status",
         ),
         CheckConstraint(
@@ -176,6 +180,73 @@ class Document(Base):
             postgresql_where=text("status NOT IN ('SUPERSEDED', 'ARCHIVED', 'REJECTED', 'DUPLICATE')"),
         ),
         Index("idx_documents_search_vector", "search_vector", postgresql_using="gin"),
+    )
+
+
+class DocumentChunk(Base):
+    """A retrievable passage of a document.
+
+    Lives in Postgres rather than object storage, unlike every other pipeline artifact. That is
+    deliberate: chunks are queried, not merely stored — retrieval needs the text and (from the
+    next stage) its vector in the same row, and a similarity search cannot join against JSON in
+    a bucket.
+
+    `page_number`, `section_heading` and `is_table` are the citation contract. A passage that
+    cannot say which section, page or table it came from is unusable in a government submission,
+    and that provenance can only be captured here, while the document's structure is still known.
+    """
+
+    __tablename__ = "document_chunks"
+
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("documents.document_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Which granularity this chunk was cut at. Ships with a single value, and that is the point:
+    # the optimal chunk size depends on the question being asked, which is unknown at indexing
+    # time, so the eventual fix is to index at several granularities and fuse the results. Having
+    # `scale` in the key from the start makes adding a second granularity an INSERT rather than a
+    # migration, a backfill and a retrieval rewrite. See KNOWN_DEBTS.md.
+    scale: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="section", server_default="section"
+    )
+
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Citation metadata. Nullable because not every format supplies them: a .docx has no page
+    # count until it is rendered, and a one-page memo legitimately has no headings.
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    section_heading: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_table: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_text("false")
+    )
+
+    char_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    document: Mapped["Document"] = relationship("Document", back_populates="chunks")
+
+    __table_args__ = (
+        # Re-running the stage must not silently double a document's passages.
+        Index(
+            "uq_document_chunks_position",
+            "document_id",
+            "scale",
+            "chunk_index",
+            unique=True,
+        ),
     )
 
 
@@ -251,7 +322,7 @@ class Job(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "stage IN ('SCAN', 'EXTRACT', 'NORMALIZE')",
+            "stage IN ('SCAN', 'EXTRACT', 'NORMALIZE', 'CHUNK')",
             name="chk_jobs_stage",
         ),
         CheckConstraint(
@@ -296,7 +367,7 @@ class AuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED', 'EXTRACTION_COMPLETED', 'EXTRACTION_FAILED', 'NORMALIZATION_COMPLETED', 'NORMALIZATION_FAILED', 'DOCUMENT_RECLASSIFIED')",
+            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED', 'EXTRACTION_COMPLETED', 'EXTRACTION_FAILED', 'NORMALIZATION_COMPLETED', 'NORMALIZATION_FAILED', 'DOCUMENT_RECLASSIFIED', 'CHUNKING_COMPLETED', 'CHUNKING_FAILED')",
             name="chk_audit_log_event_type",
         ),
     )
