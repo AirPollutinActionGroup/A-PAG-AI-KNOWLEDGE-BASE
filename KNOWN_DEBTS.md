@@ -301,3 +301,58 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   problem from this pipeline's general-purpose "make everything searchable" extraction, and is
   likely better served by an LLM against a schema than by spaCy NER — worth re-evaluating the
   tool at that point rather than inheriting this choice.
+
+### 17. Chunking indexes at one granularity only
+- **Status**: Deliberate for now, with the schema already shaped for the fix.
+- **Context**: The best chunk size is a property of the *question*, not the document — a penalty
+  lookup wants a clause, "what does this directive do" wants a section. Since the question is
+  unknown at indexing time, no single size is right, and the current answer is to index at
+  several granularities, query all of them, and fuse the results with Reciprocal Rank Fusion.
+  Published oracle experiments put the headroom at 20–40% recall, though that is an upper bound
+  measured by letting the system peek at the answer; RRF recovers a fraction of it, not all.
+- **Why one scale today**: there is no retrieval evaluation — no golden query set, no recall
+  metric — so a second scale could not be shown to help. It would cost 2–5x the storage and
+  embedding time on a 3.8GB / 2-vCPU VM in exchange for an unmeasurable benefit. Building the
+  measurement first is the cheaper order.
+- **What was done anyway**: `document_chunks.scale` is in the unique key from the start, holding
+  a single value. Adding a granularity later is an INSERT job rather than a migration, a backfill
+  and a retrieval rewrite.
+- **Trigger to address**: a retrieval evaluation existing, and showing recall misses that a
+  different granularity would have caught. Note that our scales should be structural
+  (clause → section → document) rather than arbitrary token windows — the structure is already
+  captured, and each level matches a unit a person would actually cite.
+
+### 18. Completed jobs are never cleaned up
+- **Status**: Invisible today, will not stay that way.
+- **Context**: `BaseWorker`'s reaper handles stuck `RUNNING` leases, but nothing ever removes
+  `COMPLETED` rows from `jobs`. Every document now produces four of them (SCAN, EXTRACT,
+  NORMALIZE, CHUNK), so the table grows at four rows per document forever.
+- **Why it doesn't hurt yet**: a few hundred documents is a few thousand rows. Postgres does not
+  notice.
+- **Trigger to address**: the first bulk archive ingest. At the ~5GB corpus A-PAG expects, this
+  becomes tens of thousands of dead rows, and the queue table is `UPDATE`-heavy, so the real cost
+  is autovacuum pressure on the same database serving application queries. The fix is small — a
+  periodic `DELETE FROM jobs WHERE status = 'COMPLETED' AND finished_at < now() - interval '30
+  days'` — and is much easier to add before the table is large.
+
+### 19. A table's position within a unit is not recorded
+- **Status**: Worked around honestly; the real fix belongs in extraction.
+- **Context**: `ExtractedTable` carries only a `unit_index` — which page, slide or worksheet the
+  table came from — not where inside it the table sat. For PDF, PPTX and XLSX that is usually
+  enough, because a unit is one page or slide. For DOCX it is not: Word has no pages until it is
+  rendered, so the whole document is a single unit and every heading and table shares
+  `unit_index=1`.
+- **What went wrong**: chunking emits a unit's prose before its tables, so `current_heading` had
+  already advanced to the document's *last* heading by the time tables were written. Every table
+  in a multi-section Word document was therefore cited under the wrong section. Caught by
+  inspecting real chunk rows after an end-to-end run — the unit tests passed throughout, because
+  they were written against the same mistaken assumption.
+- **Current behaviour**: where a unit carries more than one heading, a table's `section_heading`
+  is left `NULL` rather than guessed. The page number still stands, so the citation degrades
+  instead of disappearing. A wrong citation is worse than an absent one: a reader can act on
+  "page 4 of this document" and check; they cannot recover from being told the wrong section.
+- **Trigger to address**: when table-level citation precision matters enough to justify it. The
+  fix is to record a character offset (or ordinal position among a unit's blocks) on
+  `ExtractedTable` at extraction time, which makes attribution exact for every format. That is a
+  change to a shipped stage and a re-extraction of the corpus, so it is worth doing once, with
+  the embedding work, rather than twice.

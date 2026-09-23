@@ -1,8 +1,9 @@
 """Normalization Job Handler for Stage 5.
 
-The last stage currently built. A document that passes here reaches AWAITING_CLASSIFICATION,
-which means exactly what it says — normalization is done and classification is the next thing
-that needs to happen to it (Phase 5, not yet built). Nothing is queued after this.
+A document that passes here reaches AWAITING_CLASSIFICATION and a CHUNK job is queued. The tier
+is chosen by the uploader at upload time rather than confirmed at a gate, so nothing in the
+pipeline waits on a human — the status name is historical, and means "normalized, ready to be
+split into passages".
 """
 
 import logging
@@ -11,7 +12,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from src.db.enums import AuditEventType
+from src.db.enums import AuditEventType, JobStage, JobStatus
+from src.db.models import Job as JobORM
 from src.modules.audit.service import AuditService
 from src.modules.document_pipeline.extraction.models import ExtractionResult
 from src.modules.document_pipeline.models import DocumentStatus
@@ -185,6 +187,8 @@ class NormalizationJobHandler:
             "table_count": len(result.tables),
         }, correlation_id=corr_id)
 
+        self._enqueue_chunk(document_id)
+
         logger.info(
             "NORMALIZED: corr_id=%s doc_id=%s chars=%d language=%s -> %s",
             corr_id, document_id, result.char_count, result.language, normalized_key,
@@ -195,6 +199,20 @@ class NormalizationJobHandler:
             message="Document normalized and awaiting classification.",
             normalized_key=normalized_key,
         )
+
+    def _enqueue_chunk(self, document_id: uuid.UUID) -> None:
+        """Hands off to the chunking stage, mirroring how extraction hands off to this one."""
+        if self._db is None:
+            return
+        self._db.add(
+            JobORM(
+                job_id=uuid.uuid4(),
+                document_id=document_id,
+                stage=JobStage.CHUNK.value,
+                status=JobStatus.PENDING.value,
+            )
+        )
+        self._db.commit()
 
     def _fail(self, doc, corr_id: uuid.UUID, result: NormalizationResult) -> NormalizationOutcome:
         """Stops a document that failed the quality gate.

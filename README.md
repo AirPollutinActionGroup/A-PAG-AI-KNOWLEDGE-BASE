@@ -139,7 +139,8 @@ Not accepted, with the reason:
 | **Phase C** | Asynchronous Architecture Refactor (SKIP LOCKED Workers, 202 Contract) | ✅ Completed |
 | **Phase 4** | Document Text Extraction (native parsing, no OCR — see `KNOWN_DEBTS.md` #14) | ✅ Completed |
 | **Phase 5** | Normalization (cleaning, language detection, quality gate) | ✅ Completed |
-| **Phase 6** | Chunking, Classification & Vector Indexing (Qdrant) | 📋 Planned |
+| **Phase 6a** | Chunking (structure-aware, citation metadata) | ✅ Completed |
+| **Phase 6b** | Embedding & Vector Indexing (pgvector, self-hosted model) | 📋 Planned |
 | **Phase 7** | Permission Governance, Hard Pre-Filtering & RBAC | 📋 Planned |
 | **Phase 8** | Text-to-SQL Engine & Sovereign RAG Query Layer | 📋 Planned |
 

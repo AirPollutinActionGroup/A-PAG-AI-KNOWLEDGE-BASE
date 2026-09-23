@@ -144,3 +144,69 @@ def test_postgres_stores_document_date_independently_of_created_at(db_session: S
 
     db_session.rollback()
 
+
+
+def test_postgres_accepts_chunking_statuses_and_stage(db_session: Session):
+    """The CHECK strings are duplicated between src/db/models.py and the migration, and drift
+    silently — the ORM copy is what integration fixtures build tables from, the migration copy is
+    what production has. A rejected status means the chunking stage cannot record its own result."""
+    doc = DocumentORM(
+        document_id=uuid.uuid4(),
+        filename="chunked.pdf",
+        file_size=1024,
+        status="CHUNKED",
+    )
+    db_session.add(doc)
+    db_session.flush()
+    assert doc.status == "CHUNKED"
+
+    job = JobORM(
+        job_id=uuid.uuid4(),
+        document_id=doc.document_id,
+        stage="CHUNK",
+        status="PENDING",
+    )
+    db_session.add(job)
+    db_session.flush()
+    assert job.stage == "CHUNK"
+
+    event = AuditORM(
+        document_id=doc.document_id,
+        event_type="CHUNKING_COMPLETED",
+        details={"chunk_count": 12},
+    )
+    db_session.add(event)
+    db_session.flush()
+    assert event.event_type == "CHUNKING_COMPLETED"
+
+    db_session.rollback()
+
+
+def test_document_chunks_rejects_duplicate_position(db_session: Session):
+    """Guards the retry path: re-running chunking must replace passages, never append them.
+    Without this index a half-succeeded retry silently doubles a document's content."""
+    from src.db.models import DocumentChunk as ChunkORM
+
+    doc = DocumentORM(
+        document_id=uuid.uuid4(),
+        filename="dupe.pdf",
+        file_size=1024,
+        status="CHUNKED",
+    )
+    db_session.add(doc)
+    db_session.flush()
+
+    for _ in range(2):
+        db_session.add(ChunkORM(
+            chunk_id=uuid.uuid4(),
+            document_id=doc.document_id,
+            scale="section",
+            chunk_index=0,
+            text="Same position twice.",
+            char_count=20,
+        ))
+
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+    db_session.rollback()

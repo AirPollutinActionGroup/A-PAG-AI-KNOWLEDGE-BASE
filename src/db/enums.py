@@ -9,8 +9,11 @@ class DocumentStatus(str, Enum):
     VALIDATED means "promoted to raw/, EXTRACT job pending" — set by ScanJobHandler on
     successful promotion. AWAITING_CLASSIFICATION means normalization succeeded (set by
     NormalizationJobHandler), not promotion — the pipeline runs
-    QUARANTINED -> VALIDATED -> EXTRACTED -> AWAITING_CLASSIFICATION, with EXTRACTION_FAILED /
-    NORMALIZATION_FAILED as the failure branches of the two middle stages.
+    QUARANTINED -> VALIDATED -> EXTRACTED -> AWAITING_CLASSIFICATION -> CHUNKED, with
+    EXTRACTION_FAILED / NORMALIZATION_FAILED / CHUNKING_FAILED as the failure branches.
+
+    CHUNKED means the document has been split into retrievable passages in `document_chunks`
+    and is ready to be embedded.
 
     There is no separate classification state: a document's sensitivity tier is chosen by the
     uploader at upload time (defaulting to PUBLIC) and can be changed afterwards through the
@@ -26,6 +29,8 @@ class DocumentStatus(str, Enum):
     EXTRACTION_FAILED = "EXTRACTION_FAILED"
     NORMALIZATION_FAILED = "NORMALIZATION_FAILED"
     AWAITING_CLASSIFICATION = "AWAITING_CLASSIFICATION"
+    CHUNKED = "CHUNKED"
+    CHUNKING_FAILED = "CHUNKING_FAILED"
     DUPLICATE = "DUPLICATE"
     LIVE = "LIVE"
     SUPERSEDED = "SUPERSEDED"
@@ -56,6 +61,7 @@ class JobStage(str, Enum):
     SCAN = "SCAN"
     EXTRACT = "EXTRACT"
     NORMALIZE = "NORMALIZE"
+    CHUNK = "CHUNK"
 
 
 class JobStatus(str, Enum):
@@ -86,3 +92,5 @@ class AuditEventType(str, Enum):
     # The initial tier is recorded in DOCUMENT_QUARANTINED's details at upload; this marks a
     # later change to it, which is the event worth being able to find on its own.
     DOCUMENT_RECLASSIFIED = "DOCUMENT_RECLASSIFIED"
+    CHUNKING_COMPLETED = "CHUNKING_COMPLETED"
+    CHUNKING_FAILED = "CHUNKING_FAILED"
