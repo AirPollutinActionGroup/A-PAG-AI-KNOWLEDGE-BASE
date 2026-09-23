@@ -1143,6 +1143,22 @@
                 // again once the worker reaches a final state.
                 b2.className = 'stage-badge badge-running';
                 b2.innerText = 'SCANNING';
+            } else if (status === 'EXTRACTION_FAILED' || status === 'NORMALIZATION_FAILED') {
+                // Validation genuinely passed — the file was promoted to raw/ before either of
+                // these stages ran. Showing stage 2 as failed here would blame the wrong step
+                // and send someone hunting for a security problem that doesn't exist.
+                b2.className = 'stage-badge badge-pass';
+                b2.innerText = 'ALL 8 PASSED';
+                document.querySelectorAll('.check-item').forEach(el => el.className = 'check-item passed');
+
+                b3.className = 'stage-badge badge-fail';
+                if (status === 'EXTRACTION_FAILED') {
+                    b3.innerText = 'EXTRACTION FAILED';
+                    desc3.innerHTML = `<span style="color:#f87171;">The file is valid but its text could not be read: ${rejectionReason || 'parser error'}. Stored in <code class="mono">apag-raw/</code>, not indexed.</span>`;
+                } else {
+                    b3.innerText = 'QUALITY CHECK FAILED';
+                    desc3.innerHTML = `<span style="color:#f87171;">Text was extracted but did not pass the quality gate: ${rejectionReason || 'QUALITY_CHECK_FAILED'}. Usually a scanned document with no text layer — see KNOWN_DEBTS.md #14 (no OCR).</span>`;
+                }
             } else if (status === 'REJECTED') {
                 b2.className = 'stage-badge badge-fail';
                 b2.innerText = 'VALIDATION FAILED';
@@ -1173,7 +1189,7 @@
         // the worker's real result instead of sitting on "SCANNING" forever, and refreshes
         // the ledger the moment a final state lands so that table doesn't need a manual
         // click either.
-        async function pollDocumentStatus(docId, attemptsLeft = 15) {
+        async function pollDocumentStatus(docId, attemptsLeft = 30) {
             if (attemptsLeft <= 0) {
                 const b2 = document.getElementById('stage-2-badge');
                 b2.className = 'stage-badge badge-idle';
@@ -1185,7 +1201,12 @@
                 if (!res.ok) return; // transient — next poll will retry
                 const doc = await res.json();
 
-                if (['QUARANTINED', 'VALIDATED'].includes(doc.status)) {
+                // Every state the document passes *through* on its way to a terminal one. A
+                // status missing from this list ends polling early and strands the panel on
+                // "SCANNING" — which is exactly what happened when the EXTRACT and NORMALIZE
+                // stages were added without updating this list. Add new mid-pipeline statuses
+                // here, or they will silently look like a hung upload.
+                if (['QUARANTINED', 'VALIDATED', 'EXTRACTED'].includes(doc.status)) {
                     setTimeout(() => pollDocumentStatus(docId, attemptsLeft - 1), 700);
                     return;
                 }
@@ -1397,6 +1418,18 @@
                 } else if (d.status === 'SUPERSEDED') {
                     pillClass = 'pill-superseded';
                     reasonHtml = `<span class="storage-text">Replaced by newer version</span>`;
+                } else if (d.status === 'EXTRACTION_FAILED' || d.status === 'NORMALIZATION_FAILED') {
+                    // Red, not green: the file passed validation but never became usable
+                    // content. Defaulting these to pill-promoted showed a dead document as a
+                    // successful one.
+                    pillClass = 'pill-rejected';
+                    const label = d.status === 'EXTRACTION_FAILED' ? 'Text could not be read' : 'Failed quality gate';
+                    reasonHtml = `<span class="rejection-text" title="${d.rejection_reason || label}">⚠ ${d.rejection_reason || label}</span>`;
+                } else if (['QUARANTINED', 'VALIDATED', 'EXTRACTED'].includes(d.status)) {
+                    // Still moving through the pipeline — blue, not the green of a finished
+                    // document, so the ledger doesn't claim work that hasn't happened yet.
+                    pillClass = 'pill-quarantine';
+                    reasonHtml = `<span class="storage-text" style="color:#60a5fa;">⏳ Processing…</span>`;
                 } else if (d.status === 'AWAITING_CLASSIFICATION') {
                     reasonHtml = `<span class="storage-text" style="color:#34d399;">📦 ${d.raw_path || 'apag-raw/' + (d.checksum ? d.checksum.substring(0,12) + '.pdf' : '')}</span>`;
                 }
