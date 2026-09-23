@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A-PAG AI Knowledge Base: an async document ingestion pipeline (Python 3.12, FastAPI) that will
 eventually feed a governed RAG platform (vector search over PDFs) plus a Text-to-SQL layer over
-PostgreSQL. **Currently implemented: Stages 1–5** (upload/quarantine → validation/threat scan →
-promotion to raw storage → text extraction → normalization/quality gate), plus JWT auth,
-multi-file upload, pagination, and full-text search on top of it. Classification, chunking,
-vector indexing, and Text-to-SQL are not yet built (see Roadmap in README.md).
+PostgreSQL. **Currently implemented: Stages 1–6** (upload/quarantine → validation/threat scan →
+promotion to raw storage → text extraction → normalization/quality gate → chunking), plus JWT auth,
+multi-file upload, pagination, and full-text search on top of it. Embedding, vector indexing and
+Text-to-SQL are not yet built (see Roadmap in README.md).
 
 ## Commands
 
@@ -28,6 +28,7 @@ python main.py            # FastAPI on :8000
 python worker_main.py      # runs one stage, selected by WORKER_STAGE (default SCAN)
 WORKER_STAGE=EXTRACT python worker_main.py
 WORKER_STAGE=NORMALIZE python worker_main.py
+WORKER_STAGE=CHUNK python worker_main.py
 
 # Tests
 pytest tests/ -v                              # full suite (unit + Postgres integration)
@@ -51,7 +52,7 @@ see `KNOWN_DEBTS.md`). All `/api/v1/documents/*` endpoints require `Authorizatio
 - `main.py` → FastAPI app (`src/api/v1/router.py`) — handles `POST /documents/upload` (fast path
   only, returns `202` in <500ms) and `GET /documents/{id}/status`.
 - `worker_main.py` → reads `WORKER_STAGE` (`SCAN` default) and runs the matching `BaseWorker`
-  subclass — `ScanWorker`, `ExtractionWorker`, or `NormalizationWorker`. One process handles one
+  subclass — `ScanWorker`, `ExtractionWorker`, `NormalizationWorker`, or `ChunkingWorker`. One process handles one
   stage; each stage runs as its own container in Docker Compose off the same image (see
   `docker-compose.yml`), because the container healthcheck watches a single heartbeat file, which
   assumes one worker daemon per container (`KNOWN_DEBTS.md` #5).
@@ -106,8 +107,15 @@ path (the stage's own `*JobHandler.process()`).
    `AWAITING_CLASSIFICATION` — which now means what it says (normalization succeeded), not "just
    promoted" as it did before this stage existed. A quality-gate failure sets
    `NORMALIZATION_FAILED` and is never retried (the content was read correctly; retrying produces
-   the identical verdict). Classification (Stage 6+) isn't built yet, so nothing is queued after
-   this stage.
+   the identical verdict). On success a `CHUNK` job is enqueued — the sensitivity tier is chosen
+   by the uploader at upload rather than confirmed at a gate, so nothing here waits on a human.
+6. **Chunk** — `src/modules/document_pipeline/chunking_job_handler.py`
+   `ChunkingJobHandler.process()`: fetches an `AWAITING_CLASSIFICATION` document, reads its
+   `normalized/{id}.json`, and splits it into retrievable passages via `ChunkingService`
+   (`src/modules/document_pipeline/chunking/` — see "Chunking" below). Passages are written to
+   the `document_chunks` **table**, not a bucket, and the document is set `CHUNKED`. Re-running
+   replaces a document's chunks rather than appending, so a reaped or retried job cannot double
+   its content. Embedding (Stage 7) isn't built yet, so nothing is queued after this stage.
 
 ### Text extraction: deliberately non-ML
 
@@ -129,6 +137,35 @@ assumption being wrong is the normalization quality gate's `LOW_TEXT_DENSITY`/`E
 (`src/modules/document_pipeline/normalization/quality_checker.py`), scoped to PDF since it's the
 only format that can be a scan — a sparse `.pptx` or `.xlsx` is a legitimate document, not a
 failed extraction.
+
+### Chunking: structure-aware, and why chunks live in Postgres
+
+`src/modules/document_pipeline/chunking/chunker.py` cuts a document at its own headings rather
+than at fixed intervals. Chunk boundaries decide two things at once — what the embedding model
+sees as one idea, and what a citation can point at — so a fixed-size cut through the middle of a
+clause separates an obligation from the condition qualifying it, and the answer that results is
+confidently wrong while still carrying a citation. The structure is free: extraction already
+recovered it from each format's own declarations, and this stage never re-derives it.
+
+Oversized sections fall back to recursive splitting (paragraph → sentence → hard wrap), and the
+pieces are repacked toward the target so a split section doesn't shatter into one-sentence
+fragments. Tables are never split mid-row; a large table becomes row groups that each **repeat
+the header**, because otherwise group 7 of a budget sheet is a wall of numbers with no column
+names. There is deliberately **no overlap** — a Jan 2026 analysis found it adds indexing cost
+with no measurable recall gain, and that holds doubly when splitting on real heading boundaries.
+
+Sizing is in **characters, not tokens** (`CHUNK_TARGET_CHARS`/`CHUNK_MAX_CHARS`): the tokenizer
+belongs to the embedding model, which arrives a stage later. The budget is deliberately
+conservative because Devanagari runs 2–3x more tokens per character than English, and a target
+tuned on English prose would silently truncate Hindi documents at embed time — surfacing months
+later as unexplained poor retrieval rather than as an error.
+
+`document_chunks` is the one pipeline artifact that lives in Postgres instead of object storage.
+That's deliberate: chunks are queried, not merely stored — the embedding stage adds a vector
+column to the same row, and a similarity search cannot join against JSON in a bucket.
+`page_number`, `section_heading` and `is_table` are the citation contract, and the `scale` column
+ships holding one value so a second granularity later is an INSERT rather than a migration plus a
+backfill (`KNOWN_DEBTS.md` #17).
 
 ### Storage: 4-bucket + repository abstraction
 
@@ -231,6 +268,15 @@ plus `documents.doc_type` — departments were never populated, which made depar
 RESTRICTED visibility effectively admin-only, and `doc_type` (a content category) can't be
 derived from a file and nothing read it. Access control is now owner-scoped — see
 `ARCHITECTURE.md` §6b.
+
+`0012_reclassification` adds the `DOCUMENT_RECLASSIFIED` audit event and
+`documents.document_date` (the date printed on the document, as distinct from `created_at` which
+is upload time — without it a 2019 policy ingested today looks current). `0013_document_chunks`
+adds the `document_chunks` table plus the `CHUNKED`/`CHUNKING_FAILED` statuses and the `CHUNK` job
+stage. Both leave `chk_audit_log_event_type` widened on downgrade rather than narrowing it:
+Postgres validates existing rows when creating a CHECK, so narrowing would mean deleting audit
+rows, and migration `0003` makes that log append-only precisely so it cannot be rewritten. One
+spare value in a typo guard is cheaper than a hole in the audit trail.
 
 `0011_extract_normalize_statuses` widens `chk_documents_status` (adds `EXTRACTED`,
 `EXTRACTION_FAILED`, `NORMALIZATION_FAILED`) and `chk_audit_log_event_type` (adds the matching

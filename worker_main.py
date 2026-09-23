@@ -11,6 +11,7 @@ import os
 import sys
 
 from src.workers.base_worker import BaseWorker
+from src.workers.chunking_worker import ChunkingWorker
 from src.workers.extraction_worker import ExtractionWorker
 from src.workers.normalization_worker import NormalizationWorker
 from src.workers.scan_worker import ScanWorker
@@ -27,6 +28,7 @@ WORKERS: dict[str, type[BaseWorker]] = {
     "SCAN": ScanWorker,
     "EXTRACT": ExtractionWorker,
     "NORMALIZE": NormalizationWorker,
+    "CHUNK": ChunkingWorker,
 }
 
 

@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from src.db.enums import AuditEventType
+from src.db.enums import AuditEventType, JobStage, JobStatus
 from src.db.models import AuditLog, Base
 from src.db.models import Job as JobORM
 from src.modules.document_pipeline.extraction.models import (
@@ -105,15 +105,31 @@ def test_normalized_artifact_carries_cleaned_text_and_structure(tmp_path):
     assert result.quality.passed is True
 
 
-def test_normalization_is_the_last_stage_and_queues_nothing(tmp_path):
-    """Classification isn't built yet — the pipeline deliberately stops here rather than
-    enqueuing a stage no worker consumes."""
+def test_normalization_enqueues_chunk_job(tmp_path):
+    """Hands off to chunking, mirroring how extraction hands off to this stage. The tier is set
+    at upload rather than confirmed at a gate, so nothing waits on a human in between."""
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
 
     with Session(engine) as db:
         storage, buckets, repo, handler = make_stack(tmp_path, db=db)
         doc = seed_extracted_doc(repo, buckets, storage, [(1, "Page 1", BODY)])
+
+        handler.process(doc.id)
+
+        jobs = db.query(JobORM).filter(JobORM.document_id == doc.id).all()
+        assert [j.stage for j in jobs] == [JobStage.CHUNK.value]
+        assert jobs[0].status == JobStatus.PENDING.value
+
+
+def test_quality_failure_queues_nothing(tmp_path):
+    """The pipeline stops at a failure rather than chunking content that never passed the gate."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        storage, buckets, repo, handler = make_stack(tmp_path, db=db)
+        doc = seed_extracted_doc(repo, buckets, storage, [(1, "Page 1", "")])
 
         handler.process(doc.id)
 
