@@ -17,7 +17,7 @@ from src.api.v1.router import app
 from src.db.engine import get_db
 from src.db.enums import UserRole
 from src.modules.auth.dependencies import get_current_user
-from src.modules.retrieval.models import RetrievedChunk
+from src.modules.retrieval.models import RetrievedChunk, TokenUsage
 
 client = TestClient(app)
 
@@ -45,14 +45,21 @@ class FakeService:
         self.calls.append(
             {"query": query, "user_id": user_id, "is_admin": is_admin, "limit": limit}
         )
-        return self._results
+        usage = TokenUsage(
+            query_tokens=len(query.split()),
+            context_tokens=sum(r.token_count for r in self._results),
+            max_sequence_tokens=512,
+            truncated_results=sum(1 for r in self._results if r.truncated),
+            model="fake/model",
+        )
+        return self._results, usage
 
 
 def _chunk(text="District targets for 2027.", **kw):
     defaults = {
         "chunk_id": uuid.uuid4(), "document_id": uuid.uuid4(), "filename": "directive.pdf",
         "text": text, "page_number": 4, "section_heading": "3. Obligations",
-        "is_table": False, "score": 0.82,
+        "is_table": False, "score": 0.82, "token_count": 120, "truncated": False,
     }
     return RetrievedChunk(**{**defaults, **kw})
 
@@ -197,9 +204,43 @@ def test_no_matches_is_an_empty_result_not_an_error(stack):
     r = client.get("/api/v1/search", params={"q": "nothing matches this"})
 
     assert r.status_code == 200
-    assert r.json() == {"query": "nothing matches this", "count": 0, "results": []}
+    body = r.json()
+    assert body["count"] == 0
+    assert body["results"] == []
+    assert body["query"] == "nothing matches this"
+    assert body["usage"]["context_tokens"] == 0, "no passages means no context"
 
 
 def test_the_echoed_query_is_the_trimmed_one(stack):
     body = client.get("/api/v1/search", params={"q": "  targets  "}).json()
     assert body["query"] == "targets"
+
+
+# ==============================================================================
+# Token usage
+# ==============================================================================
+
+def test_usage_is_reported_with_the_results(stack):
+    """The context size is what decides whether these passages fit in a future LLM prompt, so it
+    is worth showing now, while chunk sizing can still be changed cheaply."""
+    stack.service._results = [_chunk(), _chunk()]
+
+    usage = client.get("/api/v1/search", params={"q": "district targets"}).json()["usage"]
+
+    assert usage["context_tokens"] == 240, "the sum of the returned passages"
+    assert usage["query_tokens"] > 0
+    assert usage["max_sequence_tokens"] == 512
+    assert usage["model"] == "fake/model"
+
+
+def test_a_truncated_passage_is_flagged_to_the_caller(stack):
+    """A passage longer than the model's window was embedded only up to the cap, so a search for
+    something mentioned only in its tail will not find it. Saying so lets the reader distinguish
+    that from the corpus genuinely not containing the answer."""
+    stack.service._results = [_chunk(token_count=780, truncated=True)]
+
+    body = client.get("/api/v1/search", params={"q": "batch normalization"}).json()
+
+    assert body["results"][0]["truncated"] is True
+    assert body["results"][0]["token_count"] == 780
+    assert body["usage"]["truncated_results"] == 1

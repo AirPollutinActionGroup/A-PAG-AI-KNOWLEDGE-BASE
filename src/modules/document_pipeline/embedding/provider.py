@@ -30,6 +30,9 @@ _BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passage
 _E5_QUERY_PREFIX = "query: "
 _E5_PASSAGE_PREFIX = "passage: "
 
+# Only used if a tokenizer reports no truncation policy at all; every supported model does.
+_DEFAULT_MAX_TOKENS = 512
+
 
 class EmbeddingProvider(ABC):
     """Turns text into vectors. Knows nothing about storage, jobs or documents."""
@@ -52,6 +55,18 @@ class EmbeddingProvider(ABC):
     @abstractmethod
     def embed_query(self, text: str) -> list[float]:
         """Embeds a search query. Not interchangeable with embed_passages — see module docstring."""
+
+    @property
+    @abstractmethod
+    def max_sequence_tokens(self) -> int:
+        """The model's input window. Text longer than this is truncated at embed time, silently."""
+
+    @abstractmethod
+    def count_tokens(self, texts: list[str]) -> list[int]:
+        """The **true** token length of each text, ignoring the model's truncation cap.
+
+        Measuring through the shipped tokenizer would cap every answer at the window size and
+        report no overflow ever, which is precisely the thing worth knowing."""
 
 
 class FastEmbedProvider(EmbeddingProvider):
@@ -114,3 +129,39 @@ class FastEmbedProvider(EmbeddingProvider):
         elif self._is_bge():
             text = f"{_BGE_QUERY_INSTRUCTION}{text}"
         return next(iter(self._model.embed([text]))).tolist()
+
+    @property
+    def max_sequence_tokens(self) -> int:
+        """Read from the loaded tokenizer rather than hardcoded, so it stays right across a model
+        swap. 512 for BGE v1.5; BGE-M3 would report 8192."""
+        truncation = self._model.model.tokenizer.truncation
+        return int(truncation["max_length"]) if truncation else _DEFAULT_MAX_TOKENS
+
+    @cached_property
+    def _untruncated_tokenizer(self):
+        """A second tokenizer over the same vocabulary with the length cap removed.
+
+    Two policies have to be turned off, and both would corrupt the count silently:
+
+        - **Truncation.** The shipped tokenizer caps at `max_sequence_tokens`, so asking it how
+          long a text is can never return more than the window — an audit through it reports zero
+          overflow even while passages are being cut.
+        - **Padding.** `encode_batch` pads every sequence out to the longest in the batch, so a
+          four-token passage measured beside a five-hundred-token one reports five hundred. That
+          is not a rounding error: it makes every passage in a batch report an identical length,
+          which is both wrong and plausible enough to go unnoticed.
+
+        Rebuilt from the same serialized state, so vocabulary and merges are identical; only
+        these two policies differ.
+        """
+        from tokenizers import Tokenizer
+
+        tokenizer = Tokenizer.from_str(self._model.model.tokenizer.to_str())
+        tokenizer.no_truncation()
+        tokenizer.no_padding()
+        return tokenizer
+
+    def count_tokens(self, texts: list[str]) -> list[int]:
+        if not texts:
+            return []
+        return [len(e.ids) for e in self._untruncated_tokenizer.encode_batch(texts)]

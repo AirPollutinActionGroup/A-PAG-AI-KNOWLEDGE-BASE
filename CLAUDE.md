@@ -220,6 +220,15 @@ Transient vs permanent follows the usual split: model load and memory pressure a
 is likely to work); a dimension mismatch or a `CHUNKED` document with no chunks is permanent
 (retrying produces the identical error).
 
+**Token accounting.** Chunks are sized in characters but the model's window is in tokens (512
+here), and where they disagree fastembed truncates — the vector covers only the head of a passage
+stored whole, with no error raised. `count_tokens()` measures true length through a tokenizer with
+**both truncation and padding disabled**: truncation would cap every answer at the window so
+overflow is invisible, and `encode_batch` pads to the longest text in the batch so every passage in
+a batch reports an identical length (that one shipped briefly — `KNOWN_DEBTS.md` #29). 2.9% of the
+current corpus is truncated, concentrated in prose chunks containing code or terminal output, which
+tokenize at ~1.9 chars/token against a 4.11 corpus mean (`KNOWN_DEBTS.md` #28).
+
 **Retrieval filters permissions in SQL**, via `visible_documents_clause()` from
 `src/modules/auth/access.py` — the same predicate list and search use. A RESTRICTED chunk filtered
 post-hoc still consumes a top-k slot and pushes out a result the user was allowed to see, so the

@@ -498,3 +498,45 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   `search_vector`), so hybrid lexical+vector retrieval is not possible yet. `ts_rank` scores are
   unnormalised, so fusing them with vector scores would need Reciprocal Rank Fusion rather than
   score addition.
+
+### 28. 2.9% of embedded passages were silently truncated at the model's token window
+- **Status**: Detected and surfaced; the underlying cause is not yet fixed.
+- **Context**: chunks are sized in **characters** (`CHUNK_MAX_CHARS=2000`) because the tokenizer
+  belongs to the embedding model, which arrives a stage after chunking. The model's window is in
+  **tokens** (512 for `bge-base-en-v1.5`). Where the two disagree, fastembed truncates: the vector
+  represents only the head of a passage the database stores whole. No exception, no warning.
+- **Measured on the real corpus**: 83 of 2,816 embedded chunks (2.9%) exceed 512 tokens. Worst
+  case 1,023 tokens — **half the passage never reached the model**. Token length p50=177,
+  p90=432, p99=559.
+- **What causes it**: the corpus averages 4.11 characters per token, but the offenders run about
+  **1.9** — they are code blocks, terminal output and ASCII tables (`+-----+`, rows of
+  underscores), where BPE has no useful merges. At 1.9 chars/token, 2000 characters is ~1050
+  tokens. `CLAUDE.md` anticipated exactly this ratio problem for Devanagari; it arrived first in
+  English technical text. None of the 83 are `is_table` chunks — these are prose chunks that
+  *contain* preformatted text, so the table-aware path never saw them.
+- **Why it matters**: a search for something mentioned only in a truncated tail cannot match it.
+  The passage looks complete in the UI, so the reader concludes the corpus lacks the answer.
+- **What was done**: `EmbeddingProvider.count_tokens()` measures true length through a tokenizer
+  with truncation *and padding* disabled; `EmbeddingService` logs a WARNING naming the document
+  and how many tokens were discarded; `GET /api/v1/search` returns `token_count`/`truncated` per
+  passage plus a `usage` block, and the search UI marks a truncated passage and says what it
+  means. A recorded gap can be found; a silent one cannot.
+- **Trigger to address**: before the bulk archive ingest, and certainly before Hindi documents are
+  embedded, where the ratio is worse. The real fix is token-aware chunking — ask the provider for
+  the window and split against it rather than against a character count — which is a chunking
+  change plus a re-chunk and re-embed of the corpus. Cheaper interim options: lower
+  `CHUNK_MAX_CHARS`, which penalises every ordinary chunk to fix 3% of them; or detect dense
+  passages at chunking time by their character-to-whitespace ratio and split those harder.
+
+### 29. ✅ Batch token counting reported the longest text's length for every text (Closed)
+- **Found**: within an hour of writing it, by looking at a live search response where all five
+  passages claimed exactly 689 tokens.
+- **Cause**: `Tokenizer.encode_batch` pads every sequence out to the longest in the batch, and the
+  shipped tokenizer has padding configured. Disabling truncation was not enough; padding inflates
+  short texts instead of capping long ones.
+- **Why it would have survived review**: the numbers were plausible in isolation and only obviously
+  wrong side by side. It also inflated `context_tokens` (3,445 against a true 1,811) and produced
+  false truncation warnings — a measurement built to reveal a silent failure, itself failing
+  silently.
+- **Fix**: `no_padding()` alongside `no_truncation()` on the counting tokenizer. Two regression
+  tests in `tests/unit/test_embedding.py` fail against the pre-fix code.

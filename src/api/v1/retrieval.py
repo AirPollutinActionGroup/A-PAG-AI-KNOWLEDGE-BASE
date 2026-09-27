@@ -71,11 +71,11 @@ async def semantic_search(
             detail="EMPTY_QUERY: q is required.",
         )
 
-    results = service.search(
+    results, usage = service.search(
         db,
         query,
         user_id=current_user.user_id,
         is_admin=is_admin(current_user.role),
         limit=limit,
     )
-    return SearchResponse(query=query, count=len(results), results=results)
+    return SearchResponse(query=query, count=len(results), results=results, usage=usage)

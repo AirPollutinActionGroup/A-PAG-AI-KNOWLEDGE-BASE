@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A-PAG Knowledge Base</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* ---------------------------------------------------------------------------
+   A-PAG: yellow, black, white. The yellow is the single loud thing on the page
+   and is spent on one job at a time — the active accent — so it keeps meaning.
+   Neutrals are warm-biased toward it rather than pure grey.
+   Semantic colours (truncation, error) are separate from the accent on purpose:
+   if warning and accent were the same yellow, neither would read as anything.
+--------------------------------------------------------------------------- */
+:root {
+  --apag-yellow: #FFC400;
+  --apag-yellow-deep: #E0A800;
+  --ink: #14130F;
+  --ink-soft: #46433B;
+  --ink-faint: #7A756A;
+  --paper: #FFFFFF;
+  --surface: #FAF8F3;
+  --surface-2: #F2EFE6;
+  --line: #E2DDD0;
+  --danger: #B3261E;
+  --danger-soft: #FCEEEC;
+  --ok: #2E6B3E;
+  --radius: 10px;
+  --col: 46rem;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --apag-yellow: #FFCE2B;
+    --apag-yellow-deep: #FFD75E;
+    --ink: #F5F2EA;
+    --ink-soft: #C3BDB0;
+    --ink-faint: #8B8578;
+    --paper: #121110;
+    --surface: #1A1917;
+    --surface-2: #232220;
+    --line: #33312D;
+    --danger: #F2837B;
+    --danger-soft: #2A1917;
+    --ok: #8FD3A3;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --apag-yellow: #FFCE2B;
+  --apag-yellow-deep: #FFD75E;
+  --ink: #F5F2EA;
+  --ink-soft: #C3BDB0;
+  --ink-faint: #8B8578;
+  --paper: #121110;
+  --surface: #1A1917;
+  --surface-2: #232220;
+  --line: #33312D;
+  --danger: #F2837B;
+  --danger-soft: #2A1917;
+  --ok: #8FD3A3;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 16px/1.6 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--apag-yellow-deep); outline-offset: 2px; border-radius: 4px; }
+
+/* ---------------------------------------------- shell */
+.shell { display: grid; grid-template-rows: auto 1fr auto; height: 100dvh; }
+
+header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.mark {
+  display: inline-grid; place-items: center;
+  width: 30px; height: 30px; flex: none;
+  background: var(--apag-yellow); color: #14130F;
+  font: 700 13px/1 "Archivo", sans-serif; letter-spacing: -.02em;
+  border-radius: 7px;
+}
+.wordmark { font: 600 15px/1 "Archivo", sans-serif; letter-spacing: -.01em; }
+.wordmark span { color: var(--ink-faint); font-weight: 500; }
+.spacer { flex: 1; }
+.ghost {
+  background: none; border: 1px solid var(--line); color: var(--ink-soft);
+  padding: 6px 11px; border-radius: 7px; font-size: 13px;
+}
+.ghost:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+/* ---------------------------------------------- token meter (header) */
+.meter {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 11px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--paper);
+  font: 500 12px/1 "IBM Plex Mono", ui-monospace, monospace;
+  white-space: nowrap;
+}
+.meter b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.meter .sep { width: 1px; height: 14px; background: var(--line); }
+.meter .lbl { color: var(--ink-faint); font-weight: 400; }
+
+/* ---------------------------------------------- conversation */
+main { overflow-y: auto; scroll-behavior: smooth; }
+.thread { max-width: var(--col); margin: 0 auto; padding: 28px 16px 8px; }
+
+.turn { margin-bottom: 30px; }
+.you {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 13px 15px; border-radius: var(--radius);
+  background: var(--surface-2);
+  border-left: 3px solid var(--apag-yellow);
+}
+.you .q { font-weight: 500; }
+.who {
+  font: 600 10px/1 "IBM Plex Mono", monospace; letter-spacing: .09em;
+  color: var(--ink-faint); text-transform: uppercase;
+  padding-top: 5px; flex: none; width: 34px;
+}
+
+.answer { padding: 16px 2px 0; }
+.status {
+  font: 400 13px/1.5 "IBM Plex Sans", sans-serif; color: var(--ink-faint);
+  display: flex; align-items: center; gap: 9px; margin-bottom: 14px;
+}
+.dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--apag-yellow);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { opacity: .3; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .dot { animation: none; opacity: .8; } }
+
+/* ---------------------------------------------- passage cards */
+.hit {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  margin-bottom: 11px; background: var(--paper); overflow: hidden;
+}
+.hit.cut { border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
+.hit-top {
+  display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+  padding: 10px 13px; background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.rank {
+  font: 600 11px/1 "IBM Plex Mono", monospace;
+  background: var(--apag-yellow); color: #14130F;
+  padding: 3px 6px; border-radius: 4px; flex: none;
+}
+.src { font-weight: 600; font-size: 13.5px; word-break: break-word; }
+.cite {
+  font: 400 12px/1 "IBM Plex Mono", monospace; color: var(--ink-faint);
+  white-space: nowrap;
+}
+.score {
+  margin-left: auto; font: 500 12px/1 "IBM Plex Mono", monospace;
+  color: var(--ink-soft); font-variant-numeric: tabular-nums;
+}
+.heading {
+  padding: 9px 13px 0; font: 600 12px/1.4 "Archivo", sans-serif;
+  color: var(--ink-soft); letter-spacing: .01em;
+}
+.heading.none { color: var(--ink-faint); font-weight: 500; font-style: italic; }
+.body { padding: 8px 13px 12px; white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
+.body.table { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; overflow-x: auto; }
+
+.hit-foot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 13px; border-top: 1px solid var(--line); background: var(--surface);
+  font: 400 11.5px/1 "IBM Plex Mono", monospace; color: var(--ink-faint);
+}
+.bar { flex: 1; min-width: 70px; height: 4px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--apag-yellow-deep); }
+.bar.over i { background: var(--danger); }
+.cut-note {
+  width: 100%; margin-top: 2px; color: var(--danger);
+  font-family: "IBM Plex Sans", sans-serif; font-size: 12px; line-height: 1.45;
+}
+
+.usage {
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+  margin-top: 14px; padding: 10px 13px;
+  border: 1px dashed var(--line); border-radius: var(--radius);
+  font: 400 12px/1 "IBM Plex Mono", monospace; color: var(--ink-faint);
+}
+.usage b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage .warn { color: var(--danger); }
+
+.empty, .err {
+  padding: 14px; border-radius: var(--radius); font-size: 14px;
+  border: 1px solid var(--line); background: var(--surface);
+}
+.err { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+
+/* ---------------------------------------------- composer */
+footer { border-top: 1px solid var(--line); background: var(--surface); }
+.composer { max-width: var(--col); margin: 0 auto; padding: 13px 16px 16px; }
+.field {
+  display: flex; gap: 9px; align-items: flex-end;
+  border: 1.5px solid var(--line); border-radius: 13px;
+  background: var(--paper); padding: 7px 7px 7px 14px;
+  transition: border-color .14s;
+}
+.field:focus-within { border-color: var(--apag-yellow-deep); }
+#q {
+  flex: 1; border: 0; outline: 0; background: none; resize: none;
+  font-size: 15.5px; line-height: 1.5; padding: 7px 0; max-height: 170px;
+}
+.send {
+  flex: none; border: 0; border-radius: 9px;
+  background: var(--apag-yellow); color: #14130F;
+  font: 600 14px/1 "Archivo", sans-serif; padding: 11px 17px;
+}
+.send:hover:not(:disabled) { background: var(--apag-yellow-deep); }
+.send:disabled { opacity: .45; cursor: not-allowed; }
+.hint {
+  display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+  margin-top: 8px; font: 400 11.5px/1.4 "IBM Plex Mono", monospace; color: var(--ink-faint);
+}
+.hint select {
+  font: inherit; color: var(--ink); background: var(--paper);
+  border: 1px solid var(--line); border-radius: 6px; padding: 2px 5px;
+}
+
+/* ---------------------------------------------- sign-in */
+.gate { display: grid; place-items: center; padding: 8vh 16px; }
+.card {
+  width: 100%; max-width: 21rem; border: 1px solid var(--line);
+  border-radius: 13px; background: var(--surface); padding: 22px;
+}
+.card h1 { font: 600 19px/1.25 "Archivo", sans-serif; margin: 0 0 5px; }
+.card p { margin: 0 0 17px; font-size: 13.5px; color: var(--ink-faint); }
+.card label { display: block; font-size: 12px; color: var(--ink-soft); margin: 11px 0 4px; }
+.card input {
+  width: 100%; padding: 9px 11px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--paper); outline: 0;
+}
+.card input:focus { border-color: var(--apag-yellow-deep); }
+.card .send { width: 100%; margin-top: 17px; padding: 11px; }
+.card .msg { margin-top: 11px; font-size: 12.5px; color: var(--danger); min-height: 1em; }
+
+.seed { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 15px; }
+.seed button {
+  background: var(--paper); border: 1px solid var(--line); color: var(--ink-soft);
+  border-radius: 999px; padding: 6px 12px; font-size: 12.5px; text-align: left;
+}
+.seed button:hover { border-color: var(--apag-yellow-deep); color: var(--ink); }
+
+.lede { max-width: var(--col); margin: 0 auto; padding: 34px 16px 0; }
+.lede h2 { font: 600 25px/1.2 "Archivo", sans-serif; margin: 0 0 7px; letter-spacing: -.015em; }
+.lede p { margin: 0; color: var(--ink-faint); font-size: 14.5px; }
+
+@media (max-width: 640px) {
+  .meter .lbl, .wordmark span { display: none; }
+  header { gap: 9px; padding: 10px 12px; }
+  .thread, .composer, .lede { padding-left: 12px; padding-right: 12px; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <header>
+    <span class="mark">A</span>
+    <span class="wordmark">A&#8209;PAG <span>Knowledge Base</span></span>
+    <span class="spacer"></span>
+    <div class="meter" id="meter" hidden>
+      <span><span class="lbl">session</span> <b id="mTotal">0</b> tok</span>
+      <span class="sep"></span>
+      <span><span class="lbl">queries</span> <b id="mCount">0</b></span>
+    </div>
+    <button class="ghost" id="themeBtn" type="button" title="Switch theme">Theme</button>
+    <button class="ghost" id="outBtn" type="button" hidden>Sign out</button>
+  </header>
+
+  <main id="main">
+    <!-- sign-in -->
+    <section class="gate" id="gate">
+      <form class="card" id="loginForm">
+        <h1>Sign in</h1>
+        <p>Search A&#8209;PAG's ingested documents by meaning, with citations.</p>
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="username" required>
+        <label for="pw">Password</label>
+        <input id="pw" type="password" autocomplete="current-password" required>
+        <button class="send" type="submit" id="loginBtn">Sign in</button>
+        <div class="msg" id="loginMsg"></div>
+      </form>
+    </section>
+
+    <!-- conversation -->
+    <section id="app" hidden>
+      <div class="lede" id="lede">
+        <h2>Ask the corpus a question.</h2>
+        <p>Answers are passages from real documents, ranked by meaning rather than keywords, each
+           carrying the page and section it came from.</p>
+        <div class="seed" id="seed"></div>
+      </div>
+      <div class="thread" id="thread"></div>
+    </section>
+  </main>
+
+  <footer id="footer" hidden>
+    <div class="composer">
+      <div class="field">
+        <textarea id="q" rows="1" placeholder="e.g. what are the enforcement obligations for thermal power plants?"></textarea>
+        <button class="send" id="askBtn" type="button">Ask</button>
+      </div>
+      <div class="hint">
+        <span>Enter to send &middot; Shift+Enter for a new line</span>
+        <span class="spacer"></span>
+        <label for="k">passages
+          <select id="k">
+            <option>5</option><option selected>10</option><option>20</option><option>50</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const KEY = "apag.token";
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+    del(k) { try { localStorage.removeItem(k); } catch { /* private mode */ } },
+  };
+
+  /* Every value below is either typed by the user or read out of an ingested document, so it is
+     inserted as text, never as markup. Documents are uploaded by staff, but "trusted uploader"
+     is not the same as "safe to render" — a PDF can carry anything at all in its text layer. */
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+
+  let session = { tokens: 0, queries: 0 };
+
+  /* ----------------------------------------------------------------- theme */
+  const applyTheme = (t) => {
+    if (t) document.documentElement.setAttribute("data-theme", t);
+    else document.documentElement.removeAttribute("data-theme");
+  };
+  applyTheme(store.get("apag.theme"));
+  $("themeBtn").addEventListener("click", () => {
+    const now = document.documentElement.getAttribute("data-theme");
+    const dark = now ? now === "dark"
+      : matchMedia("(prefers-color-scheme: dark)").matches;
+    const next = dark ? "light" : "dark";
+    applyTheme(next);
+    store.set("apag.theme", next);
+  });
+
+  /* ------------------------------------------------------------------ auth */
+  const showApp = () => {
+    $("gate").hidden = true;
+    $("app").hidden = false;
+    $("footer").hidden = false;
+    $("meter").hidden = false;
+    $("outBtn").hidden = false;
+    $("q").focus();
+  };
+  const showGate = () => {
+    $("gate").hidden = false;
+    $("app").hidden = true;
+    $("footer").hidden = true;
+    $("meter").hidden = true;
+    $("outBtn").hidden = true;
+  };
+
+  $("loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("loginMsg");
+    msg.textContent = "";
+    $("loginBtn").disabled = true;
+    try {
+      const body = new URLSearchParams({ username: $("email").value, password: $("pw").value });
+      const r = await fetch("/api/v1/auth/login", { method: "POST", body });
+      if (!r.ok) {
+        msg.textContent = r.status === 401
+          ? "Email or password not recognised."
+          : `Sign-in failed (${r.status}).`;
+        return;
+      }
+      const data = await r.json();
+      store.set(KEY, data.access_token);
+      $("pw").value = "";
+      showApp();
+    } catch {
+      msg.textContent = "Could not reach the server.";
+    } finally {
+      $("loginBtn").disabled = false;
+    }
+  });
+
+  $("outBtn").addEventListener("click", () => {
+    store.del(KEY);
+    $("thread").replaceChildren();
+    $("lede").hidden = false;
+    session = { tokens: 0, queries: 0 };
+    paintMeter();
+    showGate();
+  });
+
+  /* ---------------------------------------------------------------- render */
+  function paintMeter() {
+    $("mTotal").textContent = session.tokens.toLocaleString();
+    $("mCount").textContent = session.queries;
+  }
+
+  function passageCard(hit, rank) {
+    const card = el("article", "hit" + (hit.truncated ? " cut" : ""));
+
+    const top = el("div", "hit-top");
+    top.append(el("span", "rank", String(rank)));
+    top.append(el("span", "src", hit.filename));
+
+    const bits = [];
+    if (hit.page_number != null) bits.push("p." + hit.page_number);
+    if (hit.is_table) bits.push("table");
+    if (bits.length) top.append(el("span", "cite", bits.join(" · ")));
+    top.append(el("span", "score", hit.score.toFixed(3)));
+    card.append(top);
+
+    /* A null heading is shown as such rather than hidden. Extraction leaves it empty when it
+       cannot attribute a passage to one heading, and saying "no section recorded" is honest
+       where silently omitting the line would read as though the document had no sections. */
+    card.append(hit.section_heading
+      ? el("div", "heading", hit.section_heading)
+      : el("div", "heading none", "no section recorded"));
+
+    card.append(el("div", "body" + (hit.is_table ? " table" : ""), hit.text));
+
+    const foot = el("div", "hit-foot");
+    foot.append(el("span", null, `${hit.token_count.toLocaleString()} tok`));
+    const win = Math.max(1, usageWindow);
+    const bar = el("span", "bar" + (hit.truncated ? " over" : ""));
+    const fill = el("i");
+    fill.style.width = Math.min(100, (hit.token_count / win) * 100).toFixed(1) + "%";
+    bar.append(fill);
+    foot.append(bar);
+    foot.append(el("span", null, `/ ${win} window`));
+    if (hit.truncated) {
+      foot.append(el("span", "cut-note",
+        `Cut at the model's ${win}-token limit — ${(hit.token_count - win).toLocaleString()} ` +
+        `tokens at the end of this passage were never embedded, so they cannot be matched by a ` +
+        `search. The text above is complete; the vector behind it is not.`));
+    }
+    card.append(foot);
+    return card;
+  }
+
+  let usageWindow = 512;
+
+  function usageStrip(u) {
+    const box = el("div", "usage");
+    const pair = (label, value, warn) => {
+      const s = el("span", warn ? "warn" : null);
+      s.append(document.createTextNode(label + " "));
+      s.append(el("b", null, value));
+      return s;
+    };
+    box.append(pair("query", u.query_tokens.toLocaleString() + " tok"));
+    box.append(pair("context", u.context_tokens.toLocaleString() + " tok"));
+    box.append(pair("window", u.max_sequence_tokens.toLocaleString()));
+    if (u.truncated_results) {
+      box.append(pair("truncated", `${u.truncated_results} passage${u.truncated_results > 1 ? "s" : ""}`, true));
+    }
+    box.append(el("span", null, u.model));
+    return box;
+  }
+
+  /* ------------------------------------------------------------------- ask */
+  async function ask(question) {
+    const token = store.get(KEY);
+    if (!token) { showGate(); return; }
+
+    $("lede").hidden = true;
+    const turn = el("section", "turn");
+
+    const you = el("div", "you");
+    you.append(el("span", "who", "You"));
+    you.append(el("div", "q", question));
+    turn.append(you);
+
+    const answer = el("div", "answer");
+    const status = el("div", "status");
+    status.append(el("span", "dot"));
+    status.append(el("span", null, "Embedding the question and searching …"));
+    answer.append(status);
+    turn.append(answer);
+
+    $("thread").append(turn);
+    turn.scrollIntoView({ block: "start" });
+
+    try {
+      const url = `/api/v1/search?q=${encodeURIComponent(question)}&limit=${$("k").value}`;
+      const r = await fetch(url, { headers: { Authorization: "Bearer " + token } });
+
+      if (r.status === 401) {
+        store.del(KEY);
+        answer.replaceChildren(el("div", "err", "Your session expired. Please sign in again."));
+        showGate();
+        return;
+      }
+      if (!r.ok) {
+        let detail = `Search failed (${r.status}).`;
+        try { const j = await r.json(); if (j.detail) detail = String(j.detail); } catch { /* not json */ }
+        answer.replaceChildren(el("div", "err", detail));
+        return;
+      }
+
+      const data = await r.json();
+      usageWindow = data.usage.max_sequence_tokens || usageWindow;
+      answer.replaceChildren();
+
+      if (!data.count) {
+        answer.append(el("div", "empty",
+          "Nothing in the corpus is close to that. Either it hasn't been ingested, or it's in a " +
+          "document you don't have access to — the search only looks at what you can see."));
+      } else {
+        const head = el("div", "status");
+        head.append(el("span", null,
+          `${data.count} passage${data.count > 1 ? "s" : ""}, nearest first`));
+        answer.append(head);
+        data.results.forEach((hit, i) => answer.append(passageCard(hit, i + 1)));
+      }
+
+      answer.append(usageStrip(data.usage));
+      session.tokens += data.usage.query_tokens + data.usage.context_tokens;
+      session.queries += 1;
+      paintMeter();
+    } catch {
+      answer.replaceChildren(el("div", "err", "Could not reach the server."));
+    }
+  }
+
+  /* --------------------------------------------------------------- composer */
+  const q = $("q");
+  const autosize = () => { q.style.height = "auto"; q.style.height = q.scrollHeight + "px"; };
+  q.addEventListener("input", autosize);
+
+  const submit = () => {
+    const text = q.value.trim();
+    if (!text) return;
+    q.value = "";
+    autosize();
+    ask(text);
+  };
+  $("askBtn").addEventListener("click", submit);
+  q.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+  });
+
+  const SEEDS = [
+    "What are the enforcement obligations for thermal power plants?",
+    "How are district-level air quality targets set?",
+    "What does the stubble burning directive require?",
+  ];
+  const seed = $("seed");
+  SEEDS.forEach((s) => {
+    const b = el("button", null, s);
+    b.type = "button";
+    b.addEventListener("click", () => ask(s));
+    seed.append(b);
+  });
+
+  /* Restores the signed-in view on reload. The token is only a hint that a session may still be
+     valid — the first 401 clears it and returns to the gate. */
+  if (store.get(KEY)) showApp(); else showGate();
+  paintMeter();
+})();
+</script>
+</body>
+</html>
