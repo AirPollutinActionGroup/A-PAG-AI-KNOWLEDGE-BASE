@@ -19,7 +19,7 @@ from src.db.models import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.document_pipeline.embedding.provider import FastEmbedProvider
 from src.modules.retrieval.models import SearchResponse
-from src.modules.retrieval.service import RetrievalService, is_admin
+from src.modules.retrieval.service import RetrievalService, SearchMode, is_admin
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +54,31 @@ def get_retrieval_service() -> RetrievalService:
 async def semantic_search(
     q: str = Query(..., description="A natural-language question."),
     limit: int = Query(10, ge=1, le=50),
+    mode: SearchMode = Query(
+        SearchMode.HYBRID,
+        description=(
+            "hybrid fuses semantic and lexical results (default); semantic is vector-only; "
+            "lexical is full-text-only. The single-arm modes exist to explain a result, not "
+            "because either is a better default."
+        ),
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     service: RetrievalService = Depends(get_retrieval_service),
 ) -> SearchResponse:
     """Returns the passages most semantically similar to `q` that the caller may see.
 
-    Unlike `/documents/search`, which matches literal words in a document's title, filename and
-    description, this matches *meaning* against the body text — a question about enforcement
-    obligations finds the relevant clause without sharing any keyword with it.
+    Two arms run by default and their ranks are fused (Reciprocal Rank Fusion):
+
+    - **semantic** — the question is embedded and passages ranked by cosine distance. Matches
+      meaning, so a question finds a clause it shares no words with. Poor at exact identifiers:
+      an embedding places "Section 114" near whatever it is semantically similar to.
+    - **lexical** — full-text search over passage bodies. Matches those identifiers exactly, and
+      is in turn blind to paraphrase.
+
+    They fail differently, which is why fusing them beats either. `/documents/search` is a
+    different thing again: it matches literal words in a document's **title, filename and
+    description** — body text is not in that index at all.
     """
     query = q.strip()
     if not query:
@@ -77,5 +93,6 @@ async def semantic_search(
         user_id=current_user.user_id,
         is_admin=is_admin(current_user.role),
         limit=limit,
+        mode=mode,
     )
     return SearchResponse(query=query, count=len(results), results=results, usage=usage)

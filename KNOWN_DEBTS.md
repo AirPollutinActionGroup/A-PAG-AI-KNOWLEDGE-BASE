@@ -540,3 +540,38 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   silently.
 - **Fix**: `no_padding()` alongside `no_truncation()` on the counting tokenizer. Two regression
   tests in `tests/unit/test_embedding.py` fail against the pre-fix code.
+
+### 30. Retrieval quality is unmeasured — there is no evaluation set
+- **Status**: Open, and the blocker for every tuning decision that follows.
+- **Context**: hybrid search ships with several constants chosen from the literature and from
+  inspection, not from measurement on this corpus: RRF's `k=60` (Cormack et al. 2009), the
+  candidate pool multiplier of 5, the 'A'/'B' weighting of body against section heading, and the
+  choice of `english` as the text-search configuration.
+- **Why they are not tunable yet**: tuning requires knowing whether a change helped, which
+  requires a set of questions with known-correct passages. There is none. Without it, adjusting
+  `k` is guessing, and the honest thing is to leave a defensible published default in place.
+- **What exists instead**: the `mode` parameter, which lets a disappointing result be attributed
+  to an arm — "the lexical arm found it and the vector arm did not" is a real diagnosis, and
+  `semantic_rank`/`lexical_rank` on every result make it visible per passage. Measured ad hoc on
+  16 queries, the lexical arm added results the vector arm missed on 6 of them.
+- **Trigger to address**: before tuning anything, and before choosing between embedding models on
+  anything other than cost. Thirty to fifty real A-PAG questions with the passages that answer
+  them would be enough to compute recall@k and MRR, and would turn every constant above from a
+  guess into a decision. That list has to come from people who know the corpus, not from me.
+
+### 31. ✅ Integration tests built their schema from the ORM, so no migration ever ran (Closed)
+- **Found**: writing the first test of the lexical arm, which returned nothing. The query was
+  correct; the trigger that populates `search_vector` had simply never been created.
+- **Cause**: `tests/integration/conftest.py` built the schema with `Base.metadata.create_all()`,
+  which knows only what the ORM declares. Triggers, functions and several constraints live in
+  migrations, so the test database was missing the `audit_log` immutability triggers (`0003`),
+  the partial unique index that is the real dedup guarantee (`0004`), and both tsvector triggers
+  (`0006`, `0015`).
+- **Why it mattered beyond this feature**: any test of DB-enforced behaviour was passing or
+  failing for the wrong reason, and a test asserting that `audit_log` cannot be updated would
+  have passed against a database with no such trigger.
+- **Fix**: the suite now runs `alembic upgrade head` against the throwaway container, so the test
+  schema is the schema that ships. `env.py` was changed to respect a caller-supplied
+  `sqlalchemy.url` instead of unconditionally overriding it with `settings.DATABASE_URL` — which
+  would have pointed the suite's migrations at the developer's real database, exactly what the
+  existing `APAG_ALLOW_DESTRUCTIVE_DB_TESTS` guard exists to prevent.

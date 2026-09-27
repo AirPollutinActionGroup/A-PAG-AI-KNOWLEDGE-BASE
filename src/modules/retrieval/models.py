@@ -26,8 +26,16 @@ class RetrievedChunk(BaseModel):
     section_heading: str | None = None
     is_table: bool = False
 
-    # Cosine similarity in [0, 1]-ish: 1.0 is identical direction. Derived from pgvector's `<=>`
-    # distance operator as `1 - distance`, so it reads the way callers expect a score to read.
+    # The fusion score: the sum of `1 / (RRF_K + rank)` over each arm that returned this passage.
+    #
+    # Deliberately NOT a similarity. It is small (around 0.016 for a single first place) and has
+    # no absolute meaning — only the ordering within one result set does. Comparing scores across
+    # two different queries is meaningless, and a low number is not a weak match. That is the
+    # cost of never having to convert between cosine distance and ts_rank, which are not on a
+    # common scale and cannot be made to be. See `fusion.py`.
+    #
+    # `semantic_rank` / `lexical_rank` below are what to read if you want to know how well a
+    # passage actually did.
     score: float
 
     # The passage's true token length, and whether that exceeded the embedding model's window.
@@ -36,6 +44,13 @@ class RetrievedChunk(BaseModel):
     # see that rather than concluding the corpus does not contain the answer.
     token_count: int = 0
     truncated: bool = False
+
+    # Which arm found this passage, and where it placed. Null means that arm did not return it
+    # at all. Kept because "why did this come back?" is a question people actually ask, and
+    # "the lexical arm ranked it 3rd; the vector arm missed it" is a real answer — the kind that
+    # tells you whether a disappointing result is a chunking problem or a model problem.
+    semantic_rank: int | None = None
+    lexical_rank: int | None = None
 
 
 class TokenUsage(BaseModel):
@@ -52,6 +67,13 @@ class TokenUsage(BaseModel):
     max_sequence_tokens: int = 0
     truncated_results: int = 0
     model: str = ""
+
+    # Which mode ran, and how many of the returned passages each arm contributed. The two counts
+    # overlap — a passage found by both is counted in each — so they are a picture of where the
+    # results came from, not a partition of them.
+    mode: str = "hybrid"
+    semantic_hits: int = 0
+    lexical_hits: int = 0
 
 
 class SearchResponse(BaseModel):

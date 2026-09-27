@@ -20,8 +20,14 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set database URL dynamically from app settings
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Database URL: whatever the caller already set wins, otherwise fall back to app settings.
+#
+# The caller matters. Running `alembic` from the shell sets nothing, so settings.DATABASE_URL is
+# used as before. But the integration test suite drives Alembic programmatically against a
+# throwaway container, and an unconditional override here would point those migrations at the
+# developer's real database — which the suite goes to some length to avoid touching.
+if not config.get_main_option("sqlalchemy.url", None):
+    config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 target_metadata = Base.metadata
 

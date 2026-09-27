@@ -166,10 +166,17 @@ main { overflow-y: auto; scroll-behavior: smooth; }
   font: 400 12px/1 "IBM Plex Mono", monospace; color: var(--ink-faint);
   white-space: nowrap;
 }
-.score {
-  margin-left: auto; font: 500 12px/1 "IBM Plex Mono", monospace;
-  color: var(--ink-soft); font-variant-numeric: tabular-nums;
+.arms { margin-left: auto; display: flex; gap: 5px; flex: none; }
+/* Which arm found this passage, and where it placed. Shown instead of the raw fusion score:
+   an RRF score is ~0.016 for a first place and has no meaning outside one result set, so
+   printing it invites being read as a 0-1 confidence. A rank is what people can act on. */
+.arm {
+  font: 500 10.5px/1 "IBM Plex Mono", monospace;
+  padding: 3px 6px; border-radius: 4px; border: 1px solid var(--line);
+  color: var(--ink-faint); white-space: nowrap;
 }
+.arm.on { border-color: var(--apag-yellow-deep); color: var(--ink); background: var(--paper); }
+.arm.off { opacity: .5; text-decoration: line-through; }
 .heading {
   padding: 9px 13px 0; font: 600 12px/1.4 "Archivo", sans-serif;
   color: var(--ink-soft); letter-spacing: .01em;
@@ -306,8 +313,10 @@ footer { border-top: 1px solid var(--line); background: var(--surface); }
     <section id="app" hidden>
       <div class="lede" id="lede">
         <h2>Ask the corpus a question.</h2>
-        <p>Answers are passages from real documents, ranked by meaning rather than keywords, each
-           carrying the page and section it came from.</p>
+        <p>Answers are passages from real documents, each carrying the page and section it came
+           from. Two searches run at once &mdash; one on meaning, one on exact words &mdash; and
+           their results are merged, because an embedding blurs terms like &ldquo;Section 114&rdquo;
+           while a word search is blind to paraphrase.</p>
         <div class="seed" id="seed"></div>
       </div>
       <div class="thread" id="thread"></div>
@@ -323,6 +332,13 @@ footer { border-top: 1px solid var(--line); background: var(--surface); }
       <div class="hint">
         <span>Enter to send &middot; Shift+Enter for a new line</span>
         <span class="spacer"></span>
+        <label for="mode">match
+          <select id="mode">
+            <option value="hybrid" selected>hybrid</option>
+            <option value="semantic">meaning only</option>
+            <option value="lexical">words only</option>
+          </select>
+        </label>
         <label for="k">passages
           <select id="k">
             <option>5</option><option selected>10</option><option>20</option><option>50</option>
@@ -440,7 +456,19 @@ footer { border-top: 1px solid var(--line); background: var(--surface); }
     if (hit.page_number != null) bits.push("p." + hit.page_number);
     if (hit.is_table) bits.push("table");
     if (bits.length) top.append(el("span", "cite", bits.join(" · ")));
-    top.append(el("span", "score", hit.score.toFixed(3)));
+
+    const arms = el("div", "arms");
+    const badge = (label, rank) => {
+      const b = el("span", "arm " + (rank == null ? "off" : "on"),
+        rank == null ? label : `${label} #${rank}`);
+      b.title = rank == null
+        ? `The ${label} search did not return this passage.`
+        : `Ranked #${rank} by the ${label} search.`;
+      return b;
+    };
+    arms.append(badge("meaning", hit.semantic_rank));
+    arms.append(badge("words", hit.lexical_rank));
+    top.append(arms);
     card.append(top);
 
     /* A null heading is shown as such rather than hidden. Extraction leaves it empty when it
@@ -484,6 +512,10 @@ footer { border-top: 1px solid var(--line); background: var(--surface); }
     box.append(pair("query", u.query_tokens.toLocaleString() + " tok"));
     box.append(pair("context", u.context_tokens.toLocaleString() + " tok"));
     box.append(pair("window", u.max_sequence_tokens.toLocaleString()));
+    box.append(pair("mode", u.mode));
+    if (u.mode === "hybrid") {
+      box.append(pair("found by", `${u.semantic_hits} meaning / ${u.lexical_hits} words`));
+    }
     if (u.truncated_results) {
       box.append(pair("truncated", `${u.truncated_results} passage${u.truncated_results > 1 ? "s" : ""}`, true));
     }
@@ -515,7 +547,8 @@ footer { border-top: 1px solid var(--line); background: var(--surface); }
     turn.scrollIntoView({ block: "start" });
 
     try {
-      const url = `/api/v1/search?q=${encodeURIComponent(question)}&limit=${$("k").value}`;
+      const url = `/api/v1/search?q=${encodeURIComponent(question)}`
+        + `&limit=${$("k").value}&mode=${$("mode").value}`;
       const r = await fetch(url, { headers: { Authorization: "Bearer " + token } });
 
       if (r.status === 401) {

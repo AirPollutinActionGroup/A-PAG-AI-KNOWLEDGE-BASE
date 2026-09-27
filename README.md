@@ -119,7 +119,7 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 
 ---
 
-## 🔎 Semantic Search
+## 🔎 Hybrid Search
 
 `GET /api/v1/search?q=<question>&limit=10` returns the passages whose *meaning* is closest to the
 question, each with the citation recovered at extraction time:
@@ -139,9 +139,20 @@ question, each with the citation recovered at extraction time:
 }
 ```
 
+**Two searches run and their ranks are merged.** Vector search matches meaning but blurs exact
+identifiers — an embedding places "Section 114" near whatever it is semantically similar to. A
+full-text index matches those exactly and is in turn blind to paraphrase. They fail differently,
+so fusing them covers more than either: on a 16-query sample the word search surfaced passages the
+vector search never returned on 6 of them. Asked for `cuDNN`, the vector arm's top hit was the
+book's *Index* page; the word arm found the actual content.
+
+Scores are never compared, only ranks (Reciprocal Rank Fusion) — cosine similarity and `ts_rank`
+are not on a common scale and no conversion between them exists. **So `score` is not a
+similarity**: read `semantic_rank`/`lexical_rank` instead. `mode=semantic|lexical` runs one arm
+alone, which is how a surprising result gets explained.
+
 This is distinct from `GET /api/v1/documents/search`, which matches literal words in a document's
-**title, filename and description** — body text is not in that index. Semantic search matches
-meaning against the body, so a question finds the relevant clause without sharing a keyword with it.
+**title, filename and description** — body text is not in that index at all.
 
 **Permissions are filtered in SQL, before `ORDER BY`/`LIMIT`.** This is a correctness requirement,
 not tidiness: a `RESTRICTED` passage removed *after* ranking has already won its slot, so a

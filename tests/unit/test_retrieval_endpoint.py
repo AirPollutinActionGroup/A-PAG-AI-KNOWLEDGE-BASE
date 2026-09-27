@@ -41,9 +41,10 @@ class FakeService:
     def model_name(self) -> str:
         return "fake/model"
 
-    def search(self, db, query, *, user_id, is_admin, limit):
+    def search(self, db, query, *, user_id, is_admin, limit, mode=None):
         self.calls.append(
-            {"query": query, "user_id": user_id, "is_admin": is_admin, "limit": limit}
+            {"query": query, "user_id": user_id, "is_admin": is_admin, "limit": limit,
+             "mode": getattr(mode, "value", mode)}
         )
         usage = TokenUsage(
             query_tokens=len(query.split()),

@@ -243,6 +243,14 @@ class DocumentChunk(Base):
         Vector(settings.EMBEDDING_DIMENSIONS), nullable=True
     )
 
+    # Lexical half of hybrid retrieval, maintained by a trigger (migration 0015) so it stays
+    # correct for ORM writes and raw SQL alike. Never assigned from Python — the trigger owns it.
+    #
+    # `documents.search_vector` indexes title, filename and description; this indexes the passage
+    # body. Embeddings blur exact identifiers ("Section 114", "GRAP Stage III") into whatever
+    # they are semantically near, which a lexical index matches exactly.
+    search_vector: Mapped[Any | None] = mapped_column(SearchVectorType, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
@@ -271,6 +279,7 @@ class DocumentChunk(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
             postgresql_with={"m": 16, "ef_construction": 64},
         ),
+        Index("idx_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
     )
 
 
