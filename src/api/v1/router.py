@@ -28,6 +28,7 @@ app.include_router(retrieval_router, prefix="/api/v1")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
+SEARCH_HTML = STATIC_DIR / "search.html"
 
 
 @app.get("/", response_class=HTMLResponse, tags=["Studio UI"])
@@ -36,6 +37,20 @@ async def root_ui():
     if INDEX_HTML.exists():
         return HTMLResponse(content=INDEX_HTML.read_text(encoding="utf-8"))
     return HTMLResponse(content="<h1>A-PAG AI Knowledge Base API Online</h1><p><a href='/docs'>View Swagger Docs</a></p>")
+
+
+@app.get("/search", response_class=HTMLResponse, tags=["Search UI"])
+async def search_ui():
+    """Semantic search over the ingested corpus.
+
+    Served as a static page rather than through a build step, matching the Studio UI: this is an
+    internal tool for ~50 people, and a toolchain is a thing to maintain. It is a separate page
+    from `/` because the Studio UI is about getting documents *in* and predates auth and
+    multi-file upload (`KNOWN_DEBTS.md` #7); this one is about getting answers out.
+    """
+    if SEARCH_HTML.exists():
+        return HTMLResponse(content=SEARCH_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>Search UI not found</h1>", status_code=404)
 
 
 @app.get("/health", tags=["System"])

@@ -56,6 +56,14 @@ class FakeProvider(EmbeddingProvider):
     def embed_query(self, text):
         return [0.1] * self._dimensions
 
+    @property
+    def max_sequence_tokens(self) -> int:
+        return 512
+
+    def count_tokens(self, texts):
+        # A crude stand-in: the handler's behaviour depends on the number, not on real tokenizing.
+        return [max(1, len(t) // 4) for t in texts]
+
 
 @pytest.fixture
 def stack(tmp_path):

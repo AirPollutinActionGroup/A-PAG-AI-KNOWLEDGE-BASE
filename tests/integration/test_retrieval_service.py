@@ -51,6 +51,13 @@ class StubProvider(EmbeddingProvider):
         self.query_calls.append(text)
         return self.vector
 
+    @property
+    def max_sequence_tokens(self) -> int:
+        return 512
+
+    def count_tokens(self, texts):
+        return [max(1, len(t) // 4) for t in texts]
+
 
 def _user(session: Session) -> uuid.UUID:
     uid = uuid.uuid4()
@@ -96,7 +103,7 @@ def test_results_are_ordered_by_similarity(db_session: Session, service):
     _chunk(db_session, doc, _vec(1.0, 0.6), "middling", 2)
     db_session.flush()
 
-    hits = service.search(db_session, "q", user_id=_user(db_session), is_admin=False, limit=10)
+    hits, _ = service.search(db_session, "q", user_id=_user(db_session), is_admin=False, limit=10)
 
     assert [h.text for h in hits][:2] == ["close match", "middling"]
     assert hits[0].score > hits[1].score, "score must decrease with distance"
@@ -111,7 +118,7 @@ def test_score_is_a_similarity_not_a_distance(db_session: Session, service):
     _chunk(db_session, doc, _vec(1.0), "identical direction", 0)
     db_session.flush()
 
-    hit = service.search(db_session, "q", user_id=_user(db_session), is_admin=False, limit=1)[0]
+    hit = service.search(db_session, "q", user_id=_user(db_session), is_admin=False, limit=1)[0][0]
 
     assert hit.score == pytest.approx(1.0, abs=1e-6)
 
@@ -138,7 +145,7 @@ def test_limit_is_respected(db_session: Session, service):
         _chunk(db_session, doc, _vec(1.0, i / 100), f"passage {i}", i)
     db_session.flush()
 
-    assert len(service.search(db_session, "q", user_id=None, is_admin=True, limit=3)) == 3
+    assert len(service.search(db_session, "q", user_id=None, is_admin=True, limit=3)[0]) == 3
 
     db_session.rollback()
 
@@ -154,7 +161,7 @@ def test_unembedded_chunks_are_excluded(db_session: Session, service):
     _chunk(db_session, doc, None, "not yet embedded", 1)
     db_session.flush()
 
-    hits = service.search(db_session, "q", user_id=None, is_admin=True, limit=10)
+    hits, _ = service.search(db_session, "q", user_id=None, is_admin=True, limit=10)
 
     assert [h.text for h in hits] == ["embedded"]
 
@@ -172,7 +179,7 @@ def test_soft_deleted_documents_are_excluded(db_session: Session, service):
     _chunk(db_session, gone, _vec(1.0), "deleted passage", 0)
     db_session.flush()
 
-    hits = service.search(db_session, "q", user_id=None, is_admin=True, limit=10)
+    hits, _ = service.search(db_session, "q", user_id=None, is_admin=True, limit=10)
 
     assert [h.text for h in hits] == ["live passage"]
 
@@ -188,7 +195,7 @@ def test_restricted_passage_is_hidden_from_a_stranger(db_session: Session, servi
     _chunk(db_session, _doc(db_session, "RESTRICTED", owner=owner), _vec(1.0), "secret", 0)
     db_session.flush()
 
-    hits = service.search(db_session, "q", user_id=stranger, is_admin=False, limit=10)
+    hits, _ = service.search(db_session, "q", user_id=stranger, is_admin=False, limit=10)
 
     assert hits == []
 
@@ -204,7 +211,7 @@ def test_restricted_passage_does_not_consume_a_top_k_slot(db_session: Session, s
     _chunk(db_session, _doc(db_session, "PUBLIC"), _vec(0.9, 0.1), "second nearest", 0)
     db_session.flush()
 
-    hits = service.search(db_session, "q", user_id=stranger, is_admin=False, limit=1)
+    hits, _ = service.search(db_session, "q", user_id=stranger, is_admin=False, limit=1)
 
     assert [h.text for h in hits] == ["second nearest"]
 
@@ -216,7 +223,7 @@ def test_owner_sees_their_own_restricted_passage(db_session: Session, service):
     _chunk(db_session, _doc(db_session, "RESTRICTED", owner=owner), _vec(1.0), "mine", 0)
     db_session.flush()
 
-    hits = service.search(db_session, "q", user_id=owner, is_admin=False, limit=10)
+    hits, _ = service.search(db_session, "q", user_id=owner, is_admin=False, limit=10)
 
     assert [h.text for h in hits] == ["mine"]
 
@@ -227,7 +234,7 @@ def test_admin_sees_restricted_passages(db_session: Session, service):
     _chunk(db_session, _doc(db_session, "RESTRICTED", owner=_user(db_session)), _vec(1.0), "any", 0)
     db_session.flush()
 
-    hits = service.search(db_session, "q", user_id=_user(db_session), is_admin=True, limit=10)
+    hits, _ = service.search(db_session, "q", user_id=_user(db_session), is_admin=True, limit=10)
 
     assert [h.text for h in hits] == ["any"]
 
@@ -238,7 +245,7 @@ def test_public_passages_are_visible_to_everyone(db_session: Session, service):
     _chunk(db_session, _doc(db_session, "PUBLIC"), _vec(1.0), "org-wide", 0)
     db_session.flush()
 
-    hits = service.search(db_session, "q", user_id=_user(db_session), is_admin=False, limit=10)
+    hits, _ = service.search(db_session, "q", user_id=_user(db_session), is_admin=False, limit=10)
 
     assert [h.text for h in hits] == ["org-wide"]
 
@@ -255,7 +262,7 @@ def test_citation_fields_are_returned(db_session: Session, service):
            page_number=7, section_heading="4. Targets", is_table=True)
     db_session.flush()
 
-    hit = service.search(db_session, "q", user_id=None, is_admin=True, limit=1)[0]
+    hit = service.search(db_session, "q", user_id=None, is_admin=True, limit=1)[0][0]
 
     assert hit.document_id == doc.document_id
     assert hit.filename == doc.filename
@@ -273,7 +280,7 @@ def test_a_null_heading_round_trips_as_none(db_session: Session, service):
     _chunk(db_session, doc, _vec(1.0), "orphan table row", 0, page_number=3, section_heading=None)
     db_session.flush()
 
-    hit = service.search(db_session, "q", user_id=None, is_admin=True, limit=1)[0]
+    hit = service.search(db_session, "q", user_id=None, is_admin=True, limit=1)[0][0]
 
     assert hit.section_heading is None
     assert hit.page_number == 3

@@ -109,6 +109,16 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 
 ---
 
+## 🖥️ Interfaces
+
+| Path | What it is |
+|---|---|
+| `/search` | **Search UI** — ask the corpus a question, get ranked passages with citations and a live token readout. Sign in with the same account as the API. |
+| `/` | Studio UI — upload and watch the ingestion pipeline (predates auth/multi-file, see `KNOWN_DEBTS.md` #7). |
+| `/docs` | Swagger. |
+
+---
+
 ## 🔎 Semantic Search
 
 `GET /api/v1/search?q=<question>&limit=10` returns the passages whose *meaning* is closest to the
@@ -137,6 +147,13 @@ meaning against the body, so a question finds the relevant clause without sharin
 not tidiness: a `RESTRICTED` passage removed *after* ranking has already won its slot, so a
 `limit=5` would quietly return four results — or none — with no way for the caller to tell whether
 the corpus is thin or an answer was withheld.
+
+**Every response carries a `usage` block** — query tokens, context tokens, the model's window, and
+how many returned passages were truncated by it. Context size is what decides whether these
+passages fit in a future LLM prompt, so it is worth watching now, while chunk sizing can still be
+changed cheaply. A passage longer than the window was embedded only up to the cap: the text is
+stored whole but the vector is not, so something mentioned only in its tail cannot be found.
+2.9% of the current corpus is in that state — see `KNOWN_DEBTS.md` #28.
 
 ---
 

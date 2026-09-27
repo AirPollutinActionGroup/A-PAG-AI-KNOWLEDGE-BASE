@@ -56,6 +56,13 @@ class RecordingProvider(EmbeddingProvider):
         self.query_calls.append(text)
         return [0.0] * self._dimensions
 
+    @property
+    def max_sequence_tokens(self) -> int:
+        return 512
+
+    def count_tokens(self, texts):
+        return [max(1, len(t) // 4) for t in texts]
+
 
 # ==============================================================================
 # Asymmetric query/passage handling — the silent-failure guard
@@ -142,3 +149,56 @@ def test_every_chunk_gets_exactly_one_vector(n):
     service = EmbeddingService(provider=RecordingProvider(), batch_size=32)
     result = service.embed_document(uuid.uuid4(), [f"c{i}" for i in range(n)])
     assert result.vector_count == n
+
+
+# ==============================================================================
+# Token counting — the measurement the truncation warning depends on
+# ==============================================================================
+
+@pytest.mark.parametrize("model,dim", [("BAAI/bge-base-en-v1.5", 768)])
+def test_token_counts_are_per_text_not_padded_to_the_batch(model, dim):
+    """`encode_batch` pads every sequence out to the longest in the batch, so a four-token
+    passage measured beside a five-hundred-token one reports five hundred. The failure is not a
+    rounding error: every passage in a batch reports an identical length, which is wrong and
+    plausible enough to ship. Caught exactly that way — a live search returned five passages all
+    claiming 689 tokens."""
+    p = FastEmbedProvider(model_name=model, dimensions=dim)
+
+    counts = p.count_tokens(["short", "a considerably longer passage of text " * 20])
+
+    assert counts[0] < counts[1], "a short text must not inherit the long one's length"
+    assert counts[0] < 10, f"expected a handful of tokens, got {counts[0]} (padding still on?)"
+
+
+def test_token_counts_ignore_the_truncation_cap():
+    """Measuring through the shipped tokenizer caps every answer at the window, so overflow —
+    the only thing worth measuring — becomes invisible."""
+    p = FastEmbedProvider(model_name="BAAI/bge-base-en-v1.5", dimensions=768)
+
+    long_text = "enforcement obligation for the district authority " * 300
+    count = p.count_tokens([long_text])[0]
+
+    assert count > p.max_sequence_tokens, (
+        f"{count} tokens reported against a {p.max_sequence_tokens}-token window — "
+        "the counting tokenizer is still truncating"
+    )
+
+
+def test_batch_counts_match_individual_counts():
+    """The batch path is what production uses; the single path is what is easy to reason about.
+    They must not disagree."""
+    p = FastEmbedProvider(model_name="BAAI/bge-base-en-v1.5", dimensions=768)
+    texts = ["one", "two words here", "a rather longer sentence about district enforcement"]
+
+    assert p.count_tokens(texts) == [p.count_tokens([t])[0] for t in texts]
+
+
+def test_empty_input_counts_nothing():
+    p = FastEmbedProvider(model_name="BAAI/bge-base-en-v1.5", dimensions=768)
+    assert p.count_tokens([]) == []
+
+
+def test_max_sequence_tokens_is_read_from_the_model():
+    """Hardcoding 512 would quietly be wrong after a model swap — BGE-M3's window is 8192."""
+    p = FastEmbedProvider(model_name="BAAI/bge-base-en-v1.5", dimensions=768)
+    assert p.max_sequence_tokens == 512

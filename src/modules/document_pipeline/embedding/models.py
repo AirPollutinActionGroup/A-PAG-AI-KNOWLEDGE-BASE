@@ -18,7 +18,30 @@ class EmbeddingResult(BaseModel):
     dimensions: int
     vectors: list[list[float]] = Field(default_factory=list)
 
+    # Chunks are sized in *characters* (the tokenizer belongs to the model, which arrives a stage
+    # after chunking), but the model's window is in *tokens*. Where the two disagree fastembed
+    # truncates and the tail of that passage is never embedded — no exception, just a vector that
+    # represents part of a text the database stores whole. Recording it makes the gap queryable,
+    # the same way SKIPPED_UNSUPPORTED_LANGUAGE and LOW_TEXT_DENSITY do. See KNOWN_DEBTS.md #28.
+    max_sequence_tokens: int = 0
+    token_counts: list[int] = Field(default_factory=list)
+
     @computed_field
     @property
     def vector_count(self) -> int:
         return len(self.vectors)
+
+    @computed_field
+    @property
+    def truncated_count(self) -> int:
+        """How many passages were longer than the model could read."""
+        return sum(1 for n in self.token_counts if n > self.max_sequence_tokens)
+
+    @computed_field
+    @property
+    def truncated_tokens(self) -> int:
+        """Total tokens discarded across those passages — the size of the blind spot."""
+        return sum(
+            n - self.max_sequence_tokens for n in self.token_counts
+            if n > self.max_sequence_tokens
+        )

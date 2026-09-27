@@ -29,7 +29,7 @@ from src.db.models import Document as DocumentORM
 from src.db.models import DocumentChunk as ChunkORM
 from src.modules.auth.access import is_admin, visible_documents_clause
 from src.modules.document_pipeline.embedding.provider import EmbeddingProvider
-from src.modules.retrieval.models import RetrievedChunk
+from src.modules.retrieval.models import RetrievedChunk, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,9 @@ class RetrievalService:
         user_id: uuid.UUID | None,
         is_admin: bool,
         limit: int = 10,
-    ) -> list[RetrievedChunk]:
-        """Returns the `limit` passages nearest to `query` that this user is allowed to see."""
+    ) -> tuple[list[RetrievedChunk], TokenUsage]:
+        """Returns the `limit` passages nearest to `query` that this user may see, and what the
+        query cost in tokens."""
         vector = self._provider.embed_query(query)
 
         # `cosine_distance` emits pgvector's `<=>`, which is the operator the HNSW index was built
@@ -88,8 +89,27 @@ class RetrievalService:
 
         rows = db.execute(stmt).mappings().all()
 
-        logger.info(
-            "Retrieval: results=%d limit=%d admin=%s model=%s",
-            len(rows), limit, is_admin, self._provider.model_name,
+        # Counted here rather than stored on the row: the number belongs to whichever model is
+        # configured now, and a stored count would go stale the moment the model changed.
+        window = self._provider.max_sequence_tokens
+        passage_tokens = self._provider.count_tokens([r["text"] for r in rows])
+        query_tokens = self._provider.count_tokens([query])[0] if query else 0
+
+        results = [
+            RetrievedChunk(**row, token_count=n, truncated=n > window)
+            for row, n in zip(rows, passage_tokens, strict=True)
+        ]
+        usage = TokenUsage(
+            query_tokens=query_tokens,
+            context_tokens=sum(passage_tokens),
+            max_sequence_tokens=window,
+            truncated_results=sum(1 for r in results if r.truncated),
+            model=self._provider.model_name,
         )
-        return [RetrievedChunk(**row) for row in rows]
+
+        logger.info(
+            "Retrieval: results=%d limit=%d admin=%s model=%s context_tokens=%d truncated=%d",
+            len(rows), limit, is_admin, self._provider.model_name,
+            usage.context_tokens, usage.truncated_results,
+        )
+        return results, usage
