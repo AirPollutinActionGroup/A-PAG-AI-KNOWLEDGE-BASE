@@ -60,7 +60,10 @@ def _chunk(text="District targets for 2027.", **kw):
     defaults = {
         "chunk_id": uuid.uuid4(), "document_id": uuid.uuid4(), "filename": "directive.pdf",
         "text": text, "page_number": 4, "section_heading": "3. Obligations",
-        "is_table": False, "score": 0.82, "token_count": 120, "truncated": False,
+        "is_table": False, "score": 0.016, "token_count": 120, "truncated": False,
+        # Above SEARCH_MIN_SIMILARITY, so the grounding gate lets these through. On-topic
+        # questions score 0.69-0.84 against this corpus.
+        "similarity": 0.72, "semantic_rank": 1,
     }
     return RetrievedChunk(**{**defaults, **kw})
 
@@ -245,3 +248,52 @@ def test_a_truncated_passage_is_flagged_to_the_caller(stack):
     assert body["results"][0]["truncated"] is True
     assert body["results"][0]["token_count"] == 780
     assert body["usage"]["truncated_results"] == 1
+
+
+# ==============================================================================
+# "I don't know" — the grounding gate
+# ==============================================================================
+
+def test_an_off_topic_question_returns_nothing_rather_than_the_nearest_passage(stack):
+    """Vector search always returns *something* — there is no such thing as no nearest
+    neighbour. Without this gate, asking about cake returns the nearest policy passage with a
+    page citation and every appearance of confidence, which is worse than an empty answer: it is
+    the apparatus of an answer without the substance."""
+    stack.service._results = [_chunk(similarity=0.46, text="Unrelated policy text.")]
+
+    body = client.get("/api/v1/search", params={"q": "best chocolate cake recipe"}).json()
+
+    assert body["grounded"] is False
+    assert body["count"] == 0
+    assert body["results"] == [], "the passages must be withheld, not merely flagged"
+    assert body["best_similarity"] == pytest.approx(0.46)
+
+
+def test_an_on_topic_question_is_grounded(stack):
+    stack.service._results = [_chunk(similarity=0.74)]
+
+    body = client.get("/api/v1/search", params={"q": "enforcement obligations"}).json()
+
+    assert body["grounded"] is True
+    assert body["count"] == 1
+
+
+def test_an_exact_word_match_is_grounded_even_at_low_similarity(stack):
+    """If the words are literally in a document, the corpus contains them, whatever the
+    embedding thinks. Rare identifiers — a statute number, a district name — are exactly the
+    case where similarity is low and the match is real."""
+    stack.service._results = [_chunk(similarity=0.41, semantic_rank=None, lexical_rank=1)]
+
+    body = client.get("/api/v1/search", params={"q": "GRAPSTAGETHREE"}).json()
+
+    assert body["grounded"] is True
+    assert body["count"] == 1
+
+
+def test_no_results_at_all_is_not_grounded(stack):
+    stack.service._results = []
+
+    body = client.get("/api/v1/search", params={"q": "anything"}).json()
+
+    assert body["grounded"] is False
+    assert body["best_similarity"] is None

@@ -12,6 +12,7 @@ import pytest
 from src.modules.document_pipeline.chunking.chunker import Chunker
 from src.modules.document_pipeline.chunking.models import SECTION_SCALE
 from src.modules.document_pipeline.chunking.service import ChunkingService
+from src.modules.document_pipeline.chunking.sizing import CharacterBudget
 from src.modules.document_pipeline.extraction.models import ExtractedTable, Heading
 from src.modules.document_pipeline.normalization.models import (
     NormalizationResult,
@@ -153,7 +154,8 @@ def test_split_prefers_paragraph_boundaries():
     para_b = sentences(20, "beta")
     result = build(units=[(1, "Page 1", f"{para_a}\n\n{para_b}")])
 
-    chunks = Chunker(target_chars=len(para_a) + 50, max_chars=len(para_a) + 100).chunk(result)
+    budget = CharacterBudget(target=len(para_a) + 50, maximum=len(para_a) + 100)
+    chunks = Chunker(budget=budget).chunk(result)
 
     assert len(chunks) == 2
     assert "alpha" in chunks[0].text and "beta" not in chunks[0].text

@@ -19,7 +19,12 @@ from src.db.models import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.document_pipeline.embedding.provider import FastEmbedProvider
 from src.modules.retrieval.models import SearchResponse
-from src.modules.retrieval.service import RetrievalService, SearchMode, is_admin
+from src.modules.retrieval.service import (
+    RetrievalService,
+    SearchMode,
+    assess,
+    is_admin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,4 +100,18 @@ async def semantic_search(
         limit=limit,
         mode=mode,
     )
-    return SearchResponse(query=query, count=len(results), results=results, usage=usage)
+    grounded, best = assess(results)
+    if not grounded:
+        # The passages are withheld, not just flagged. Showing a citation next to text that does
+        # not answer the question is how a reader ends up quoting something irrelevant in a
+        # government submission — the apparatus of an answer without the substance of one.
+        logger.info("Ungrounded query (best similarity %.3f): %r", best or 0.0, query)
+        return SearchResponse(
+            query=query, count=0, results=[], usage=usage,
+            grounded=False, best_similarity=best,
+        )
+
+    return SearchResponse(
+        query=query, count=len(results), results=results, usage=usage,
+        grounded=True, best_similarity=best,
+    )

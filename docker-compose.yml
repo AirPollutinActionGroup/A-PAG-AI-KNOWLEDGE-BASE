@@ -141,6 +141,11 @@ services:
   chunking-worker:
     build: .
     container_name: apag-chunking-worker
+    # The chunking worker now loads the embedding model purely to tokenize, so chunk sizes are
+    # measured in the unit that actually constrains the next stage. ~640MB resident for a stage
+    # that does no inference — the trade-off is recorded in KNOWN_DEBTS.md #32, along with the
+    # lighter alternative (loading the tokenizer alone) and why it was not taken.
+    mem_limit: 2g
     command: python worker_main.py
     environment:
       WORKER_STAGE: CHUNK
