@@ -21,7 +21,7 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: apag-postgres
     # Bound to the VM's loopback only (127.0.0.1), not 0.0.0.0 — reachable from the public
     # internet under neither address, but an operator can still SSH-tunnel in
@@ -227,12 +227,58 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  embedding-worker:
+    build: .
+    container_name: apag-embedding-worker
+    # Holds the ONNX model (~640MB resident) plus a batch of vectors.
+    mem_limit: 1200m
+    command: python worker_main.py
+    environment:
+      WORKER_STAGE: EMBED
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: apag_knowledge_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_SECURE: "false"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ENVIRONMENT: staging
+      WORKER_POLL_INTERVAL_SECONDS: "1.0"
+      SCAN_WORKER_LEASE_SECONDS: "60"
+      WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test $$(( $$(date +%s) - $$(stat -c %Y /tmp/worker_alive) )) -lt 30"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
   extraction-worker:
     build: .
     container_name: apag-extraction-worker
+    # The VM this targets has 3.8GB of RAM in total, shared with Postgres, MinIO, the API and
+    # four other workers. Extraction is the memory-hungry stage: pdfplumber holds page objects for
+    # the document it parses, and a 1,351-page PDF peaked at 3.6GB on a developer machine — more
+    # than this whole host. MAX_PDF_PAGES below rejects such a document with a reason, which is
+    # strictly better than the alternative: an OOM kill is not a PermanentProcessingError, so the
+    # container dies, the lease lapses, the reaper re-queues, and the next worker dies on the same
+    # document. See KNOWN_DEBTS.md #24.
+    mem_limit: 1200m
     command: python worker_main.py
     environment:
       WORKER_STAGE: EXTRACT
+      MAX_PDF_PAGES: "600"
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432

@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A-PAG AI Knowledge Base: an async document ingestion pipeline (Python 3.12, FastAPI) that will
 eventually feed a governed RAG platform (vector search over PDFs) plus a Text-to-SQL layer over
-PostgreSQL. **Currently implemented: Stages 1–6** (upload/quarantine → validation/threat scan →
-promotion to raw storage → text extraction → normalization/quality gate → chunking), plus JWT auth,
-multi-file upload, pagination, and full-text search on top of it. Embedding, vector indexing and
-Text-to-SQL are not yet built (see Roadmap in README.md).
+PostgreSQL. **Currently implemented: Stages 1–7** (upload/quarantine → validation/threat scan →
+promotion to raw storage → text extraction → normalization/quality gate → chunking → embedding),
+plus JWT auth, multi-file upload, pagination, and full-text search on top of it. Vectors are stored
+and HNSW-indexed in Postgres via pgvector, but **no retrieval endpoint exists yet** — nothing
+queries them. Retrieval and Text-to-SQL are not yet built (see Roadmap in README.md).
 
 ## Commands
 
@@ -29,6 +30,11 @@ python worker_main.py      # runs one stage, selected by WORKER_STAGE (default S
 WORKER_STAGE=EXTRACT python worker_main.py
 WORKER_STAGE=NORMALIZE python worker_main.py
 WORKER_STAGE=CHUNK python worker_main.py
+WORKER_STAGE=EMBED python worker_main.py
+
+# Enqueue jobs for documents stranded before a stage existed (idempotent)
+python backfill_jobs.py --stage EMBED --dry-run
+python backfill_jobs.py --stage EMBED
 
 # Tests
 pytest tests/ -v                              # full suite (unit + Postgres integration)
@@ -52,7 +58,8 @@ see `KNOWN_DEBTS.md`). All `/api/v1/documents/*` endpoints require `Authorizatio
 - `main.py` → FastAPI app (`src/api/v1/router.py`) — handles `POST /documents/upload` (fast path
   only, returns `202` in <500ms) and `GET /documents/{id}/status`.
 - `worker_main.py` → reads `WORKER_STAGE` (`SCAN` default) and runs the matching `BaseWorker`
-  subclass — `ScanWorker`, `ExtractionWorker`, `NormalizationWorker`, or `ChunkingWorker`. One process handles one
+  subclass — `ScanWorker`, `ExtractionWorker`, `NormalizationWorker`, `ChunkingWorker`, or
+  `EmbeddingWorker`. One process handles one
   stage; each stage runs as its own container in Docker Compose off the same image (see
   `docker-compose.yml`), because the container healthcheck watches a single heartbeat file, which
   assumes one worker daemon per container (`KNOWN_DEBTS.md` #5).
@@ -115,7 +122,13 @@ path (the stage's own `*JobHandler.process()`).
    (`src/modules/document_pipeline/chunking/` — see "Chunking" below). Passages are written to
    the `document_chunks` **table**, not a bucket, and the document is set `CHUNKED`. Re-running
    replaces a document's chunks rather than appending, so a reaped or retried job cannot double
-   its content. Embedding (Stage 7) isn't built yet, so nothing is queued after this stage.
+   its content. On success an `EMBED` job is enqueued.
+7. **Embed** — `src/modules/document_pipeline/embedding_job_handler.py`
+   `EmbeddingJobHandler.process()`: fetches a `CHUNKED` document, reads its `document_chunks` rows,
+   and writes a `vector(768)` back onto each one via `EmbeddingService`
+   (`src/modules/document_pipeline/embedding/` — see "Embedding" below). The document becomes
+   `LIVE`, which now means what it says: every passage carries a vector and is retrievable.
+   Nothing is queued after this stage — it is the end of ingestion.
 
 ### Text extraction: deliberately non-ML
 
@@ -166,6 +179,52 @@ column to the same row, and a similarity search cannot join against JSON in a bu
 `page_number`, `section_heading` and `is_table` are the citation contract, and the `scale` column
 ships holding one value so a second granularity later is an INSERT rather than a migration plus a
 backfill (`KNOWN_DEBTS.md` #17).
+
+### Embedding: the model is a configuration decision, the dimension is not
+
+`src/modules/document_pipeline/embedding/` mirrors `chunking/`'s shape — pure logic, no storage or
+DB awareness. `provider.py` holds the `EmbeddingProvider` ABC and `FastEmbedProvider` (ONNX via
+fastembed, no PyTorch); `service.py` batches chunks per inference call.
+
+`embed_passages()` and `embed_query()` are **separate methods**, and that split is load-bearing.
+Several model families are asymmetric — E5 requires literal `query: `/`passage: ` prefixes, BGE
+v1.5 takes an instruction on the query side only — and feeding both sides the same shape costs
+retrieval quality with **no exception and no warning**. Keeping that inside the provider means the
+retrieval endpoint cannot forget it and a model-family change edits one class, not every call site.
+`_is_bge()` deliberately excludes BGE-M3, which is not instruction-tuned the way v1.5 is.
+
+The **model** is configuration (`EMBEDDING_MODEL`); the **dimension** is not.
+`document_chunks.embedding` is `vector(768)` fixed by migration `0014`, and pgvector columns are
+typed by width, so a model of a different width needs a migration *and* a full re-embed — vectors
+from two models do not share a space. Three guards, outermost first: `alembic check` fails if
+`settings.EMBEDDING_DIMENSIONS` and the migration drift apart; `FastEmbedProvider` probes the
+model's real output width at load and refuses to start on a mismatch (so it surfaces at worker boot,
+not as a wall of failed jobs); the column width itself is the backstop. See `KNOWN_DEBTS.md` #21.
+
+Because chunking is its own stage, a model swap re-runs **one worker** over existing
+`document_chunks` rows — it never re-chunks or re-extracts.
+
+The model is **baked into the image** (`Dockerfile` sets `FASTEMBED_CACHE_PATH` and pre-fetches the
+weights at build time), not downloaded at boot: a worker that fetches weights on first start fails
+closed on a network blip and is not reproducible.
+
+**Language gate**: normalization already detected a language, so `EmbeddingJobHandler` reads it and
+routes a non-English document to `SKIPPED_UNSUPPORTED_LANGUAGE` rather than embedding it. This is
+not a failure state and is never retried. An English tokenizer turns Devanagari into unknown tokens
+and emits vectors that match nothing — the document would sit in the index permanently unfindable
+with nothing to explain it. Same reasoning as the quality gate's `LOW_TEXT_DENSITY` check: a
+recorded gap is findable, a silent one is not. `EMBEDDING_SKIP_NON_ENGLISH=false` disables it when a
+multilingual model is configured — config, not code (`KNOWN_DEBTS.md` #20).
+
+Transient vs permanent follows the usual split: model load and memory pressure are transient (retry
+is likely to work); a dimension mismatch or a `CHUNKED` document with no chunks is permanent
+(retrying produces the identical error).
+
+**Retrieval must filter permissions in SQL**, not after it. `src/api/v1/ingestion.py`'s list/search
+endpoints currently filter in Python after the query returns — do not copy that pattern here. A
+RESTRICTED chunk filtered post-hoc still consumes a top-k slot and pushes out a result the user was
+allowed to see. The predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`; the shape is
+pinned by `tests/integration/test_vector_search.py`.
 
 ### Storage: 4-bucket + repository abstraction
 
@@ -273,7 +332,15 @@ derived from a file and nothing read it. Access control is now owner-scoped — 
 `documents.document_date` (the date printed on the document, as distinct from `created_at` which
 is upload time — without it a 2019 policy ingested today looks current). `0013_document_chunks`
 adds the `document_chunks` table plus the `CHUNKED`/`CHUNKING_FAILED` statuses and the `CHUNK` job
-stage. Both leave `chk_audit_log_event_type` widened on downgrade rather than narrowing it:
+stage. `0014_embeddings` runs `CREATE EXTENSION IF NOT EXISTS vector`, adds
+`document_chunks.embedding vector(768)` and its HNSW index (`m=16`, `ef_construction=64`, cosine),
+and adds the `EMBED` stage with `EMBEDDING_FAILED`/`SKIPPED_UNSUPPORTED_LANGUAGE`. The index is
+built **normally, not CONCURRENTLY** — `CREATE INDEX CONCURRENTLY` cannot run inside a transaction
+and Alembic wraps migrations in one; the table is near-empty at migration time so a blocking build
+is instant, but a later rebuild on a populated table must use CONCURRENTLY or it locks out writes
+for the duration. Its `downgrade()` resets `LIVE` documents to `CHUNKED` (with the column gone a
+LIVE document has no vectors and is not searchable, so leaving it LIVE would be a lie) and leaves
+the `vector` extension installed, since other objects may depend on it. Both leave `chk_audit_log_event_type` widened on downgrade rather than narrowing it:
 Postgres validates existing rows when creating a CHECK, so narrowing would mean deleting audit
 rows, and migration `0003` makes that log append-only precisely so it cannot be rewritten. One
 spare value in a typo guard is cheaper than a hole in the audit trail.
@@ -339,3 +406,15 @@ rationale before "fixing" them:
 - There is **no OCR** — deliberate for the same reason (no scanned documents expected), with the
   normalization quality gate's `LOW_TEXT_DENSITY` check as the explicit safety net rather than a
   silent assumption. See `KNOWN_DEBTS.md` #14 for the trigger to revisit.
+- Vectors live in **Postgres via pgvector**, not Qdrant/Pinecone/Weaviate — a passage's text, its
+  citation metadata and its embedding are one row, so retrieval returns the answer, what to cite,
+  and the permission check in a single query. A separate vector store would mean resolving ids
+  across two systems and applying permissions *after* top-k was chosen. The Postgres image is
+  therefore `pgvector/pgvector:pg16`, not stock `postgres:16-alpine`.
+- Embeddings are **English-only** (`BAAI/bge-base-en-v1.5`, 768-dim, CPU/ONNX, baked into the
+  image). Non-English documents are recorded as `SKIPPED_UNSUPPORTED_LANGUAGE` rather than embedded
+  as noise — ~10–15% of A-PAG's corpus is Hindi, and that backlog is deliberately queryable. See
+  `KNOWN_DEBTS.md` #20.
+- **Ingestion ends at Stage 7.** There is no retrieval endpoint — vectors are stored and indexed but
+  nothing queries them yet. When adding one, filter permissions in SQL (see the Embedding section);
+  do not copy the post-filtering in `src/api/v1/ingestion.py`.

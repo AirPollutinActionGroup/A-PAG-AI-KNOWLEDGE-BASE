@@ -13,7 +13,14 @@ class DocumentStatus(str, Enum):
     EXTRACTION_FAILED / NORMALIZATION_FAILED / CHUNKING_FAILED as the failure branches.
 
     CHUNKED means the document has been split into retrievable passages in `document_chunks`
-    and is ready to be embedded.
+    and is ready to be embedded. LIVE is the terminal success state: every passage carries a
+    vector and the document is searchable.
+
+    SKIPPED_UNSUPPORTED_LANGUAGE means the document was chunked but deliberately not embedded,
+    because the configured model cannot represent its language. It is not a failure — the
+    document is intact and re-runnable once a model that covers it is configured. It exists so
+    that gap is queryable rather than silent: embedding such a document anyway produces vectors
+    that match nothing, leaving it invisible in search with no signal that it is missing.
 
     There is no separate classification state: a document's sensitivity tier is chosen by the
     uploader at upload time (defaulting to PUBLIC) and can be changed afterwards through the
@@ -31,6 +38,8 @@ class DocumentStatus(str, Enum):
     AWAITING_CLASSIFICATION = "AWAITING_CLASSIFICATION"
     CHUNKED = "CHUNKED"
     CHUNKING_FAILED = "CHUNKING_FAILED"
+    EMBEDDING_FAILED = "EMBEDDING_FAILED"
+    SKIPPED_UNSUPPORTED_LANGUAGE = "SKIPPED_UNSUPPORTED_LANGUAGE"
     DUPLICATE = "DUPLICATE"
     LIVE = "LIVE"
     SUPERSEDED = "SUPERSEDED"
@@ -62,6 +71,7 @@ class JobStage(str, Enum):
     EXTRACT = "EXTRACT"
     NORMALIZE = "NORMALIZE"
     CHUNK = "CHUNK"
+    EMBED = "EMBED"
 
 
 class JobStatus(str, Enum):
@@ -94,3 +104,6 @@ class AuditEventType(str, Enum):
     DOCUMENT_RECLASSIFIED = "DOCUMENT_RECLASSIFIED"
     CHUNKING_COMPLETED = "CHUNKING_COMPLETED"
     CHUNKING_FAILED = "CHUNKING_FAILED"
+    EMBEDDING_COMPLETED = "EMBEDDING_COMPLETED"
+    EMBEDDING_FAILED = "EMBEDDING_FAILED"
+    EMBEDDING_SKIPPED = "EMBEDDING_SKIPPED"

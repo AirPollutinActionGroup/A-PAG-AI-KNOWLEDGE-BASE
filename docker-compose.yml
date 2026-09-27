@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: apag-postgres
     ports:
       - "5432:5432"
@@ -171,9 +171,52 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  embedding-worker:
+    build: .
+    container_name: apag-embedding-worker
+    # Memory ceiling so a large document's cost is attributable and contained. pdfplumber holds
+    # page objects for the document it parses (a real 1,351-page PDF peaked at 3.6GB), and an
+    # unbounded container takes the whole host down with it instead of failing alone. Raise this
+    # together with MAX_PDF_PAGES, never separately.
+    mem_limit: 3g
+    command: python worker_main.py
+    environment:
+      WORKER_STAGE: EMBED
+      DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: apag_knowledge_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: apag_secure_password_2026
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: apag_admin
+      MINIO_SECRET_KEY: apag_secure_password_2026
+      MINIO_SECURE: "false"
+      WORKER_POLL_INTERVAL_SECONDS: "1.0"
+      SCAN_WORKER_LEASE_SECONDS: "60"
+      WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test $$(( $$(date +%s) - $$(stat -c %Y /tmp/worker_alive) )) -lt 30"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
   extraction-worker:
     build: .
     container_name: apag-extraction-worker
+    # Memory ceiling so a large document's cost is attributable and contained. pdfplumber holds
+    # page objects for the document it parses (a real 1,351-page PDF peaked at 3.6GB), and an
+    # unbounded container takes the whole host down with it instead of failing alone. Raise this
+    # together with MAX_PDF_PAGES, never separately.
+    mem_limit: 4g
     command: python worker_main.py
     environment:
       WORKER_STAGE: EXTRACT
