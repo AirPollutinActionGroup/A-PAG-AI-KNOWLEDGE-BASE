@@ -325,8 +325,8 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 ### 18. Completed jobs are never cleaned up
 - **Status**: Invisible today, will not stay that way.
 - **Context**: `BaseWorker`'s reaper handles stuck `RUNNING` leases, but nothing ever removes
-  `COMPLETED` rows from `jobs`. Every document now produces four of them (SCAN, EXTRACT,
-  NORMALIZE, CHUNK), so the table grows at four rows per document forever.
+  `COMPLETED` rows from `jobs`. Every document now produces five of them (SCAN, EXTRACT,
+  NORMALIZE, CHUNK, EMBED), so the table grows at five rows per document forever.
 - **Why it doesn't hurt yet**: a few hundred documents is a few thousand rows. Postgres does not
   notice.
 - **Trigger to address**: the first bulk archive ingest. At the ~5GB corpus A-PAG expects, this
@@ -356,3 +356,113 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   `ExtractedTable` at extraction time, which makes attribution exact for every format. That is a
   change to a shipped stage and a re-extraction of the corpus, so it is worth doing once, with
   the embedding work, rather than twice.
+
+### 20. The embedding model is English-only, and ~10–15% of the corpus is not
+- **Status**: Deliberate, with the gap recorded rather than hidden.
+- **Context**: `BAAI/bge-base-en-v1.5` is an English model. `EmbeddingJobHandler` reads the
+  language normalization already detected and routes a non-English document to
+  `SKIPPED_UNSUPPORTED_LANGUAGE` instead of embedding it.
+- **Why skipping beats embedding anyway**: an English tokenizer turns Devanagari into unknown
+  tokens and emits a vector that matches nothing. The document would be *in* the index and
+  permanently unfindable, with no error anywhere to explain it. The same reasoning as the quality
+  gate's `LOW_TEXT_DENSITY` check: a recorded gap can be found and fixed, a silent one cannot.
+- **Current behaviour**: the skip is an audit row (`EMBEDDING_SKIPPED`) carrying the detected
+  language, so "which documents are waiting on a multilingual model" has a SQL answer.
+- **Trigger to address**: when Hindi retrieval is actually required. The change is configuration
+  plus a migration — `EMBEDDING_MODEL` to a multilingual model, `EMBEDDING_SKIP_NON_ENGLISH=false`,
+  and, if the new model's width differs, a new `vector(N)` column and a full re-embed. BGE-M3
+  (1024-dim) is the standing candidate. Because chunking is a separate stage, a re-embed re-runs
+  one worker over existing `document_chunks` rows; it does not re-chunk or re-extract anything.
+
+### 21. Embedding dimension is fixed in a migration, not configuration
+- **Status**: Structural, and correct — but worth knowing before a model swap is proposed.
+- **Context**: `document_chunks.embedding` is `vector(768)`, fixed by migration `0014`.
+  `settings.EMBEDDING_DIMENSIONS` must agree with it, and `alembic check` fails the build if the
+  ORM and the migration drift apart.
+- **Why it is not a tuning knob**: pgvector columns are typed by width. Changing
+  `EMBEDDING_MODEL` to a model of a different dimension without a migration makes every insert
+  fail at the database; with a migration, every existing vector is meaningless and must be
+  recomputed, because vectors from two different models do not share a space.
+- **Defence in depth**: `FastEmbedProvider` probes the model's real output width at load and
+  refuses to start if it disagrees with the configured value, so the mismatch surfaces at worker
+  boot rather than as a wall of failed jobs. The column width is the backstop if that is bypassed
+  (`tests/integration/test_vector_search.py::test_wrong_dimension_is_rejected_by_the_database`).
+- **Trigger to address**: none — this is the intended design. Listed so the cost of a model change
+  is understood as "migration + full re-embed", not "edit `.env`".
+
+### 22. Documents that predate a stage are stranded until backfilled
+- **Status**: Understood, with a tool for it; not automatic.
+- **Context**: each stage enqueues the next stage's job on success. A document that came to rest
+  before a stage existed therefore has no job for it and never will. There are currently 26
+  documents at `AWAITING_CLASSIFICATION` from before extraction/normalization shipped; their
+  `CHUNK` jobs fail with `NoSuchKey` because no `normalized/{id}.json` was ever written for them.
+- **Why the failure is correct**: the handler treats a missing artifact as transient (storage
+  errors usually are), retries three times, then leaves the job `FAILED` with the document's
+  status untouched. Nothing is corrupted; the work simply cannot proceed from where it stopped.
+- **Current behaviour**: `backfill_jobs.py` enqueues missing jobs for documents in a given state
+  and is idempotent. It cannot fix the 26 above on its own, because they need re-running from
+  `EXTRACT` while sitting in a status `ExtractionJobHandler` does not accept — that needs a status
+  reset first.
+- **Trigger to address**: before the bulk archive ingest, since the same situation recurs at every
+  future stage boundary. The durable fix is a small reconciliation command that maps a document's
+  status to the stage that should own it next and re-queues from there.
+
+### 23. ✅ A slow job outlived its lease and burned retries while succeeding (Closed)
+- **Found**: reprocessing A-PAG's own corpus. A 21MB / 1,351-page PDF took **139s** to extract
+  against a 60s lease; embedding its ~2,400 chunks took ~9 minutes. The reaper returned both jobs
+  to `PENDING` **and incremented `retry_count`** while the worker was succeeding. At
+  `MAX_JOB_RETRIES=3`, any document slow enough to be reaped three times would be marked `FAILED`
+  with the work still in flight — and with more than one worker per stage, the re-queued job would
+  be claimed and processed concurrently by a second worker.
+- **Root cause**: the reaper recovers jobs whose worker died holding a lease, but infers death from
+  an expired lease. That silently assumes every job finishes inside one lease period, while
+  processing time is a function of document size.
+- **Fix**: `_LeaseRenewer` in `src/workers/base_worker.py` renews the lease from a daemon thread
+  while `process_job()` runs, at `lease_seconds / 3`. Renewal is conditional on
+  `status = 'RUNNING' AND worker_id = :worker_id`, so a worker that *was* reaped and replaced
+  cannot steal the lease back from its new owner. A lease that stops moving now means the worker
+  stopped — the distinction the reaper was always trying to make.
+- **Regression tests**: `tests/unit/test_worker_lease_renewal.py` — the lease advances during a
+  long job, a slow job is not reaped and burns no retry, renewal stops when the job ends, and a
+  genuinely abandoned lease is still recovered. The first two fail against the pre-fix code.
+
+### 24. Extraction memory scales with document size
+- **Status**: Bounded, not eliminated.
+- **Context**: pdfplumber holds page objects for the document it parses. The 1,351-page PDF above
+  peaked at **3.6GB RSS**. The 100MB upload cap bounds the *compressed file*, and says nothing
+  about what parsing it costs — that file was 21MB.
+- **Why it matters**: the Azure VM has 3.8GB of RAM in total, shared with Postgres, MinIO, the API
+  and five workers. An OOM kill is **not** a `PermanentProcessingError`: the container dies, the
+  lease lapses, the reaper re-queues the job, and the next worker OOMs on the same document —
+  an infinite crash loop that also takes down whatever shares the host.
+- **What was done**: `MAX_PDF_PAGES` moved from a module constant to `settings`, so a deployment
+  can lower the ceiling without a code change (prod sets **600**); `mem_limit` added to the
+  extraction and embedding containers in both compose files, so the cost is attributable and
+  contained rather than host-wide. Rejecting a document with `PAGE_LIMIT_EXCEEDED` is strictly
+  better than the crash loop.
+- **Still open**: the relationship between page count and memory is empirical (~2.7MB/page on one
+  sample), not enforced. A pathological 600-page PDF could still exceed the limit. The durable fix
+  is streaming extraction page-by-page instead of holding the whole document; the trigger is the
+  first `PAGE_LIMIT_EXCEEDED` rejection of a document A-PAG actually needs.
+
+### 25. ✅ The container healthcheck could not tell a long job from a dead worker (Closed)
+- **Found**: alongside #23. `apag-extraction-worker` reported `unhealthy` for the entire 139s it
+  was working correctly, because the heartbeat file was only touched in the **poll loop**, which
+  does not run during a single long `process_job()` call.
+- **Why it mattered**: under restart-on-unhealthy, the worker doing the most expensive job in the
+  queue is the one most likely to be killed — and killed repeatedly, since the job is re-queued
+  each time. It also trains whoever is watching to ignore `unhealthy`.
+- **Fix**: `_LeaseRenewer` touches the heartbeat on the same cycle as the lease renewal, so
+  liveness is reported from inside the work rather than only between units of work.
+
+### 26. ✅ Raw SQL bound `uuid.UUID` directly, which SQLite refuses (Closed)
+- **Found**: while writing the tests for #23. `text()` carries no type information, so SQLAlchemy
+  passes the value to the driver untouched — and sqlite3 rejects a `uuid.UUID` with "type 'UUID'
+  is not supported". The two backends also disagree on spelling: SQLAlchemy's `Uuid` type stores
+  native `uuid` on Postgres but **dash-less 32-character hex** on SQLite, so the obvious `str(id)`
+  workaround matches zero rows there — and an `UPDATE` affecting zero rows raises nothing.
+- **Impact**: `_mark_job_completed`, `_mark_job_failed` and the retry path were unreachable from
+  the SQLite-backed unit tests. Production was unaffected (Postgres), but the paths that decide
+  whether a job is retried or condemned had no unit coverage.
+- **Fix**: `_job_id_param()` renders the id per dialect, so one spelling works on both and those
+  paths are now exercisable in unit tests.

@@ -2,13 +2,14 @@
 
 import logging
 import signal
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -42,6 +43,105 @@ class JobItem:
         self.lease_expires_at = lease_expires_at
 
 
+class _LeaseRenewer:
+    """Keeps a claimed job's lease alive while the job is genuinely still being worked on.
+
+    The reaper exists to recover jobs whose worker died holding a lease. It cannot observe that
+    directly, so it infers death from an expired lease — which silently assumes every job finishes
+    inside one lease period. Processing time is a function of document size, so that assumption
+    breaks on exactly the documents that matter: a 1,351-page PDF took 139s to extract against a
+    60s lease, and embedding its ~2,400 chunks took longer still. The reaper returned both jobs to
+    PENDING *and incremented retry_count* while the worker was succeeding, so a large enough
+    document would exhaust its retries and be marked FAILED with the work still in flight.
+
+    Renewing from inside the work restores the distinction the reaper is actually trying to make:
+    a lease that stops being renewed means the worker stopped, not that the job is slow.
+
+    The renewal is deliberately conditional on `status = 'RUNNING' AND worker_id = :worker_id`. If
+    this job was already reaped and re-claimed by someone else, the UPDATE matches nothing and this
+    worker does not steal the lease back from its new owner.
+    """
+
+    def __init__(self, worker: "BaseWorker", job: "JobItem"):
+        self._worker = worker
+        self._job = job
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _renew_once(self) -> bool:
+        with self._worker.session_factory() as session:
+            bind = session.get_bind()
+            if bind and bind.dialect.name == "postgresql":
+                expr = "NOW() + (INTERVAL '1 second' * :lease_seconds)"
+            else:
+                expr = "datetime(CURRENT_TIMESTAMP, '+' || :lease_seconds || ' seconds')"
+            result = session.execute(
+                text(f"""
+                    UPDATE jobs
+                    SET lease_expires_at = {expr}
+                    WHERE job_id = :job_id
+                      AND status = 'RUNNING'
+                      AND worker_id = :worker_id
+                """),
+                {
+                    "job_id": _job_id_param(session, self._job.job_id),
+                    "worker_id": self._worker.worker_id,
+                    "lease_seconds": self._worker.lease_seconds,
+                },
+            )
+            session.commit()
+            return result.rowcount > 0
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._worker.lease_renew_interval):
+            # The heartbeat file is touched here as well as in the poll loop. Touching it only
+            # between jobs makes a container report unhealthy for the whole duration of its
+            # longest job — which, under restart-on-unhealthy, kills the worker doing the most
+            # expensive work in the queue, repeatedly.
+            self._worker.touch_heartbeat()
+            try:
+                if not self._renew_once():
+                    # Lost the lease: reaped and re-claimed elsewhere, or the job already
+                    # reached a terminal state. Either way this thread must stop renewing.
+                    logger.warning(
+                        "Lease no longer held; stopping renewal: stage=%s job_id=%s",
+                        self._worker.stage, self._job.job_id,
+                    )
+                    return
+            except Exception as e:
+                # A transient DB blip must not kill the job that is running fine. If the database
+                # is genuinely gone the job will fail on its own terms.
+                logger.warning("Lease renewal failed (will retry): %s", e)
+
+    def __enter__(self) -> "Self":
+        if self._worker.lease_renew_interval > 0:
+            self._thread = threading.Thread(
+                target=self._loop, name=f"lease-renew-{self._job.job_id}", daemon=True
+            )
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5.0)
+
+
+def _job_id_param(session: Session, job_id: uuid.UUID) -> str:
+    """Renders a job id for a raw `text()` statement, per dialect.
+
+    `text()` carries no type information, so SQLAlchemy hands the value to the driver untouched —
+    and sqlite3 refuses a `uuid.UUID` outright ("type 'UUID' is not supported"). The two backends
+    also disagree on spelling: SQLAlchemy's `Uuid` type stores native `uuid` on Postgres but
+    dash-less 32-character hex on SQLite, so a dashed string silently matches no rows there. That
+    failure mode is the dangerous one — an `UPDATE` affecting zero rows raises nothing.
+    """
+    bind = session.get_bind()
+    if bind and bind.dialect.name == "postgresql":
+        return str(job_id)
+    return job_id.hex
+
+
 class BaseWorker(ABC):
     """Abstract base worker handling SKIP LOCKED database queue consumption, retries, and reaper."""
 
@@ -62,6 +162,10 @@ class BaseWorker(ABC):
         self.session_factory = session_factory or SessionLocal
         self.poll_interval = poll_interval or settings.WORKER_POLL_INTERVAL_SECONDS
         self.lease_seconds = lease_seconds or settings.SCAN_WORKER_LEASE_SECONDS
+        # Renew well inside the lease so a single missed renewal (a slow query, a brief DB blip)
+        # does not expire it. A third of the lease gives two chances to recover before the reaper
+        # would act.
+        self.lease_renew_interval = max(1.0, self.lease_seconds / 3.0)
         self.max_retries = max_retries or settings.MAX_JOB_RETRIES
         self.backoff_base_seconds = backoff_base_seconds or settings.RETRY_BACKOFF_BASE_SECONDS
         self.backoff_max_seconds = backoff_max_seconds or settings.RETRY_BACKOFF_MAX_SECONDS
@@ -248,7 +352,7 @@ class BaseWorker(ABC):
                     lease_expires_at = NULL
                 WHERE job_id = :job_id
             """)
-            session.execute(sql, {"job_id": job.job_id})
+            session.execute(sql, {"job_id": _job_id_param(session, job.job_id)})
             session.commit()
         logger.info("Job completed: stage=%s job_id=%s doc_id=%s", self.stage, job.job_id, job.document_id)
 
@@ -266,7 +370,7 @@ class BaseWorker(ABC):
                     error_message = :error_message
                 WHERE job_id = :job_id
             """)
-            session.execute(sql, {"job_id": job.job_id, "error_message": err_msg})
+            session.execute(sql, {"job_id": _job_id_param(session, job.job_id), "error_message": err_msg})
             session.commit()
         logger.warning("Job marked FAILED: stage=%s job_id=%s error=%s", self.stage, job.job_id, err_msg)
 
@@ -296,7 +400,7 @@ class BaseWorker(ABC):
                     WHERE job_id = :job_id
                 """)
                 session.execute(sql, {
-                    "job_id": job.job_id,
+                    "job_id": _job_id_param(session, job.job_id),
                     "backoff_sec": backoff_sec,
                     "error_message": err_msg,
                 })
@@ -309,9 +413,14 @@ class BaseWorker(ABC):
             self._mark_job_failed(job, f"Max retries ({self.max_retries}) exceeded: {err_msg}")
 
     def execute_job(self, job: JobItem) -> None:
-        """Executes a claimed job, handling state transitions and backoff retries."""
+        """Executes a claimed job, handling state transitions and backoff retries.
+
+        The job runs inside a `_LeaseRenewer` so that processing time longer than one lease period
+        is not mistaken by the reaper for a dead worker — see that class for why that mattered.
+        """
         try:
-            self.process_job(job)
+            with _LeaseRenewer(self, job):
+                self.process_job(job)
             self._mark_job_completed(job)
         except TransientProcessingError as e:
             logger.warning("Job %s transient failure: %s", job.job_id, e)

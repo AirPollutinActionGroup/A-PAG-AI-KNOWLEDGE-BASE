@@ -13,8 +13,9 @@ from typing import Any
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from src.db.enums import AuditEventType
+from src.db.enums import AuditEventType, JobStage, JobStatus
 from src.db.models import DocumentChunk as ChunkORM
+from src.db.models import Job as JobORM
 from src.modules.audit.service import AuditService
 from src.modules.document_pipeline.chunking.models import ChunkingResult
 from src.modules.document_pipeline.chunking.service import ChunkingService
@@ -172,6 +173,7 @@ class ChunkingJobHandler:
 
         doc.status = DocumentStatus.CHUNKED
         self.repo.update_document(doc)
+        self._enqueue_embed(document_id)
 
         self._audit(document_id, AuditEventType.CHUNKING_COMPLETED, details={
             "chunk_count": result.chunk_count,
@@ -190,6 +192,20 @@ class ChunkingJobHandler:
             message=f"Document split into {result.chunk_count} passages.",
             chunk_count=result.chunk_count,
         )
+
+    def _enqueue_embed(self, document_id: uuid.UUID) -> None:
+        """Hands off to the embedding stage, mirroring how normalization hands off to this one."""
+        if self._db is None:
+            return
+        self._db.add(
+            JobORM(
+                job_id=uuid.uuid4(),
+                document_id=document_id,
+                stage=JobStage.EMBED.value,
+                status=JobStatus.PENDING.value,
+            )
+        )
+        self._db.commit()
 
     def _persist(self, document_id: uuid.UUID, result: ChunkingResult) -> None:
         """Replaces this document's chunks in one transaction.
