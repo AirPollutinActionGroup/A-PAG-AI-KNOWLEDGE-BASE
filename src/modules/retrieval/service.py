@@ -2,57 +2,38 @@
 
 **The permission predicate lives in the WHERE clause, and that is the whole design.**
 
-`src/api/v1/ingestion.py`'s list/search endpoints filter in Python *after* SQL returns. For
-paginated document listing that is untidy — restricted rows consume page slots and `total` leaks
-their count. For top-k retrieval it is a correctness failure: a RESTRICTED chunk filtered
-afterwards has already won its slot, so a `LIMIT 5` can return four results, or none, and the user
-has no way to tell whether the corpus is thin or the answer was withheld. Filtering before
-`ORDER BY`/`LIMIT` means top-k is computed over exactly the rows the caller may see.
+`src/api/v1/ingestion.py`'s single-document endpoints check visibility on a document already in
+hand, which is fine. Filtering a *result set* after the query is not: for paginated listing it lets
+invisible rows consume page slots and leaks their count via `total`, and for top-k retrieval it is
+a correctness failure — a RESTRICTED passage removed after ranking has already taken its slot, so
+`limit=5` returns four results, or none, and the caller cannot distinguish a thin corpus from a
+withheld answer.
 
-`tests/integration/test_vector_search.py` pinned this shape before the endpoint existed.
+The predicate itself comes from `src/modules/auth/access.py` rather than being written here, so
+this query and the document list/search cannot drift apart on what "visible" means.
+`tests/integration/test_vector_search.py` pinned the shape before the endpoint existed;
+`test_retrieval_service.py` exercises the shipped query.
 
-The query is embedded with `embed_query()`, never `embed_passages()`. Several model families are
-asymmetric, and using the passage form for a query degrades retrieval with no error raised — see
-the provider's module docstring.
+The question is embedded with `embed_query()`, never `embed_passages()`. Several model families
+are asymmetric, and using the passage form for a query degrades retrieval with no error raised —
+see the provider's module docstring.
 """
 
 import logging
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.db.enums import Classification, UserRole
+from src.db.models import Document as DocumentORM
+from src.db.models import DocumentChunk as ChunkORM
+from src.modules.auth.access import is_admin, visible_documents_clause
 from src.modules.document_pipeline.embedding.provider import EmbeddingProvider
 from src.modules.retrieval.models import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
-# `<=>` is pgvector's cosine *distance*, so the HNSW index built with `vector_cosine_ops` is the
-# one that serves this ordering. Using a different operator here would silently fall back to a
-# sequential scan — correct results, but a full table scan per query.
-_SEARCH_SQL = text("""
-    SELECT
-        c.chunk_id,
-        c.document_id,
-        d.filename,
-        c.text,
-        c.page_number,
-        c.section_heading,
-        c.is_table,
-        1 - (c.embedding <=> CAST(:query_vector AS vector)) AS score
-    FROM document_chunks c
-    JOIN documents d ON d.document_id = c.document_id
-    WHERE c.embedding IS NOT NULL
-      AND d.deleted_at IS NULL
-      AND (
-            d.classification <> :restricted
-         OR d.uploader_user_id = :user_id
-         OR :is_admin
-      )
-    ORDER BY c.embedding <=> CAST(:query_vector AS vector)
-    LIMIT :limit
-""")
+__all__ = ["RetrievalService", "is_admin"]
 
 
 class RetrievalService:
@@ -77,26 +58,38 @@ class RetrievalService:
         """Returns the `limit` passages nearest to `query` that this user is allowed to see."""
         vector = self._provider.embed_query(query)
 
-        rows = db.execute(
-            _SEARCH_SQL,
-            {
-                # pgvector accepts the literal text form of a vector; `str(list[float])` is
-                # already `[0.1, 0.2, ...]`, which is exactly that syntax.
-                "query_vector": str(vector),
-                "restricted": Classification.RESTRICTED.value,
-                "user_id": user_id,
-                "is_admin": is_admin,
-                "limit": limit,
-            },
-        ).mappings().all()
+        # `cosine_distance` emits pgvector's `<=>`, which is the operator the HNSW index was built
+        # for (`vector_cosine_ops`). Any other distance function here would still return correct
+        # results, but silently as a sequential scan over every chunk in the corpus.
+        distance = ChunkORM.embedding.cosine_distance(vector)
+
+        stmt = (
+            select(
+                ChunkORM.chunk_id,
+                ChunkORM.document_id,
+                DocumentORM.filename,
+                ChunkORM.text,
+                ChunkORM.page_number,
+                ChunkORM.section_heading,
+                ChunkORM.is_table,
+                # Callers expect a score where bigger is better; `<=>` is a distance, where
+                # smaller is. Returning it raw would invert every caller's reading of a result.
+                (1 - distance).label("score"),
+            )
+            .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
+            .where(
+                ChunkORM.embedding.is_not(None),
+                DocumentORM.deleted_at.is_(None),
+                visible_documents_clause(DocumentORM, user_id, viewer_is_admin=is_admin),
+            )
+            .order_by(distance)
+            .limit(limit)
+        )
+
+        rows = db.execute(stmt).mappings().all()
 
         logger.info(
             "Retrieval: results=%d limit=%d admin=%s model=%s",
             len(rows), limit, is_admin, self._provider.model_name,
         )
         return [RetrievedChunk(**row) for row in rows]
-
-
-def is_admin(role: str | None) -> bool:
-    """Single place the admin check is spelled, so retrieval and `_can_view()` cannot drift."""
-    return role == UserRole.ADMIN.value
