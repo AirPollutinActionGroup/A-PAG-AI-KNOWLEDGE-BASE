@@ -109,6 +109,37 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 
 ---
 
+## 🔎 Semantic Search
+
+`GET /api/v1/search?q=<question>&limit=10` returns the passages whose *meaning* is closest to the
+question, each with the citation recovered at extraction time:
+
+```json
+{
+  "query": "how is machine learning model training evaluated",
+  "count": 2,
+  "results": [
+    { "filename": "Hands-On-Machine-Learning.pdf", "page_number": 221,
+      "section_heading": "Chapter 4. Training Models", "is_table": false,
+      "score": 0.699, "text": "Chapter 4. Training Models  So far we have treated …" },
+    { "filename": "Hands-On-Machine-Learning.pdf", "page_number": 154,
+      "section_heading": "Better Evaluation Using Cross-Validation", "is_table": false,
+      "score": 0.689, "text": "One way to evaluate the decision tree model would be …" }
+  ]
+}
+```
+
+This is distinct from `GET /api/v1/documents/search`, which matches literal words in a document's
+**title, filename and description** — body text is not in that index. Semantic search matches
+meaning against the body, so a question finds the relevant clause without sharing a keyword with it.
+
+**Permissions are filtered in SQL, before `ORDER BY`/`LIMIT`.** This is a correctness requirement,
+not tidiness: a `RESTRICTED` passage removed *after* ranking has already won its slot, so a
+`limit=5` would quietly return four results — or none — with no way for the caller to tell whether
+the corpus is thin or an answer was withheld.
+
+---
+
 ## 💾 Storage Architecture
 
 | System | Role | Contents |
@@ -132,7 +163,6 @@ The Postgres image is therefore `pgvector/pgvector:pg16` rather than stock `post
 - **Single-Tenant Deployment**: Multi-organization partitioning is deferred to later milestones.
 - **No OCR**: Pipeline implements Stages 1–7 (quarantine → validation → promotion → text extraction → normalization → chunking → embedding). Text extraction is deliberate and non-ML — it reads structure each format already states rather than inferring it — and there is no OCR fallback, since this corpus is digitally authored, not scanned. A document with no real text layer is stopped at `NORMALIZATION_FAILED` (`LOW_TEXT_DENSITY`/`EMPTY_TEXT`) rather than silently indexed empty. See `KNOWN_DEBTS.md` #13–14.
 - **English-only embeddings**: `BAAI/bge-base-en-v1.5` is an English model, so a document normalization detected as non-English stops at `SKIPPED_UNSUPPORTED_LANGUAGE` instead of being embedded. This is not a failure — an English tokenizer turns Devanagari into unknown tokens and emits vectors that match nothing, which would leave the document sitting in the index invisible with no signal it is missing. Skipped documents are a queryable backlog for the multilingual phase (~10–15% of A-PAG's corpus is Hindi). Set `EMBEDDING_SKIP_NON_ENGLISH=false` once a multilingual model is configured.
-- **No retrieval endpoint yet**: vectors exist and are indexed, but nothing queries them — there is no `/search`. Ingestion is complete; the query layer is the next milestone.
 - **Vector width is fixed at migration time**: `EMBEDDING_DIMENSIONS` must match the migrated `vector(N)` column (`alembic check` enforces this). Swapping to a model of a different width is a migration **plus a full re-embed of the corpus**, not a config edit. Chunking is deliberately a separate stage so that re-embed never requires re-chunking.
 
 ### Supported upload formats
@@ -170,7 +200,7 @@ Not accepted, with the reason:
 | **Phase 6a** | Chunking (structure-aware, citation metadata) | ✅ Completed |
 | **Phase 6b** | Embedding & Vector Indexing (pgvector, self-hosted model) | ✅ Completed |
 | **Phase 7** | Permission Governance, Hard Pre-Filtering & RBAC | 📋 Planned |
-| **Phase 6c** | Retrieval endpoint (similarity search with SQL-level permission filtering) | 📋 Next |
+| **Phase 6c** | Retrieval endpoint (similarity search with SQL-level permission filtering) | ✅ Completed |
 | **Phase 8** | Text-to-SQL Engine & Sovereign RAG Query Layer | 📋 Planned |
 
 ---

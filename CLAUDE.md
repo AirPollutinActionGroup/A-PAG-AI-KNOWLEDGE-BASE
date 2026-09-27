@@ -8,9 +8,9 @@ A-PAG AI Knowledge Base: an async document ingestion pipeline (Python 3.12, Fast
 eventually feed a governed RAG platform (vector search over PDFs) plus a Text-to-SQL layer over
 PostgreSQL. **Currently implemented: Stages 1–7** (upload/quarantine → validation/threat scan →
 promotion to raw storage → text extraction → normalization/quality gate → chunking → embedding),
-plus JWT auth, multi-file upload, pagination, and full-text search on top of it. Vectors are stored
-and HNSW-indexed in Postgres via pgvector, but **no retrieval endpoint exists yet** — nothing
-queries them. Retrieval and Text-to-SQL are not yet built (see Roadmap in README.md).
+plus JWT auth, multi-file upload, pagination, full-text search, and **semantic search**
+(`GET /api/v1/search`) over the pgvector index. Text-to-SQL is not yet built (see Roadmap in
+README.md).
 
 ## Commands
 
@@ -226,6 +226,30 @@ RESTRICTED chunk filtered post-hoc still consumes a top-k slot and pushes out a 
 allowed to see. The predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`; the shape is
 pinned by `tests/integration/test_vector_search.py`.
 
+### Retrieval: one SQL statement, permissions inside it
+
+`src/modules/retrieval/` is the first thing that reads the vectors. `service.py` embeds the
+question with `embed_query()` (never `embed_passages()` — see the Embedding section) and ranks
+passages by pgvector's `<=>` cosine distance, which is the operator the HNSW index was built for;
+any other operator silently degrades to a sequential scan. The returned `score` is `1 - distance`,
+because returning a raw distance inverts every caller's idea of a good result.
+
+`src/api/v1/retrieval.py` exposes `GET /api/v1/search`. The provider is built once per process
+behind `get_retrieval_service()` — a FastAPI dependency rather than a module-level singleton, so
+tests can override it and so importing the module does not load weights. Note this makes the API
+process carry the model (~640MB resident) in addition to the embedding worker.
+
+**The permission predicate is in the `WHERE` clause, before `ORDER BY`/`LIMIT`, and that is the
+whole design.** `src/api/v1/ingestion.py`'s list/search endpoints filter in Python after SQL
+returns; for paginated listing that is untidy (restricted rows consume page slots, `total` leaks
+their count), but for top-k it is a correctness failure — a RESTRICTED chunk removed after ranking
+has already taken its slot, so `limit=5` returns four results, or none, and the caller cannot tell
+whether the corpus is thin or an answer was withheld. `is_admin()` is the one place the admin check
+is spelled, so retrieval and `_can_view()` cannot drift.
+
+Identity comes from `get_current_user`, never from the request — there is a test asserting a
+`user_id` query parameter is ignored.
+
 ### Storage: 4-bucket + repository abstraction
 
 - `src/storage/object_storage.py` defines `ObjectStorage` (abstract) with `LocalFileSystemStorage`
@@ -415,6 +439,6 @@ rationale before "fixing" them:
   image). Non-English documents are recorded as `SKIPPED_UNSUPPORTED_LANGUAGE` rather than embedded
   as noise — ~10–15% of A-PAG's corpus is Hindi, and that backlog is deliberately queryable. See
   `KNOWN_DEBTS.md` #20.
-- **Ingestion ends at Stage 7.** There is no retrieval endpoint — vectors are stored and indexed but
-  nothing queries them yet. When adding one, filter permissions in SQL (see the Embedding section);
-  do not copy the post-filtering in `src/api/v1/ingestion.py`.
+- **Retrieval filters permissions in SQL**, in `src/modules/retrieval/service.py`. Do not copy the
+  Python post-filtering in `src/api/v1/ingestion.py`'s list/search — for top-k that is a
+  correctness bug, not untidiness (see the Retrieval section).
