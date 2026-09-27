@@ -236,27 +236,50 @@ predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`. The shape is
 `tests/integration/test_vector_search.py` and exercised through the shipped query by
 `tests/integration/test_retrieval_service.py`.
 
-### Retrieval: one SQL statement, permissions inside it
+### Retrieval: hybrid, fused by rank, permissions inside every arm
 
-`src/modules/retrieval/` is the first thing that reads the vectors. `service.py` embeds the
-question with `embed_query()` (never `embed_passages()` — see the Embedding section) and ranks
-passages by pgvector's `<=>` cosine distance, which is the operator the HNSW index was built for;
-any other operator silently degrades to a sequential scan. The returned `score` is `1 - distance`,
-because returning a raw distance inverts every caller's idea of a good result.
+`src/modules/retrieval/` is what reads the index. Two arms run and their **ranks** are fused:
+
+- **semantic** — `embed_query()` (never `embed_passages()`, see the Embedding section), ranked by
+  pgvector's `<=>` cosine distance, the operator the HNSW index was built for. Any other distance
+  function returns correct results as a sequential scan over the whole corpus.
+- **lexical** — `websearch_to_tsquery` against `document_chunks.search_vector` (migration `0015`,
+  trigger-maintained, body weighted 'A' and section heading 'B'). `websearch_` rather than
+  `plainto_` because it accepts quoted phrases, which is exactly the query the lexical arm exists
+  to serve, and never raises on malformed input.
+
+They fail differently — an embedding blurs "Section 114" into whatever it is semantically near,
+while a word index is blind to paraphrase — which is why fusing beats either. Measured on this
+corpus: on 6 of 16 sample queries the lexical arm surfaced passages the vector arm never returned.
+For `cuDNN` the semantic arm's top hit was the book's *Index* page; the lexical arm found the
+actual content.
+
+**Scores are never compared, only ranks** (`fusion.py`). Cosine similarity is bounded and means
+"close in meaning"; `ts_rank` is unbounded, length-dependent, and means "these words match". The
+conversion factor between them does not exist, and any constant chosen for one corpus quietly
+stops being right for another. RRF (`k=60`, Cormack et al. 2009) uses `1/(k+rank)` per arm. The
+consequence to know: `RetrievedChunk.score` is **not a similarity** — it is ~0.016 for a single
+first place and is meaningless outside one result set. Read `semantic_rank`/`lexical_rank` instead,
+which is also what the UI shows.
+
+The join between arms is a **FULL OUTER JOIN**. An inner join would reduce hybrid to "what both
+arms agree on" — narrower than either arm alone, the opposite of the intent. Each arm fetches
+`candidate_pool(limit)` rows so fusion has material; ordering breaks ties on `chunk_id` so a
+repeated query returns a repeated order.
 
 `src/api/v1/retrieval.py` exposes `GET /api/v1/search`. The provider is built once per process
 behind `get_retrieval_service()` — a FastAPI dependency rather than a module-level singleton, so
 tests can override it and so importing the module does not load weights. Note this makes the API
 process carry the model (~640MB resident) in addition to the embedding worker.
 
-**The permission predicate is in the `WHERE` clause, before `ORDER BY`/`LIMIT`, and that is the
-whole design.** For top-k it is a correctness requirement, not tidiness — a RESTRICTED chunk
-removed after ranking has already taken its slot, so `limit=5` returns four results, or none, and
-the caller cannot tell whether the corpus is thin or an answer was withheld. The predicate comes
-from `src/modules/auth/access.py` rather than being written here, so this query and the document
-list/search cannot drift apart on what "visible" means. `cosine_distance()` emits pgvector's `<=>`,
-which is the operator the HNSW index was built for; any other distance function returns correct
-results as a sequential scan over the whole corpus.
+**The permission predicate is in the `WHERE` clause of *every arm*, before `ORDER BY`/`LIMIT`.**
+For top-k this is a correctness requirement, not tidiness — a RESTRICTED chunk removed after
+ranking has already taken its slot, so `limit=5` returns four results, or none, and the caller
+cannot tell whether the corpus is thin or an answer was withheld. Hybrid doubled the places it can
+leak from, and a predicate present in the semantic arm but missing from the lexical one would pass
+every test written for the former; `tests/integration/test_hybrid_search.py` covers both. The
+predicate comes from `src/modules/auth/access.py` rather than being written here, so retrieval and
+the document list/search cannot drift on what "visible" means.
 
 Identity comes from `get_current_user`, never from the request — there is a test asserting a
 `user_id` query parameter is ignored.
@@ -402,7 +425,15 @@ characters).
 
 - `tests/unit/` — use `InMemoryDocumentRepository`, no DB/Docker required; exercise pipeline logic
   and worker mechanics directly.
-- `tests/integration/` — real PostgreSQL via `testcontainers` (`tests/integration/conftest.py`;
+- `tests/integration/` — real PostgreSQL via `testcontainers`. The schema is built by running
+  **the real Alembic migrations**, not `Base.metadata.create_all()`: much of this schema's
+  behaviour is not in the ORM (the `audit_log` immutability triggers from `0003`, the partial
+  unique index that is the actual dedup guarantee from `0004`, the tsvector triggers from `0006`
+  and `0015`), and under `create_all()` none of it exists in the test database — a lexical-search
+  test then finds nothing because the trigger was never created, which looks exactly like a broken
+  query. `src/db/migrations/env.py` only falls back to `settings.DATABASE_URL` when the caller has
+  not set a URL, so the suite's migrations run against the throwaway container and not a real
+  database (`tests/integration/conftest.py`;
   the package must be installed — `uv sync` covers this, since it's declared in `pyproject.toml`,
   not just `requirements.txt`). Tests run inside a rolled-back transaction per test (`db_session`
   fixture), but some worker tests (`test_worker_execution.py`, `test_worker_skip_locked.py`)

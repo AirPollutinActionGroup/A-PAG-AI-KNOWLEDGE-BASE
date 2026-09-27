@@ -10,13 +10,15 @@ Provides:
 import logging
 import os
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.config import settings
-from src.db.models import Base
 
 
 def _get_postgres_url() -> tuple[str, any]:
@@ -78,12 +80,24 @@ def postgres_engine():
             f"build — see docker-compose.yml."
         )
 
-    # Create tables once for the test session.
+    # Build the schema by running the real migrations, not `Base.metadata.create_all()`.
+    #
+    # create_all() builds tables from ORM metadata, and a great deal of this schema's behaviour
+    # is not in the ORM: the audit_log immutability triggers (0003), the partial unique index
+    # that is the actual dedup guarantee (0004), the tsvector triggers (0006, 0015). Under
+    # create_all() every one of those is absent from the test database, so tests written against
+    # them pass or fail for the wrong reasons — a lexical-search test finds nothing because the
+    # trigger that populates search_vector was never created, which looks exactly like a broken
+    # query. Running migrations makes the test schema the schema that ships.
     #
     # Deliberately NOT caught-and-skipped: a schema that cannot be built is a broken schema, and
     # skipping here would turn a real failure into a silently green run with zero integration
     # coverage. Only genuine unreachability (handled above and in _get_postgres_url) skips.
-    Base.metadata.create_all(bind=engine)
+    alembic_cfg = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+    # Set explicitly so env.py does not fall back to settings.DATABASE_URL — that would run the
+    # migrations against the developer's real database instead of the throwaway container.
+    command.upgrade(alembic_cfg, "head")
 
     yield engine
 

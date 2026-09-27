@@ -17,6 +17,7 @@ from src.db.models import Document as DocumentORM
 from src.db.models import DocumentChunk as ChunkORM
 from src.db.models import User as UserORM
 from src.modules.document_pipeline.embedding.provider import EmbeddingProvider
+from src.modules.retrieval.fusion import RRF_K
 from src.modules.retrieval.service import RetrievalService
 
 DIM = 768
@@ -111,16 +112,20 @@ def test_results_are_ordered_by_similarity(db_session: Session, service):
     db_session.rollback()
 
 
-def test_score_is_a_similarity_not_a_distance(db_session: Session, service):
-    """`<=>` returns distance, where smaller is better. Returning it raw would invert every
-    caller's idea of a good result, silently."""
+def test_score_is_a_fusion_score_not_a_similarity(db_session: Session, service):
+    """Since hybrid search, `score` is the RRF sum, not cosine similarity — the two arms' scores
+    are never on a common scale, which is the whole reason ranks are fused instead. The number is
+    therefore small and only meaningful as an ordering; a first place from one arm is
+    `1 / (60 + 1)`. Pinned because a caller reading it as a 0-1 confidence would be badly
+    misled."""
     doc = _doc(db_session)
     _chunk(db_session, doc, _vec(1.0), "identical direction", 0)
     db_session.flush()
 
     hit = service.search(db_session, "q", user_id=_user(db_session), is_admin=False, limit=1)[0][0]
 
-    assert hit.score == pytest.approx(1.0, abs=1e-6)
+    assert hit.score == pytest.approx(1 / (RRF_K + 1), rel=1e-6)
+    assert hit.semantic_rank == 1, "rank is what actually says how well it did"
 
     db_session.rollback()
 
