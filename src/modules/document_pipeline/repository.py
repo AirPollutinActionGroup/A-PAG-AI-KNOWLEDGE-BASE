@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from src.db.enums import Classification, DocumentStatus
 from src.db.models import Document as DocumentORM
+from src.modules.auth.access import can_view, visible_documents_clause
 from src.modules.document_pipeline.models import Document as DocumentDTO
 
 logger = logging.getLogger(__name__)
@@ -36,12 +37,34 @@ class DocumentRepository(ABC):
         """Updates full document record."""
 
     @abstractmethod
-    def list_paginated(self, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
-        """Returns (page of documents, total count), newest first."""
+    def list_paginated(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+    ) -> tuple[list[DocumentDTO], int]:
+        """Returns (page of documents visible to this viewer, total visible count), newest first.
+
+        `viewer_id`/`viewer_is_admin` are **required keyword arguments with no default**. A default
+        would have to mean either "see everything" (a silent leak the first time a caller forgets)
+        or "see nothing" (a silent empty page). Requiring them turns forgetting into a TypeError at
+        the call site. The filter is applied in the query, so `total` counts only visible rows and
+        pagination is coherent."""
 
     @abstractmethod
-    def search(self, query: str, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
-        """Full-text search over title/filename/description. Returns (page, total count)."""
+    def search(
+        self,
+        query: str,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+    ) -> tuple[list[DocumentDTO], int]:
+        """Full-text search over title/filename/description, scoped to what this viewer may see.
+        Returns (page, total visible count). See `list_paginated` on the required arguments."""
 
     @abstractmethod
     def purge(self, doc_id: uuid.UUID) -> bool:
@@ -155,20 +178,39 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             return self._to_dto(orm)
         return self.create(doc)
 
-    def list_paginated(self, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
-        base = select(DocumentORM).where(DocumentORM.deleted_at.is_(None))
+    def list_paginated(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+    ) -> tuple[list[DocumentDTO], int]:
+        base = select(DocumentORM).where(
+            DocumentORM.deleted_at.is_(None),
+            visible_documents_clause(DocumentORM, viewer_id, viewer_is_admin=viewer_is_admin),
+        )
         total = self.db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
         stmt = base.order_by(DocumentORM.created_at.desc()).limit(limit).offset(offset)
         orms = self.db.execute(stmt).scalars().all()
         return [self._to_dto(o) for o in orms], total
 
-    def search(self, query: str, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
+    def search(
+        self,
+        query: str,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+    ) -> tuple[list[DocumentDTO], int]:
         from sqlalchemy import text
 
         ts_query = func.plainto_tsquery("english", query)
         base = select(DocumentORM).where(
             DocumentORM.deleted_at.is_(None),
             DocumentORM.search_vector.op("@@")(ts_query),
+            visible_documents_clause(DocumentORM, viewer_id, viewer_is_admin=viewer_is_admin),
         )
         total = self.db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
         stmt = (
@@ -233,23 +275,45 @@ class InMemoryDocumentRepository(DocumentRepository):
             self._storage[doc.id] = doc.model_copy(deep=True)
             return self._storage[doc.id]
 
-    def list_paginated(self, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
+    def list_paginated(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+    ) -> tuple[list[DocumentDTO], int]:
         with self._lock:
             docs = sorted(
-                (d for d in self._storage.values() if d.deleted_at is None),
+                (
+                    d for d in self._storage.values()
+                    if d.deleted_at is None
+                    and can_view(d.classification, d.owner_id, viewer_id,
+                                 viewer_is_admin=viewer_is_admin)
+                ),
                 key=lambda d: d.created_at, reverse=True,
             )
             total = len(docs)
             page = docs[offset : offset + limit]
             return [d.model_copy(deep=True) for d in page], total
 
-    def search(self, query: str, limit: int = 50, offset: int = 0) -> tuple[list[DocumentDTO], int]:
+    def search(
+        self,
+        query: str,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+    ) -> tuple[list[DocumentDTO], int]:
         q = query.lower()
         with self._lock:
             matches = [
                 d
                 for d in self._storage.values()
                 if d.deleted_at is None
+                and can_view(d.classification, d.owner_id, viewer_id,
+                             viewer_is_admin=viewer_is_admin)
                 and (
                     q in (d.title or "").lower()
                     or q in d.filename.lower()

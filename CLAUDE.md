@@ -220,11 +220,12 @@ Transient vs permanent follows the usual split: model load and memory pressure a
 is likely to work); a dimension mismatch or a `CHUNKED` document with no chunks is permanent
 (retrying produces the identical error).
 
-**Retrieval must filter permissions in SQL**, not after it. `src/api/v1/ingestion.py`'s list/search
-endpoints currently filter in Python after the query returns — do not copy that pattern here. A
-RESTRICTED chunk filtered post-hoc still consumes a top-k slot and pushes out a result the user was
-allowed to see. The predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`; the shape is
-pinned by `tests/integration/test_vector_search.py`.
+**Retrieval filters permissions in SQL**, via `visible_documents_clause()` from
+`src/modules/auth/access.py` — the same predicate list and search use. A RESTRICTED chunk filtered
+post-hoc still consumes a top-k slot and pushes out a result the user was allowed to see, so the
+predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`. The shape is pinned by
+`tests/integration/test_vector_search.py` and exercised through the shipped query by
+`tests/integration/test_retrieval_service.py`.
 
 ### Retrieval: one SQL statement, permissions inside it
 
@@ -240,12 +241,13 @@ tests can override it and so importing the module does not load weights. Note th
 process carry the model (~640MB resident) in addition to the embedding worker.
 
 **The permission predicate is in the `WHERE` clause, before `ORDER BY`/`LIMIT`, and that is the
-whole design.** `src/api/v1/ingestion.py`'s list/search endpoints filter in Python after SQL
-returns; for paginated listing that is untidy (restricted rows consume page slots, `total` leaks
-their count), but for top-k it is a correctness failure — a RESTRICTED chunk removed after ranking
-has already taken its slot, so `limit=5` returns four results, or none, and the caller cannot tell
-whether the corpus is thin or an answer was withheld. `is_admin()` is the one place the admin check
-is spelled, so retrieval and `_can_view()` cannot drift.
+whole design.** For top-k it is a correctness requirement, not tidiness — a RESTRICTED chunk
+removed after ranking has already taken its slot, so `limit=5` returns four results, or none, and
+the caller cannot tell whether the corpus is thin or an answer was withheld. The predicate comes
+from `src/modules/auth/access.py` rather than being written here, so this query and the document
+list/search cannot drift apart on what "visible" means. `cosine_distance()` emits pgvector's `<=>`,
+which is the operator the HNSW index was built for; any other distance function returns correct
+results as a sequential scan over the whole corpus.
 
 Identity comes from `get_current_user`, never from the request — there is a test asserting a
 `user_id` query parameter is ignored.
@@ -289,8 +291,14 @@ event_type)` row first, since jobs can be retried.
 - `src/api/v1/auth.py` exposes `/auth/register`, `/auth/login` (OAuth2 password flow: form fields
   `username`/`password`), `/auth/me`.
 - Access model: `Classification.PUBLIC` (org-wide) vs `RESTRICTED` (owner-scoped: visible to
-  `doc.owner_id == current_user.user_id`, plus any `ADMIN`) — enforced by `_can_view()` in
-  `src/api/v1/ingestion.py`, applied uniformly across status/list/search. Deliberately a 2-tier
+  `doc.owner_id == current_user.user_id`, plus any `ADMIN`). The rule lives **once**, in
+  `src/modules/auth/access.py`, in two forms that are proven equivalent by
+  `tests/unit/test_access_rule.py`: `can_view()` for a document already in hand (used by
+  `_can_view()` in `src/api/v1/ingestion.py` for single-document endpoints) and
+  `visible_documents_clause()` for queries. **Anything returning a result set must use the SQL
+  form** — list, search and retrieval all pass `viewer_id`/`viewer_is_admin` into the query.
+  Those are required keyword arguments with no default, so forgetting them is a `TypeError`
+  rather than a silent leak or a silent empty page (`KNOWN_DEBTS.md` #27). Deliberately a 2-tier
   model, not per-document ACLs — see `ARCHITECTURE.md` §6b before adding per-document or
   department-based sharing (a prior department-tier attempt shipped without departments ever
   being populated, making RESTRICTED admin-only in practice — see `KNOWN_DEBTS.md`).

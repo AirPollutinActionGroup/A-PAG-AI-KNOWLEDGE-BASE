@@ -466,3 +466,35 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   whether a job is retried or condemned had no unit coverage.
 - **Fix**: `_job_id_param()` renders the id per dialect, so one spelling works on both and those
   paths are now exercisable in unit tests.
+
+### 27. ✅ List and search filtered permissions in Python, after the query (Closed)
+- **Found**: while designing retrieval, which must not copy the pattern. `list_documents` and
+  `search_documents` fetched a page and then dropped the rows the caller could not see:
+  ```python
+  docs, total = repo.list_paginated(limit=limit, offset=offset)
+  visible = [d for d in docs if _can_view(d, current_user)]
+  ```
+- **Three separate consequences**:
+  1. `total` was the **unfiltered** count and was returned to the client, disclosing how many
+     restricted documents exist. Verified against the live corpus: a user owning nothing saw
+     `total=63` against 59 visible documents — the difference being exactly the restricted count.
+  2. Invisible rows **consumed slots** in the page, so `limit=10` could return three documents
+     while visible ones waited on the next page.
+  3. `offset` counted rows the caller could not see, so paging forward skipped visible documents.
+- **Fix**: the predicate moved into the query. `list_paginated()` and `search()` now take
+  `viewer_id` and `viewer_is_admin` as **required keyword arguments with no default** — a default
+  would have to mean either "see everything" (a silent leak the first time someone forgets) or
+  "see nothing" (a silent empty page), so forgetting is now a `TypeError` at the call site.
+- **The rule was also spelled three times** — `_can_view()`, the list comprehensions, and
+  retrieval's hand-written SQL — which is how a policy change lands in one place and not the
+  others. `src/modules/auth/access.py` now holds it once, in a Python form and a SQL form, and
+  `tests/unit/test_access_rule.py` enumerates all 24 combinations and requires the two to agree.
+  Two disagreements that the equivalence tests forced out: SQL `classification <> 'RESTRICTED'`
+  evaluates to NULL for a NULL classification and would have hidden the row (fixed with
+  `IS DISTINCT FROM`), and an anonymous viewer would have emitted `uploader_user_id = NULL`.
+- **Regression tests**: `tests/unit/test_list_search_permissions.py` — 5 of its 9 tests fail
+  against the pre-fix code, one per symptom above.
+- **Still open**: chunk-level full-text search does not exist (`document_chunks` has no
+  `search_vector`), so hybrid lexical+vector retrieval is not possible yet. `ts_rank` scores are
+  unnormalised, so fusing them with vector scores would need Reciprocal Rank Fusion rather than
+  score addition.

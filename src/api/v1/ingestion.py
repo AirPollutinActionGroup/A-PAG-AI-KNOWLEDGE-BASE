@@ -28,6 +28,7 @@ from src.db.enums import AuditEventType, UserRole
 from src.db.models import AuditLog as AuditORM
 from src.db.models import User
 from src.modules.audit.service import AuditService
+from src.modules.auth.access import can_view, is_admin
 from src.modules.auth.dependencies import get_current_user
 from src.modules.document_pipeline.formats import (
     FormatSpec,
@@ -73,16 +74,16 @@ def get_upload_service(
 
 
 def _can_view(doc, current_user: User) -> bool:
-    """PUBLIC docs are visible org-wide; RESTRICTED docs are visible only to the uploader
-    and to ADMINs. Deliberately a 2-tier, owner-scoped model (the Google-Drive
-    "private to me" vs "anyone in the org" split) — see ARCHITECTURE.md §6b before adding
-    department tiers or per-document ACLs; that's a Phase 6+ concern, not needed at
-    50-person scale."""
-    if doc.classification != Classification.RESTRICTED:
-        return True
-    if current_user.role == UserRole.ADMIN.value:
-        return True
-    return doc.owner_id is not None and doc.owner_id == current_user.user_id
+    """Whether this caller may see a document already in hand — single-document endpoints only.
+
+    The rule itself lives in `src/modules/auth/access.py` so the Python and SQL forms cannot
+    drift. List and search must **not** use this: they scope the query instead, because filtering
+    a page after it is fetched lets invisible rows consume slots and leaks their count via
+    `total`."""
+    return can_view(
+        doc.classification, doc.owner_id, current_user.user_id,
+        viewer_is_admin=is_admin(current_user.role),
+    )
 
 
 def _safe_disposition_filename(filename: str) -> str:
@@ -480,14 +481,18 @@ async def list_documents(
     """Lists documents visible to the caller (PUBLIC + own/ADMIN RESTRICTED)."""
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
-    docs, total = repo.list_paginated(limit=limit, offset=offset)
-    visible = [d for d in docs if _can_view(d, current_user)]
-    emails = _uploader_emails(db, visible)
+    # Scoped in the query, not afterwards: post-filtering let restricted rows consume slots in the
+    # page and reported an unfiltered `total`, which leaked how many restricted documents exist.
+    docs, total = repo.list_paginated(
+        limit=limit, offset=offset,
+        viewer_id=current_user.user_id, viewer_is_admin=is_admin(current_user.role),
+    )
+    emails = _uploader_emails(db, docs)
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "documents": [_with_uploader(d, emails) for d in visible],
+        "documents": [_with_uploader(d, emails) for d in docs],
     }
 
 
@@ -507,15 +512,17 @@ async def search_documents(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="EMPTY_QUERY: q is required.")
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
-    docs, total = repo.search(q.strip(), limit=limit, offset=offset)
-    visible = [d for d in docs if _can_view(d, current_user)]
-    emails = _uploader_emails(db, visible)
+    docs, total = repo.search(
+        q.strip(), limit=limit, offset=offset,
+        viewer_id=current_user.user_id, viewer_is_admin=is_admin(current_user.role),
+    )
+    emails = _uploader_emails(db, docs)
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
         "query": q,
-        "documents": [_with_uploader(d, emails) for d in visible],
+        "documents": [_with_uploader(d, emails) for d in docs],
     }
 
 
