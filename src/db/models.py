@@ -4,6 +4,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -24,6 +25,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from src.core.config import settings
 from src.db.enums import DocumentStatus, JobStage, JobStatus, UserRole
 
 # JSON type that uses PostgreSQL JSONB in production and standard JSON in SQLite
@@ -166,7 +168,7 @@ class Document(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('UPLOADED', 'QUARANTINED', 'VALIDATED', 'VALIDATION_FAILED', 'REJECTED', 'EXTRACTED', 'EXTRACTION_FAILED', 'NORMALIZATION_FAILED', 'AWAITING_CLASSIFICATION', 'CHUNKED', 'CHUNKING_FAILED', 'DUPLICATE', 'LIVE', 'SUPERSEDED', 'ARCHIVED')",
+            "status IN ('UPLOADED', 'QUARANTINED', 'VALIDATED', 'VALIDATION_FAILED', 'REJECTED', 'EXTRACTED', 'EXTRACTION_FAILED', 'NORMALIZATION_FAILED', 'AWAITING_CLASSIFICATION', 'CHUNKED', 'CHUNKING_FAILED', 'EMBEDDING_FAILED', 'SKIPPED_UNSUPPORTED_LANGUAGE', 'DUPLICATE', 'LIVE', 'SUPERSEDED', 'ARCHIVED')",
             name="chk_documents_status",
         ),
         CheckConstraint(
@@ -229,6 +231,26 @@ class DocumentChunk(Base):
     )
 
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Nullable because a chunk exists before it is embedded — chunking and embedding are separate
+    # stages precisely so a model change is a re-embed, not a re-chunk.
+    #
+    # The width is read from settings rather than hardcoded so there is one source of truth. That
+    # also makes `alembic check` a guard: change EMBEDDING_DIMENSIONS without writing a migration
+    # and CI fails, instead of every insert failing at runtime with a message that doesn't name
+    # the real cause.
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(settings.EMBEDDING_DIMENSIONS), nullable=True
+    )
+
+    # Lexical half of hybrid retrieval, maintained by a trigger (migration 0015) so it stays
+    # correct for ORM writes and raw SQL alike. Never assigned from Python — the trigger owns it.
+    #
+    # `documents.search_vector` indexes title, filename and description; this indexes the passage
+    # body. Embeddings blur exact identifiers ("Section 114", "GRAP Stage III") into whatever
+    # they are semantically near, which a lexical index matches exactly.
+    search_vector: Mapped[Any | None] = mapped_column(SearchVectorType, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
@@ -247,6 +269,17 @@ class DocumentChunk(Base):
             "chunk_index",
             unique=True,
         ),
+        # Declared here as well as in migration 0014 so `alembic check` stays meaningful — an
+        # index that exists in the database but not on the model reads as drift.
+        # Cosine distance because the embedding models used here emit normalised vectors.
+        Index(
+            "idx_document_chunks_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"m": 16, "ef_construction": 64},
+        ),
+        Index("idx_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
     )
 
 
@@ -322,7 +355,7 @@ class Job(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "stage IN ('SCAN', 'EXTRACT', 'NORMALIZE', 'CHUNK')",
+            "stage IN ('SCAN', 'EXTRACT', 'NORMALIZE', 'CHUNK', 'EMBED')",
             name="chk_jobs_stage",
         ),
         CheckConstraint(
@@ -367,7 +400,7 @@ class AuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED', 'EXTRACTION_COMPLETED', 'EXTRACTION_FAILED', 'NORMALIZATION_COMPLETED', 'NORMALIZATION_FAILED', 'DOCUMENT_RECLASSIFIED', 'CHUNKING_COMPLETED', 'CHUNKING_FAILED')",
+            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED', 'EXTRACTION_COMPLETED', 'EXTRACTION_FAILED', 'NORMALIZATION_COMPLETED', 'NORMALIZATION_FAILED', 'DOCUMENT_RECLASSIFIED', 'CHUNKING_COMPLETED', 'CHUNKING_FAILED', 'EMBEDDING_COMPLETED', 'EMBEDDING_FAILED', 'EMBEDDING_SKIPPED')",
             name="chk_audit_log_event_type",
         ),
     )

@@ -40,6 +40,8 @@ dependencies = [
     "bcrypt>=4.1.0",
     "slowapi>=0.1.9",
     "pydantic[email]>=2.6.0",
+    "fastembed>=0.4.0",
+    "pgvector>=0.3.0",
 ]
 
 [tool.pytest.ini_options]

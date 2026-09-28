@@ -1,0 +1,258 @@
+"""Semantic, lexical, and hybrid retrieval over embedded passages.
+
+**The permission predicate lives in the WHERE clause of every arm, and that is the whole design.**
+
+Filtering a result set after the query is a correctness failure for top-k, not merely untidy: a
+RESTRICTED passage removed after ranking has already taken its slot, so `limit=5` returns four
+results, or none, and the caller cannot distinguish a thin corpus from a withheld answer. The
+predicate comes from `src/modules/auth/access.py` rather than being written here, so retrieval and
+the document list/search cannot drift on what "visible" means. Because fusion runs two arms, the
+clause appears twice — which is exactly why it is a shared function and not a string.
+
+**Why hybrid.** Vector search matches meaning and is poor at exact identifiers: "Section 114",
+"GRAP Stage III", a district name. An embedding places those near whatever they are semantically
+similar to, which for a policy corpus is a real gap. A lexical index matches them exactly and is
+in turn blind to paraphrase. The two fail differently, so fusing them covers more than either.
+
+The arms' scores are never compared — see `fusion.py` for why ranks are used instead.
+
+The question is embedded with `embed_query()`, never `embed_passages()`. Several model families
+are asymmetric, and using the passage form for a query degrades retrieval with no error raised.
+"""
+
+import enum
+import logging
+import uuid
+
+from sqlalchemy import Float, cast, func, literal, select
+from sqlalchemy.orm import Session
+
+from src.core.config import settings
+from src.db.models import Document as DocumentORM
+from src.db.models import DocumentChunk as ChunkORM
+from src.modules.auth.access import is_admin, visible_documents_clause
+from src.modules.document_pipeline.embedding.provider import EmbeddingProvider
+from src.modules.retrieval.fusion import RRF_K, candidate_pool
+from src.modules.retrieval.models import RetrievedChunk, TokenUsage
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["RetrievalService", "SearchMode", "assess", "is_admin"]
+
+# `websearch_to_tsquery`, not `plainto_tsquery`: it accepts quoted phrases, `or`, and `-term`, and
+# it never raises on malformed input. Quoted phrases matter here — "GRAP Stage III" as a phrase is
+# precisely the query a lexical arm exists to serve, and plainto_ would scatter it into loose AND.
+_TS_CONFIG = "english"
+
+
+class SearchMode(str, enum.Enum):
+    """Exposed rather than hidden so a result can be explained. When someone asks why a passage
+    came back, the honest answer often is "the lexical arm found it and the vector arm did not",
+    and being able to re-run one arm alone is how that gets established."""
+
+    HYBRID = "hybrid"
+    SEMANTIC = "semantic"
+    LEXICAL = "lexical"
+
+
+class RetrievalService:
+    """Turns a natural-language question into ranked, citable passages."""
+
+    def __init__(self, provider: EmbeddingProvider):
+        self._provider = provider
+
+    @property
+    def model_name(self) -> str:
+        return self._provider.model_name
+
+    # ------------------------------------------------------------------ arms
+
+    def _visible(self, user_id, viewer_is_admin):
+        return (
+            DocumentORM.deleted_at.is_(None),
+            visible_documents_clause(DocumentORM, user_id, viewer_is_admin=viewer_is_admin),
+        )
+
+    def _semantic_cte(self, vector, pool, user_id, viewer_is_admin):
+        distance = ChunkORM.embedding.cosine_distance(vector)
+        return (
+            select(
+                ChunkORM.chunk_id.label("chunk_id"),
+                func.row_number().over(order_by=distance).label("rank"),
+                # Carried alongside the rank because it is the only absolute measure available:
+                # ranks say which passage is nearest, similarity says whether "nearest" means
+                # anything at all.
+                (1 - distance).label("similarity"),
+            )
+            .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
+            .where(ChunkORM.embedding.is_not(None), *self._visible(user_id, viewer_is_admin))
+            .order_by(distance)
+            .limit(pool)
+            .cte("semantic_arm")
+        )
+
+    def _lexical_cte(self, query, pool, user_id, viewer_is_admin):
+        tsquery = func.websearch_to_tsquery(_TS_CONFIG, query)
+        rank = func.ts_rank(ChunkORM.search_vector, tsquery)
+        return (
+            select(
+                ChunkORM.chunk_id.label("chunk_id"),
+                func.row_number().over(order_by=rank.desc()).label("rank"),
+            )
+            .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
+            .where(
+                ChunkORM.search_vector.op("@@")(tsquery),
+                *self._visible(user_id, viewer_is_admin),
+            )
+            .order_by(rank.desc())
+            .limit(pool)
+            .cte("lexical_arm")
+        )
+
+    # --------------------------------------------------------------- search
+
+    def search(
+        self,
+        db: Session,
+        query: str,
+        *,
+        user_id: uuid.UUID | None,
+        is_admin: bool,
+        limit: int = 10,
+        mode: SearchMode = SearchMode.HYBRID,
+    ) -> tuple[list[RetrievedChunk], TokenUsage]:
+        """Returns the `limit` passages best matching `query` that this user may see."""
+        pool = candidate_pool(limit)
+        needs_vector = mode in (SearchMode.HYBRID, SearchMode.SEMANTIC)
+        vector = self._provider.embed_query(query) if needs_vector else None
+
+        sem = self._semantic_cte(vector, pool, user_id, is_admin) if needs_vector else None
+        lex = (
+            self._lexical_cte(query, pool, user_id, is_admin)
+            if mode in (SearchMode.HYBRID, SearchMode.LEXICAL)
+            else None
+        )
+
+        # `1 / (k + rank)` per arm, zero where the arm did not return the row. Cast to float so
+        # integer division cannot quietly turn every contribution into 0.
+        def contribution(cte):
+            if cte is None:
+                return literal(0.0)
+            return func.coalesce(
+                cast(1.0, Float) / (RRF_K + cast(cte.c.rank, Float)), 0.0
+            )
+
+        sem_rank = sem.c.rank if sem is not None else literal(None)
+        lex_rank = lex.c.rank if lex is not None else literal(None)
+
+        if sem is not None and lex is not None:
+            # FULL OUTER JOIN: a passage found by only one arm must still be a candidate. An
+            # INNER JOIN here would silently reduce hybrid search to "results both arms agree
+            # on" — a narrower set than either arm alone, the opposite of the intent.
+            joined = sem.join(lex, sem.c.chunk_id == lex.c.chunk_id, full=True)
+            chunk_id = func.coalesce(sem.c.chunk_id, lex.c.chunk_id)
+        else:
+            single = sem if sem is not None else lex
+            joined, chunk_id = single, single.c.chunk_id
+
+        fused = (
+            select(
+                chunk_id.label("chunk_id"),
+                (contribution(sem) + contribution(lex)).label("score"),
+                sem_rank.label("semantic_rank"),
+                lex_rank.label("lexical_rank"),
+                (sem.c.similarity if sem is not None else literal(None)).label("similarity"),
+            )
+            .select_from(joined)
+            .cte("fused")
+        )
+
+        stmt = (
+            select(
+                ChunkORM.chunk_id,
+                ChunkORM.document_id,
+                DocumentORM.filename,
+                ChunkORM.text,
+                ChunkORM.page_number,
+                ChunkORM.section_heading,
+                ChunkORM.is_table,
+                fused.c.score,
+                fused.c.semantic_rank,
+                fused.c.lexical_rank,
+                fused.c.similarity,
+            )
+            .select_from(fused)
+            .join(ChunkORM, ChunkORM.chunk_id == fused.c.chunk_id)
+            .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
+            # Ties are common in RRF because scores come from a small set of rank reciprocals.
+            # chunk_id is an arbitrary but stable tiebreak, so a repeated query returns a
+            # repeated order — an unstable result list reads as a bug to whoever is using it.
+            .order_by(fused.c.score.desc(), ChunkORM.chunk_id)
+            .limit(limit)
+        )
+
+        rows = db.execute(stmt).mappings().all()
+
+        # Counted here rather than stored on the row: the number belongs to whichever model is
+        # configured now, and a stored count would go stale the moment the model changed.
+        window = self._provider.max_sequence_tokens
+        passage_tokens = self._provider.count_tokens([r["text"] for r in rows])
+        query_tokens = self._provider.count_tokens([query])[0] if query else 0
+
+        results = [
+            RetrievedChunk(
+                chunk_id=row["chunk_id"],
+                document_id=row["document_id"],
+                filename=row["filename"],
+                text=row["text"],
+                page_number=row["page_number"],
+                section_heading=row["section_heading"],
+                is_table=row["is_table"],
+                score=float(row["score"]),
+                semantic_rank=row["semantic_rank"],
+                lexical_rank=row["lexical_rank"],
+                similarity=float(row["similarity"]) if row["similarity"] is not None else None,
+                token_count=n,
+                truncated=n > window,
+            )
+            for row, n in zip(rows, passage_tokens, strict=True)
+        ]
+        usage = TokenUsage(
+            query_tokens=query_tokens,
+            context_tokens=sum(passage_tokens),
+            max_sequence_tokens=window,
+            truncated_results=sum(1 for r in results if r.truncated),
+            model=self._provider.model_name,
+            mode=mode.value,
+            semantic_hits=sum(1 for r in results if r.semantic_rank is not None),
+            lexical_hits=sum(1 for r in results if r.lexical_rank is not None),
+        )
+
+        logger.info(
+            "Retrieval[%s]: results=%d limit=%d pool=%d admin=%s sem=%d lex=%d "
+            "context_tokens=%d truncated=%d",
+            mode.value, len(rows), limit, pool, is_admin,
+            usage.semantic_hits, usage.lexical_hits,
+            usage.context_tokens, usage.truncated_results,
+        )
+        return results, usage
+
+
+def assess(results: list[RetrievedChunk]) -> tuple[bool, float | None]:
+    """Did this query actually find anything, or just return its least-bad guess?
+
+    Vector search always returns something — there is no such thing as no nearest neighbour —
+    so without this check a question about cake comes back with the nearest policy passage,
+    a citation, and every appearance of confidence. Cosine similarity is the only absolute
+    measure available; the RRF score is built from ranks and cannot distinguish "best in the
+    corpus" from "best of a bad lot".
+
+    An exact lexical match counts as grounded regardless of similarity: if the words are
+    literally in the document, the corpus does contain them, whatever the embedding thinks.
+    """
+    best = max((r.similarity for r in results if r.similarity is not None), default=None)
+    if any(r.lexical_rank is not None for r in results):
+        return True, best
+    if best is None:
+        return False, None
+    return best >= settings.SEARCH_MIN_SIMILARITY, best

@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A-PAG AI Knowledge Base: an async document ingestion pipeline (Python 3.12, FastAPI) that will
 eventually feed a governed RAG platform (vector search over PDFs) plus a Text-to-SQL layer over
-PostgreSQL. **Currently implemented: Stages 1–6** (upload/quarantine → validation/threat scan →
-promotion to raw storage → text extraction → normalization/quality gate → chunking), plus JWT auth,
-multi-file upload, pagination, and full-text search on top of it. Embedding, vector indexing and
-Text-to-SQL are not yet built (see Roadmap in README.md).
+PostgreSQL. **Currently implemented: Stages 1–7** (upload/quarantine → validation/threat scan →
+promotion to raw storage → text extraction → normalization/quality gate → chunking → embedding),
+plus JWT auth, multi-file upload, pagination, full-text search, and **semantic search**
+(`GET /api/v1/search`) over the pgvector index. Text-to-SQL is not yet built (see Roadmap in
+README.md).
 
 ## Commands
 
@@ -29,6 +30,11 @@ python worker_main.py      # runs one stage, selected by WORKER_STAGE (default S
 WORKER_STAGE=EXTRACT python worker_main.py
 WORKER_STAGE=NORMALIZE python worker_main.py
 WORKER_STAGE=CHUNK python worker_main.py
+WORKER_STAGE=EMBED python worker_main.py
+
+# Enqueue jobs for documents stranded before a stage existed (idempotent)
+python backfill_jobs.py --stage EMBED --dry-run
+python backfill_jobs.py --stage EMBED
 
 # Tests
 pytest tests/ -v                              # full suite (unit + Postgres integration)
@@ -52,7 +58,8 @@ see `KNOWN_DEBTS.md`). All `/api/v1/documents/*` endpoints require `Authorizatio
 - `main.py` → FastAPI app (`src/api/v1/router.py`) — handles `POST /documents/upload` (fast path
   only, returns `202` in <500ms) and `GET /documents/{id}/status`.
 - `worker_main.py` → reads `WORKER_STAGE` (`SCAN` default) and runs the matching `BaseWorker`
-  subclass — `ScanWorker`, `ExtractionWorker`, `NormalizationWorker`, or `ChunkingWorker`. One process handles one
+  subclass — `ScanWorker`, `ExtractionWorker`, `NormalizationWorker`, `ChunkingWorker`, or
+  `EmbeddingWorker`. One process handles one
   stage; each stage runs as its own container in Docker Compose off the same image (see
   `docker-compose.yml`), because the container healthcheck watches a single heartbeat file, which
   assumes one worker daemon per container (`KNOWN_DEBTS.md` #5).
@@ -115,7 +122,13 @@ path (the stage's own `*JobHandler.process()`).
    (`src/modules/document_pipeline/chunking/` — see "Chunking" below). Passages are written to
    the `document_chunks` **table**, not a bucket, and the document is set `CHUNKED`. Re-running
    replaces a document's chunks rather than appending, so a reaped or retried job cannot double
-   its content. Embedding (Stage 7) isn't built yet, so nothing is queued after this stage.
+   its content. On success an `EMBED` job is enqueued.
+7. **Embed** — `src/modules/document_pipeline/embedding_job_handler.py`
+   `EmbeddingJobHandler.process()`: fetches a `CHUNKED` document, reads its `document_chunks` rows,
+   and writes a `vector(768)` back onto each one via `EmbeddingService`
+   (`src/modules/document_pipeline/embedding/` — see "Embedding" below). The document becomes
+   `LIVE`, which now means what it says: every passage carries a vector and is retrievable.
+   Nothing is queued after this stage — it is the end of ingestion.
 
 ### Text extraction: deliberately non-ML
 
@@ -149,16 +162,35 @@ recovered it from each format's own declarations, and this stage never re-derive
 
 Oversized sections fall back to recursive splitting (paragraph → sentence → hard wrap), and the
 pieces are repacked toward the target so a split section doesn't shatter into one-sentence
-fragments. Tables are never split mid-row; a large table becomes row groups that each **repeat
-the header**, because otherwise group 7 of a budget sheet is a wall of numbers with no column
-names. There is deliberately **no overlap** — a Jan 2026 analysis found it adds indexing cost
+fragments. A hard wrap derives its width from the ratio measured on *that* text rather than a
+global constant — the lesson of #28 being that a ratio holding for prose does not hold for a
+table of numbers. Tables are never split mid-row; a large table becomes row groups that each
+**repeat the header**, because otherwise group 7 of a budget sheet is a wall of numbers with no
+column names. An oversized group is re-split **by rows**, never by characters, since
+hard-wrapping a table produces exactly the fragment the repeated header exists to prevent; a
+single row too wide for the budget is emitted whole for the same reason. There is deliberately **no overlap** — a Jan 2026 analysis found it adds indexing cost
 with no measurable recall gain, and that holds doubly when splitting on real heading boundaries.
 
-Sizing is in **characters, not tokens** (`CHUNK_TARGET_CHARS`/`CHUNK_MAX_CHARS`): the tokenizer
-belongs to the embedding model, which arrives a stage later. The budget is deliberately
-conservative because Devanagari runs 2–3x more tokens per character than English, and a target
-tuned on English prose would silently truncate Hindi documents at embed time — surfacing months
-later as unexplained poor retrieval rather than as an error.
+Sizing is delegated to a `SizeBudget` (`chunking/sizing.py`) and measured in **tokens**, via
+`TokenBudget` built from the configured model's tokenizer. It used to be measured in characters,
+on the reasoning that the tokenizer belongs to the embedding model and that arrives a stage
+later. That proxy held near the corpus average and broke outside it: 2.9% of chunks overflowed
+the 512-token window and were silently truncated at embed time, **every one of them inside the
+character budget** (`KNOWN_DEBTS.md` #28). Cut points were never the problem; the budget could not
+see what it constrained.
+
+`TokenBudget` caps at `min(CHUNK_MAX_TOKENS, model window)`, so neither a generous setting nor a
+model swap to a larger window (BGE-M3's is 8192) can produce a chunk the model would truncate, or
+one so large that precision suffers. `CharacterBudget` remains for callers with no tokenizer —
+unit tests, and a worker whose model fails to load, which logs a WARNING because it quietly
+reintroduces the bug. `TokenCounter` is a narrow Protocol satisfied structurally by
+`EmbeddingProvider`, so chunking depends on *tokenization*, not on embedding; the coupling was
+always there (2000 chars was chosen with a 512-token window in mind) and writing it as a character
+constant hid it rather than removing it.
+
+The cost: `ChunkingWorker` loads the embedding model purely to tokenize (~640MB), which is why
+that container has a `mem_limit`. See `KNOWN_DEBTS.md` #32 for the lighter option and why it was
+not taken.
 
 `document_chunks` is the one pipeline artifact that lives in Postgres instead of object storage.
 That's deliberate: chunks are queried, not merely stored — the embedding stage adds a vector
@@ -166,6 +198,125 @@ column to the same row, and a similarity search cannot join against JSON in a bu
 `page_number`, `section_heading` and `is_table` are the citation contract, and the `scale` column
 ships holding one value so a second granularity later is an INSERT rather than a migration plus a
 backfill (`KNOWN_DEBTS.md` #17).
+
+### Embedding: the model is a configuration decision, the dimension is not
+
+`src/modules/document_pipeline/embedding/` mirrors `chunking/`'s shape — pure logic, no storage or
+DB awareness. `provider.py` holds the `EmbeddingProvider` ABC and `FastEmbedProvider` (ONNX via
+fastembed, no PyTorch); `service.py` batches chunks per inference call.
+
+`embed_passages()` and `embed_query()` are **separate methods**, and that split is load-bearing.
+Several model families are asymmetric — E5 requires literal `query: `/`passage: ` prefixes, BGE
+v1.5 takes an instruction on the query side only — and feeding both sides the same shape costs
+retrieval quality with **no exception and no warning**. Keeping that inside the provider means the
+retrieval endpoint cannot forget it and a model-family change edits one class, not every call site.
+`_is_bge()` deliberately excludes BGE-M3, which is not instruction-tuned the way v1.5 is.
+
+The **model** is configuration (`EMBEDDING_MODEL`); the **dimension** is not.
+`document_chunks.embedding` is `vector(768)` fixed by migration `0014`, and pgvector columns are
+typed by width, so a model of a different width needs a migration *and* a full re-embed — vectors
+from two models do not share a space. Three guards, outermost first: `alembic check` fails if
+`settings.EMBEDDING_DIMENSIONS` and the migration drift apart; `FastEmbedProvider` probes the
+model's real output width at load and refuses to start on a mismatch (so it surfaces at worker boot,
+not as a wall of failed jobs); the column width itself is the backstop. See `KNOWN_DEBTS.md` #21.
+
+Because chunking is its own stage, a model swap re-runs **one worker** over existing
+`document_chunks` rows — it never re-chunks or re-extracts.
+
+The model is **baked into the image** (`Dockerfile` sets `FASTEMBED_CACHE_PATH` and pre-fetches the
+weights at build time), not downloaded at boot: a worker that fetches weights on first start fails
+closed on a network blip and is not reproducible.
+
+**Language gate**: normalization already detected a language, so `EmbeddingJobHandler` reads it and
+routes a non-English document to `SKIPPED_UNSUPPORTED_LANGUAGE` rather than embedding it. This is
+not a failure state and is never retried. An English tokenizer turns Devanagari into unknown tokens
+and emits vectors that match nothing — the document would sit in the index permanently unfindable
+with nothing to explain it. Same reasoning as the quality gate's `LOW_TEXT_DENSITY` check: a
+recorded gap is findable, a silent one is not. `EMBEDDING_SKIP_NON_ENGLISH=false` disables it when a
+multilingual model is configured — config, not code (`KNOWN_DEBTS.md` #20).
+
+Transient vs permanent follows the usual split: model load and memory pressure are transient (retry
+is likely to work); a dimension mismatch or a `CHUNKED` document with no chunks is permanent
+(retrying produces the identical error).
+
+**Token accounting.** `count_tokens()` measures true length through a tokenizer with **both
+truncation and padding disabled**: truncation would cap every answer at the window so overflow —
+the only thing worth measuring — is invisible, and `encode_batch` pads to the longest text in the
+batch so every passage in a batch reports an identical length (that one shipped briefly, and was
+caught by a live response where five passages all claimed 689 tokens — `KNOWN_DEBTS.md` #29).
+
+This is what chunking now sizes against, so **no chunk exceeds the window**: verified 0 of 2,860
+after the fix, down from 83 of 2,816 when the budget was in characters (`KNOWN_DEBTS.md` #28).
+`EmbeddingService` still logs a WARNING and records `truncated_count` if one ever does, because
+the guarantee depends on the chunking stage having a tokenizer — a worker that falls back to
+`CharacterBudget` silently reintroduces the gap.
+
+**Retrieval filters permissions in SQL**, via `visible_documents_clause()` from
+`src/modules/auth/access.py` — the same predicate list and search use. A RESTRICTED chunk filtered
+post-hoc still consumes a top-k slot and pushes out a result the user was allowed to see, so the
+predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`. The shape is pinned by
+`tests/integration/test_vector_search.py` and exercised through the shipped query by
+`tests/integration/test_retrieval_service.py`.
+
+### Retrieval: hybrid, fused by rank, permissions inside every arm
+
+`src/modules/retrieval/` is what reads the index. Two arms run and their **ranks** are fused:
+
+- **semantic** — `embed_query()` (never `embed_passages()`, see the Embedding section), ranked by
+  pgvector's `<=>` cosine distance, the operator the HNSW index was built for. Any other distance
+  function returns correct results as a sequential scan over the whole corpus.
+- **lexical** — `websearch_to_tsquery` against `document_chunks.search_vector` (migration `0015`,
+  trigger-maintained, body weighted 'A' and section heading 'B'). `websearch_` rather than
+  `plainto_` because it accepts quoted phrases, which is exactly the query the lexical arm exists
+  to serve, and never raises on malformed input.
+
+They fail differently — an embedding blurs "Section 114" into whatever it is semantically near,
+while a word index is blind to paraphrase — which is why fusing beats either. Measured on this
+corpus: on 6 of 16 sample queries the lexical arm surfaced passages the vector arm never returned.
+For `cuDNN` the semantic arm's top hit was the book's *Index* page; the lexical arm found the
+actual content.
+
+**Scores are never compared, only ranks** (`fusion.py`). Cosine similarity is bounded and means
+"close in meaning"; `ts_rank` is unbounded, length-dependent, and means "these words match". The
+conversion factor between them does not exist, and any constant chosen for one corpus quietly
+stops being right for another. RRF (`k=60`, Cormack et al. 2009) uses `1/(k+rank)` per arm. The
+consequence to know: `RetrievedChunk.score` is **not a similarity** — it is ~0.016 for a single
+first place and is meaningless outside one result set. Read `semantic_rank`/`lexical_rank` instead,
+which is also what the UI shows.
+
+The join between arms is a **FULL OUTER JOIN**. An inner join would reduce hybrid to "what both
+arms agree on" — narrower than either arm alone, the opposite of the intent. Each arm fetches
+`candidate_pool(limit)` rows so fusion has material; ordering breaks ties on `chunk_id` so a
+repeated query returns a repeated order.
+
+`src/api/v1/retrieval.py` exposes `GET /api/v1/search`. The provider is built once per process
+behind `get_retrieval_service()` — a FastAPI dependency rather than a module-level singleton, so
+tests can override it and so importing the module does not load weights. Note this makes the API
+process carry the model (~640MB resident) in addition to the embedding worker.
+
+**The permission predicate is in the `WHERE` clause of *every arm*, before `ORDER BY`/`LIMIT`.**
+For top-k this is a correctness requirement, not tidiness — a RESTRICTED chunk removed after
+ranking has already taken its slot, so `limit=5` returns four results, or none, and the caller
+cannot tell whether the corpus is thin or an answer was withheld. Hybrid doubled the places it can
+leak from, and a predicate present in the semantic arm but missing from the lexical one would pass
+every test written for the former; `tests/integration/test_hybrid_search.py` covers both. The
+predicate comes from `src/modules/auth/access.py` rather than being written here, so retrieval and
+the document list/search cannot drift on what "visible" means.
+
+Identity comes from `get_current_user`, never from the request — there is a test asserting a
+`user_id` query parameter is ignored.
+
+**Grounding.** Vector search always returns something: there is no such thing as no nearest
+neighbour. Without a check, a question about cake comes back with the nearest policy passage, a
+page citation and every appearance of confidence. `assess()` gates on raw **cosine similarity**,
+not the RRF score — the score is built from ranks and cannot tell "best in the corpus" from "best
+of a bad lot", whereas similarity is absolute and comparable across queries. Below
+`SEARCH_MIN_SIMILARITY` the endpoint returns `grounded=false` and **withholds the passages**
+rather than flagging them, because a citation beside text that does not answer the question is
+how someone ends up quoting something irrelevant in a government submission. An exact lexical
+match counts as grounded whatever the similarity: if the words are literally in a document, the
+corpus contains them. The 0.55 default was measured on this corpus (on-topic 0.69–0.84,
+off-topic 0.45–0.50) and is **model-specific** — re-measure it on a model change.
 
 ### Storage: 4-bucket + repository abstraction
 
@@ -206,8 +357,14 @@ event_type)` row first, since jobs can be retried.
 - `src/api/v1/auth.py` exposes `/auth/register`, `/auth/login` (OAuth2 password flow: form fields
   `username`/`password`), `/auth/me`.
 - Access model: `Classification.PUBLIC` (org-wide) vs `RESTRICTED` (owner-scoped: visible to
-  `doc.owner_id == current_user.user_id`, plus any `ADMIN`) — enforced by `_can_view()` in
-  `src/api/v1/ingestion.py`, applied uniformly across status/list/search. Deliberately a 2-tier
+  `doc.owner_id == current_user.user_id`, plus any `ADMIN`). The rule lives **once**, in
+  `src/modules/auth/access.py`, in two forms that are proven equivalent by
+  `tests/unit/test_access_rule.py`: `can_view()` for a document already in hand (used by
+  `_can_view()` in `src/api/v1/ingestion.py` for single-document endpoints) and
+  `visible_documents_clause()` for queries. **Anything returning a result set must use the SQL
+  form** — list, search and retrieval all pass `viewer_id`/`viewer_is_admin` into the query.
+  Those are required keyword arguments with no default, so forgetting them is a `TypeError`
+  rather than a silent leak or a silent empty page (`KNOWN_DEBTS.md` #27). Deliberately a 2-tier
   model, not per-document ACLs — see `ARCHITECTURE.md` §6b before adding per-document or
   department-based sharing (a prior department-tier attempt shipped without departments ever
   being populated, making RESTRICTED admin-only in practice — see `KNOWN_DEBTS.md`).
@@ -273,7 +430,15 @@ derived from a file and nothing read it. Access control is now owner-scoped — 
 `documents.document_date` (the date printed on the document, as distinct from `created_at` which
 is upload time — without it a 2019 policy ingested today looks current). `0013_document_chunks`
 adds the `document_chunks` table plus the `CHUNKED`/`CHUNKING_FAILED` statuses and the `CHUNK` job
-stage. Both leave `chk_audit_log_event_type` widened on downgrade rather than narrowing it:
+stage. `0014_embeddings` runs `CREATE EXTENSION IF NOT EXISTS vector`, adds
+`document_chunks.embedding vector(768)` and its HNSW index (`m=16`, `ef_construction=64`, cosine),
+and adds the `EMBED` stage with `EMBEDDING_FAILED`/`SKIPPED_UNSUPPORTED_LANGUAGE`. The index is
+built **normally, not CONCURRENTLY** — `CREATE INDEX CONCURRENTLY` cannot run inside a transaction
+and Alembic wraps migrations in one; the table is near-empty at migration time so a blocking build
+is instant, but a later rebuild on a populated table must use CONCURRENTLY or it locks out writes
+for the duration. Its `downgrade()` resets `LIVE` documents to `CHUNKED` (with the column gone a
+LIVE document has no vectors and is not searchable, so leaving it LIVE would be a lie) and leaves
+the `vector` extension installed, since other objects may depend on it. Both leave `chk_audit_log_event_type` widened on downgrade rather than narrowing it:
 Postgres validates existing rows when creating a CHECK, so narrowing would mean deleting audit
 rows, and migration `0003` makes that log append-only precisely so it cannot be rewritten. One
 spare value in a typo guard is cheaper than a hole in the audit trail.
@@ -294,7 +459,15 @@ characters).
 
 - `tests/unit/` — use `InMemoryDocumentRepository`, no DB/Docker required; exercise pipeline logic
   and worker mechanics directly.
-- `tests/integration/` — real PostgreSQL via `testcontainers` (`tests/integration/conftest.py`;
+- `tests/integration/` — real PostgreSQL via `testcontainers`. The schema is built by running
+  **the real Alembic migrations**, not `Base.metadata.create_all()`: much of this schema's
+  behaviour is not in the ORM (the `audit_log` immutability triggers from `0003`, the partial
+  unique index that is the actual dedup guarantee from `0004`, the tsvector triggers from `0006`
+  and `0015`), and under `create_all()` none of it exists in the test database — a lexical-search
+  test then finds nothing because the trigger was never created, which looks exactly like a broken
+  query. `src/db/migrations/env.py` only falls back to `settings.DATABASE_URL` when the caller has
+  not set a URL, so the suite's migrations run against the throwaway container and not a real
+  database (`tests/integration/conftest.py`;
   the package must be installed — `uv sync` covers this, since it's declared in `pyproject.toml`,
   not just `requirements.txt`). Tests run inside a rolled-back transaction per test (`db_session`
   fixture), but some worker tests (`test_worker_execution.py`, `test_worker_skip_locked.py`)
@@ -339,3 +512,15 @@ rationale before "fixing" them:
 - There is **no OCR** — deliberate for the same reason (no scanned documents expected), with the
   normalization quality gate's `LOW_TEXT_DENSITY` check as the explicit safety net rather than a
   silent assumption. See `KNOWN_DEBTS.md` #14 for the trigger to revisit.
+- Vectors live in **Postgres via pgvector**, not Qdrant/Pinecone/Weaviate — a passage's text, its
+  citation metadata and its embedding are one row, so retrieval returns the answer, what to cite,
+  and the permission check in a single query. A separate vector store would mean resolving ids
+  across two systems and applying permissions *after* top-k was chosen. The Postgres image is
+  therefore `pgvector/pgvector:pg16`, not stock `postgres:16-alpine`.
+- Embeddings are **English-only** (`BAAI/bge-base-en-v1.5`, 768-dim, CPU/ONNX, baked into the
+  image). Non-English documents are recorded as `SKIPPED_UNSUPPORTED_LANGUAGE` rather than embedded
+  as noise — ~10–15% of A-PAG's corpus is Hindi, and that backlog is deliberately queryable. See
+  `KNOWN_DEBTS.md` #20.
+- **Retrieval filters permissions in SQL**, in `src/modules/retrieval/service.py`. Do not copy the
+  Python post-filtering in `src/api/v1/ingestion.py`'s list/search — for top-k that is a
+  correctness bug, not untidiness (see the Retrieval section).

@@ -18,8 +18,8 @@ time, surfacing months later as unexplained poor retrieval on Hindi content.
 
 import re
 
-from src.core.config import settings
 from src.modules.document_pipeline.chunking.models import SECTION_SCALE, Chunk
+from src.modules.document_pipeline.chunking.sizing import CharacterBudget, SizeBudget
 from src.modules.document_pipeline.extraction.models import ExtractedTable, Heading
 from src.modules.document_pipeline.normalization.models import (
     NormalizationResult,
@@ -36,13 +36,10 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 class Chunker:
     """Splits a normalized document into retrievable passages."""
 
-    def __init__(
-        self,
-        target_chars: int | None = None,
-        max_chars: int | None = None,
-    ):
-        self.target_chars = target_chars or settings.CHUNK_TARGET_CHARS
-        self.max_chars = max_chars or settings.CHUNK_MAX_CHARS
+    def __init__(self, budget: SizeBudget | None = None):
+        # Defaults to the character proxy so a caller without a tokenizer — unit tests, or a
+        # worker that failed to build one — still works. Production passes a TokenBudget.
+        self.budget = budget or CharacterBudget()
 
     def chunk(self, result: NormalizationResult) -> list[Chunk]:
         chunks: list[Chunk] = []
@@ -168,7 +165,7 @@ class Chunker:
         text = text.strip()
         if not text:
             return []
-        if len(text) <= self.max_chars:
+        if self.budget.fits(text):
             return [text]
 
         for pattern in (_PARAGRAPH_BREAK, _SENTENCE_END):
@@ -176,26 +173,48 @@ class Chunker:
             if len(parts) > 1:
                 return self._pack(parts)
 
-        # No usable boundary — a single enormous run of text. Hard wrap.
-        return [
-            text[i : i + self.max_chars].strip()
-            for i in range(0, len(text), self.max_chars)
-        ]
+        # No usable boundary — a single enormous run with no paragraph or sentence break, which
+        # in practice means a pathological document.
+        return self._hard_wrap(text)
+
+    def _hard_wrap(self, text: str) -> list[str]:
+        """Last resort: cut by character width, even under a token budget.
+
+        There is no boundary left to respect, so the only question is how wide a slice can be and
+        still fit. The width is derived from the ratio measured on *this* text rather than a
+        global constant, which is the whole lesson of the truncation bug — a ratio that holds for
+        prose does not hold for a table of numbers. The 10% margin covers the densest stretch
+        being worse than the average this ratio describes.
+        """
+        measured = self.budget.measure(text)
+        if measured <= 0:
+            return [text]
+        width = max(1, int(self.budget.maximum * (len(text) / measured) * 0.9))
+        pieces = []
+        for i in range(0, len(text), width):
+            piece = text[i : i + width].strip()
+            if piece:
+                pieces.append(piece)
+        return pieces
 
     def _pack(self, parts: list[str]) -> list[str]:
         """Greedily recombines parts up to the target, so splitting doesn't shatter a section
         into fragments far smaller than they need to be."""
+        # Measured in one batch: under a token budget each measurement is a tokenizer call, and
+        # the packer looks at every part at least once.
+        sizes = dict(zip(parts, self.budget.measure_all(parts), strict=True))
+
         packed: list[str] = []
         buffer = ""
         for part in parts:
-            if len(part) > self.max_chars:
+            if sizes[part] > self.budget.maximum:
                 if buffer:
                     packed.append(buffer)
                     buffer = ""
                 packed.extend(self._split_to_size(part))
                 continue
             candidate = f"{buffer}\n\n{part}" if buffer else part
-            if len(candidate) > self.target_chars and buffer:
+            if buffer and self.budget.measure(candidate) > self.budget.target:
                 packed.append(buffer)
                 buffer = part
             else:
@@ -229,18 +248,53 @@ class Chunker:
         if not body:
             return [header_line]
 
-        groups: list[str] = []
+        lines = [" | ".join(row) for row in body]
+        return self._group_rows(header_line, lines)
+
+    def _group_rows(self, header_line: str, lines: list[str]) -> list[str]:
+        """Packs rows into groups that fit, each repeating the header.
+
+        Rows are measured once in a batch and accumulated against a slightly reduced budget. The
+        running total is an estimate — joining rows is not exactly additive, and under a token
+        budget a per-line measurement carries the tokenizer's special tokens that the joined text
+        carries only once — so each finished group is verified and trimmed if the estimate was
+        optimistic.
+
+        A group that does not fit is split by **rows**, never by characters. Hard-wrapping a
+        table produces exactly the failure the repeated header exists to prevent: a fragment of
+        numbers with no column names. A single row too wide for the budget is emitted alone and
+        left whole for the same reason — a long chunk beats an uninterpretable one.
+        """
+        sizes = dict(zip(lines, self.budget.measure_all(lines), strict=True))
+        header_size = self.budget.measure(header_line)
+        # Headroom for the separators between rows, which the per-row measurements exclude.
+        ceiling = max(header_size + 1, int(self.budget.maximum * 0.9))
+
+        groups: list[list[str]] = []
         buffer: list[str] = []
-        budget = self.max_chars - len(header_line)
+        running = header_size
 
-        for row in body:
-            line = " | ".join(row)
-            projected = sum(len(b) + 1 for b in buffer) + len(line)
-            if buffer and projected > budget:
-                groups.append("\n".join([header_line, *buffer]))
-                buffer = []
+        for line in lines:
+            if buffer and running + sizes[line] > ceiling:
+                groups.append(buffer)
+                buffer, running = [], header_size
             buffer.append(line)
-
+            running += sizes[line]
         if buffer:
-            groups.append("\n".join([header_line, *buffer]))
-        return groups
+            groups.append(buffer)
+
+        rendered: list[str] = []
+        for group in groups:
+            rendered.extend(self._fit_group(header_line, group))
+        return rendered
+
+    def _fit_group(self, header_line: str, rows: list[str]) -> list[str]:
+        """Emits one group if it fits, otherwise halves it by rows until every piece does."""
+        text = "\n".join([header_line, *rows])
+        if len(rows) <= 1 or self.budget.fits(text):
+            return [text]
+        middle = len(rows) // 2
+        return [
+            *self._fit_group(header_line, rows[:middle]),
+            *self._fit_group(header_line, rows[middle:]),
+        ]

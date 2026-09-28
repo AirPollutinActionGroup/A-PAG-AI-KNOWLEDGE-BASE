@@ -25,6 +25,8 @@ from dataclasses import dataclass
 
 import pypdf
 
+from src.core.config import settings
+
 PDF_MIME = "application/pdf"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -37,7 +39,15 @@ _ZIP_MAGIC = b"PK\x03\x04"
 # use the same container, so this one signature covers both cases with one actionable message.
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
-MAX_PDF_PAGES = 5000
+# Read from settings so a deployment can lower it without a code change. The ceiling is about
+# *memory*, not correctness: pdfplumber holds page objects for the document it is parsing, and
+# extracting a real 1,351-page PDF from A-PAG's corpus peaked at 3.6GB RSS — roughly 2.7MB per
+# page. The 100MB upload cap says nothing about this, because it bounds the compressed file, not
+# what parsing it costs. A box with less RAM than the ceiling implies will be OOM-killed mid-job,
+# and an OOM kill is not a PermanentProcessingError: the container dies, the lease lapses, the
+# reaper re-queues, and the next worker dies on the same document. Rejecting with a reason is
+# strictly better than that loop. See KNOWN_DEBTS.md #24.
+MAX_PDF_PAGES = settings.MAX_PDF_PAGES
 _CONTENT_TYPES_PART = "[Content_Types].xml"
 
 # Bounds read from the zip central directory (ZipInfo metadata) — no decompression, so unlike the

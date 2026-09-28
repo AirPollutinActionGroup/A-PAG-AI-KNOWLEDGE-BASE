@@ -10,13 +10,15 @@ Provides:
 import logging
 import os
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.config import settings
-from src.db.models import Base
 
 
 def _get_postgres_url() -> tuple[str, any]:
@@ -37,7 +39,9 @@ def _get_postgres_url() -> tuple[str, any]:
         except ImportError:
             from testcontainers.postgres import PostgresContainer
 
-        container = PostgresContainer("postgres:16-alpine")
+        # pgvector image, not plain postgres: the ORM declares a vector column, so create_all()
+        # fails against a server without the extension. Must match the compose files.
+        container = PostgresContainer("pgvector/pgvector:pg16")
         container.start()
         db_url = container.get_connection_url()
         return db_url, container
@@ -65,11 +69,35 @@ def postgres_engine():
         echo=False,
     )
 
-    # Create tables once for the test session
+    # The ORM declares a pgvector column, so the extension has to exist before create_all().
+    # Alembic does this in migration 0014; these tests build the schema directly from metadata.
     try:
-        Base.metadata.create_all(bind=engine)
+        with engine.begin() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     except Exception as e:
-        pytest.skip(f"PostgreSQL not reachable ({e}). Ensure Docker or local Postgres is running.")
+        pytest.skip(
+            f"Could not enable the pgvector extension ({e}). The server must be a pgvector "
+            f"build — see docker-compose.yml."
+        )
+
+    # Build the schema by running the real migrations, not `Base.metadata.create_all()`.
+    #
+    # create_all() builds tables from ORM metadata, and a great deal of this schema's behaviour
+    # is not in the ORM: the audit_log immutability triggers (0003), the partial unique index
+    # that is the actual dedup guarantee (0004), the tsvector triggers (0006, 0015). Under
+    # create_all() every one of those is absent from the test database, so tests written against
+    # them pass or fail for the wrong reasons — a lexical-search test finds nothing because the
+    # trigger that populates search_vector was never created, which looks exactly like a broken
+    # query. Running migrations makes the test schema the schema that ships.
+    #
+    # Deliberately NOT caught-and-skipped: a schema that cannot be built is a broken schema, and
+    # skipping here would turn a real failure into a silently green run with zero integration
+    # coverage. Only genuine unreachability (handled above and in _get_postgres_url) skips.
+    alembic_cfg = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+    # Set explicitly so env.py does not fall back to settings.DATABASE_URL — that would run the
+    # migrations against the developer's real database instead of the throwaway container.
+    command.upgrade(alembic_cfg, "head")
 
     yield engine
 

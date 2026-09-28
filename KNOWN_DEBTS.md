@@ -325,8 +325,8 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 ### 18. Completed jobs are never cleaned up
 - **Status**: Invisible today, will not stay that way.
 - **Context**: `BaseWorker`'s reaper handles stuck `RUNNING` leases, but nothing ever removes
-  `COMPLETED` rows from `jobs`. Every document now produces four of them (SCAN, EXTRACT,
-  NORMALIZE, CHUNK), so the table grows at four rows per document forever.
+  `COMPLETED` rows from `jobs`. Every document now produces five of them (SCAN, EXTRACT,
+  NORMALIZE, CHUNK, EMBED), so the table grows at five rows per document forever.
 - **Why it doesn't hurt yet**: a few hundred documents is a few thousand rows. Postgres does not
   notice.
 - **Trigger to address**: the first bulk archive ingest. At the ~5GB corpus A-PAG expects, this
@@ -356,3 +356,236 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   `ExtractedTable` at extraction time, which makes attribution exact for every format. That is a
   change to a shipped stage and a re-extraction of the corpus, so it is worth doing once, with
   the embedding work, rather than twice.
+
+### 20. The embedding model is English-only, and ~10–15% of the corpus is not
+- **Status**: Deliberate, with the gap recorded rather than hidden.
+- **Context**: `BAAI/bge-base-en-v1.5` is an English model. `EmbeddingJobHandler` reads the
+  language normalization already detected and routes a non-English document to
+  `SKIPPED_UNSUPPORTED_LANGUAGE` instead of embedding it.
+- **Why skipping beats embedding anyway**: an English tokenizer turns Devanagari into unknown
+  tokens and emits a vector that matches nothing. The document would be *in* the index and
+  permanently unfindable, with no error anywhere to explain it. The same reasoning as the quality
+  gate's `LOW_TEXT_DENSITY` check: a recorded gap can be found and fixed, a silent one cannot.
+- **Current behaviour**: the skip is an audit row (`EMBEDDING_SKIPPED`) carrying the detected
+  language, so "which documents are waiting on a multilingual model" has a SQL answer.
+- **Trigger to address**: when Hindi retrieval is actually required. The change is configuration
+  plus a migration — `EMBEDDING_MODEL` to a multilingual model, `EMBEDDING_SKIP_NON_ENGLISH=false`,
+  and, if the new model's width differs, a new `vector(N)` column and a full re-embed. BGE-M3
+  (1024-dim) is the standing candidate. Because chunking is a separate stage, a re-embed re-runs
+  one worker over existing `document_chunks` rows; it does not re-chunk or re-extract anything.
+
+### 21. Embedding dimension is fixed in a migration, not configuration
+- **Status**: Structural, and correct — but worth knowing before a model swap is proposed.
+- **Context**: `document_chunks.embedding` is `vector(768)`, fixed by migration `0014`.
+  `settings.EMBEDDING_DIMENSIONS` must agree with it, and `alembic check` fails the build if the
+  ORM and the migration drift apart.
+- **Why it is not a tuning knob**: pgvector columns are typed by width. Changing
+  `EMBEDDING_MODEL` to a model of a different dimension without a migration makes every insert
+  fail at the database; with a migration, every existing vector is meaningless and must be
+  recomputed, because vectors from two different models do not share a space.
+- **Defence in depth**: `FastEmbedProvider` probes the model's real output width at load and
+  refuses to start if it disagrees with the configured value, so the mismatch surfaces at worker
+  boot rather than as a wall of failed jobs. The column width is the backstop if that is bypassed
+  (`tests/integration/test_vector_search.py::test_wrong_dimension_is_rejected_by_the_database`).
+- **Trigger to address**: none — this is the intended design. Listed so the cost of a model change
+  is understood as "migration + full re-embed", not "edit `.env`".
+
+### 22. Documents that predate a stage are stranded until backfilled
+- **Status**: Understood, with a tool for it; not automatic.
+- **Context**: each stage enqueues the next stage's job on success. A document that came to rest
+  before a stage existed therefore has no job for it and never will. There are currently 26
+  documents at `AWAITING_CLASSIFICATION` from before extraction/normalization shipped; their
+  `CHUNK` jobs fail with `NoSuchKey` because no `normalized/{id}.json` was ever written for them.
+- **Why the failure is correct**: the handler treats a missing artifact as transient (storage
+  errors usually are), retries three times, then leaves the job `FAILED` with the document's
+  status untouched. Nothing is corrupted; the work simply cannot proceed from where it stopped.
+- **Current behaviour**: `backfill_jobs.py` enqueues missing jobs for documents in a given state
+  and is idempotent. It cannot fix the 26 above on its own, because they need re-running from
+  `EXTRACT` while sitting in a status `ExtractionJobHandler` does not accept — that needs a status
+  reset first.
+- **Trigger to address**: before the bulk archive ingest, since the same situation recurs at every
+  future stage boundary. The durable fix is a small reconciliation command that maps a document's
+  status to the stage that should own it next and re-queues from there.
+
+### 23. ✅ A slow job outlived its lease and burned retries while succeeding (Closed)
+- **Found**: reprocessing A-PAG's own corpus. A 21MB / 1,351-page PDF took **139s** to extract
+  against a 60s lease; embedding its ~2,400 chunks took ~9 minutes. The reaper returned both jobs
+  to `PENDING` **and incremented `retry_count`** while the worker was succeeding. At
+  `MAX_JOB_RETRIES=3`, any document slow enough to be reaped three times would be marked `FAILED`
+  with the work still in flight — and with more than one worker per stage, the re-queued job would
+  be claimed and processed concurrently by a second worker.
+- **Root cause**: the reaper recovers jobs whose worker died holding a lease, but infers death from
+  an expired lease. That silently assumes every job finishes inside one lease period, while
+  processing time is a function of document size.
+- **Fix**: `_LeaseRenewer` in `src/workers/base_worker.py` renews the lease from a daemon thread
+  while `process_job()` runs, at `lease_seconds / 3`. Renewal is conditional on
+  `status = 'RUNNING' AND worker_id = :worker_id`, so a worker that *was* reaped and replaced
+  cannot steal the lease back from its new owner. A lease that stops moving now means the worker
+  stopped — the distinction the reaper was always trying to make.
+- **Regression tests**: `tests/unit/test_worker_lease_renewal.py` — the lease advances during a
+  long job, a slow job is not reaped and burns no retry, renewal stops when the job ends, and a
+  genuinely abandoned lease is still recovered. The first two fail against the pre-fix code.
+
+### 24. Extraction memory scales with document size
+- **Status**: Bounded, not eliminated.
+- **Context**: pdfplumber holds page objects for the document it parses. The 1,351-page PDF above
+  peaked at **3.6GB RSS**. The 100MB upload cap bounds the *compressed file*, and says nothing
+  about what parsing it costs — that file was 21MB.
+- **Why it matters**: the Azure VM has 3.8GB of RAM in total, shared with Postgres, MinIO, the API
+  and five workers. An OOM kill is **not** a `PermanentProcessingError`: the container dies, the
+  lease lapses, the reaper re-queues the job, and the next worker OOMs on the same document —
+  an infinite crash loop that also takes down whatever shares the host.
+- **What was done**: `MAX_PDF_PAGES` moved from a module constant to `settings`, so a deployment
+  can lower the ceiling without a code change (prod sets **600**); `mem_limit` added to the
+  extraction and embedding containers in both compose files, so the cost is attributable and
+  contained rather than host-wide. Rejecting a document with `PAGE_LIMIT_EXCEEDED` is strictly
+  better than the crash loop.
+- **Still open**: the relationship between page count and memory is empirical (~2.7MB/page on one
+  sample), not enforced. A pathological 600-page PDF could still exceed the limit. The durable fix
+  is streaming extraction page-by-page instead of holding the whole document; the trigger is the
+  first `PAGE_LIMIT_EXCEEDED` rejection of a document A-PAG actually needs.
+
+### 25. ✅ The container healthcheck could not tell a long job from a dead worker (Closed)
+- **Found**: alongside #23. `apag-extraction-worker` reported `unhealthy` for the entire 139s it
+  was working correctly, because the heartbeat file was only touched in the **poll loop**, which
+  does not run during a single long `process_job()` call.
+- **Why it mattered**: under restart-on-unhealthy, the worker doing the most expensive job in the
+  queue is the one most likely to be killed — and killed repeatedly, since the job is re-queued
+  each time. It also trains whoever is watching to ignore `unhealthy`.
+- **Fix**: `_LeaseRenewer` touches the heartbeat on the same cycle as the lease renewal, so
+  liveness is reported from inside the work rather than only between units of work.
+
+### 26. ✅ Raw SQL bound `uuid.UUID` directly, which SQLite refuses (Closed)
+- **Found**: while writing the tests for #23. `text()` carries no type information, so SQLAlchemy
+  passes the value to the driver untouched — and sqlite3 rejects a `uuid.UUID` with "type 'UUID'
+  is not supported". The two backends also disagree on spelling: SQLAlchemy's `Uuid` type stores
+  native `uuid` on Postgres but **dash-less 32-character hex** on SQLite, so the obvious `str(id)`
+  workaround matches zero rows there — and an `UPDATE` affecting zero rows raises nothing.
+- **Impact**: `_mark_job_completed`, `_mark_job_failed` and the retry path were unreachable from
+  the SQLite-backed unit tests. Production was unaffected (Postgres), but the paths that decide
+  whether a job is retried or condemned had no unit coverage.
+- **Fix**: `_job_id_param()` renders the id per dialect, so one spelling works on both and those
+  paths are now exercisable in unit tests.
+
+### 27. ✅ List and search filtered permissions in Python, after the query (Closed)
+- **Found**: while designing retrieval, which must not copy the pattern. `list_documents` and
+  `search_documents` fetched a page and then dropped the rows the caller could not see:
+  ```python
+  docs, total = repo.list_paginated(limit=limit, offset=offset)
+  visible = [d for d in docs if _can_view(d, current_user)]
+  ```
+- **Three separate consequences**:
+  1. `total` was the **unfiltered** count and was returned to the client, disclosing how many
+     restricted documents exist. Verified against the live corpus: a user owning nothing saw
+     `total=63` against 59 visible documents — the difference being exactly the restricted count.
+  2. Invisible rows **consumed slots** in the page, so `limit=10` could return three documents
+     while visible ones waited on the next page.
+  3. `offset` counted rows the caller could not see, so paging forward skipped visible documents.
+- **Fix**: the predicate moved into the query. `list_paginated()` and `search()` now take
+  `viewer_id` and `viewer_is_admin` as **required keyword arguments with no default** — a default
+  would have to mean either "see everything" (a silent leak the first time someone forgets) or
+  "see nothing" (a silent empty page), so forgetting is now a `TypeError` at the call site.
+- **The rule was also spelled three times** — `_can_view()`, the list comprehensions, and
+  retrieval's hand-written SQL — which is how a policy change lands in one place and not the
+  others. `src/modules/auth/access.py` now holds it once, in a Python form and a SQL form, and
+  `tests/unit/test_access_rule.py` enumerates all 24 combinations and requires the two to agree.
+  Two disagreements that the equivalence tests forced out: SQL `classification <> 'RESTRICTED'`
+  evaluates to NULL for a NULL classification and would have hidden the row (fixed with
+  `IS DISTINCT FROM`), and an anonymous viewer would have emitted `uploader_user_id = NULL`.
+- **Regression tests**: `tests/unit/test_list_search_permissions.py` — 5 of its 9 tests fail
+  against the pre-fix code, one per symptom above.
+- **Still open**: chunk-level full-text search does not exist (`document_chunks` has no
+  `search_vector`), so hybrid lexical+vector retrieval is not possible yet. `ts_rank` scores are
+  unnormalised, so fusing them with vector scores would need Reciprocal Rank Fusion rather than
+  score addition.
+
+### 28. ✅ 2.9% of embedded passages were silently truncated at the model's window (Closed)
+- **Found**: building the token readout for the search UI, which meant measuring real token
+  counts for the first time.
+- **Cause**: chunks were sized in **characters** (`CHUNK_MAX_CHARS = 2000`) while the model's
+  window is in **tokens** (512). Those agree only at a particular ratio. This corpus averages
+  4.11 chars/token — so 512 tokens is ~2100 characters and a 2000-character budget fit with 5%
+  to spare — but passages containing code, terminal output or ASCII tables run ~3.15, where 512
+  tokens is only ~1600 characters. 83 of 2,816 chunks (2.9%) overflowed; the worst was 1,023
+  tokens, meaning **half that passage never reached the model**. fastembed truncated silently:
+  the stored text was whole, the vector covered only its head, and a search for anything in the
+  tail could not match.
+- **The part worth remembering**: every one of the 83 was *within* the character budget, and
+  every one had a proper section heading. The chunker was obeying its rules exactly. The rules
+  were in a unit that could not see what they constrained. `CLAUDE.md` predicted this for
+  Devanagari (2-3x more tokens per character); it arrived first in English technical prose.
+- **Fix**: sizing moved behind a `SizeBudget` (`chunking/sizing.py`). `TokenBudget` measures
+  through the model's own tokenizer and caps at `min(CHUNK_MAX_TOKENS, model window)`, so neither
+  a generous setting nor a model swap can produce a chunk the model would truncate.
+  `CharacterBudget` remains as the fallback for callers with no tokenizer. Table groups are split
+  by **rows** and never by characters, because hard-wrapping a table produces exactly the
+  fragment of numbers the repeated header exists to prevent.
+- **Verified on the real corpus**: re-chunked and re-embedded; chunks 2,816 → 2,860 (the dense
+  ones split further), truncated 83 → 0.
+- **Regression tests**: `tests/unit/test_chunk_sizing.py`, including one that pins the *old*
+  character budget as overflowing, so the bug cannot return unnoticed.
+
+### 29. ✅ Batch token counting reported the longest text's length for every text (Closed)
+- **Found**: within an hour of writing it, by looking at a live search response where all five
+  passages claimed exactly 689 tokens.
+- **Cause**: `Tokenizer.encode_batch` pads every sequence out to the longest in the batch, and the
+  shipped tokenizer has padding configured. Disabling truncation was not enough; padding inflates
+  short texts instead of capping long ones.
+- **Why it would have survived review**: the numbers were plausible in isolation and only obviously
+  wrong side by side. It also inflated `context_tokens` (3,445 against a true 1,811) and produced
+  false truncation warnings — a measurement built to reveal a silent failure, itself failing
+  silently.
+- **Fix**: `no_padding()` alongside `no_truncation()` on the counting tokenizer. Two regression
+  tests in `tests/unit/test_embedding.py` fail against the pre-fix code.
+
+### 30. Retrieval quality is unmeasured — there is no evaluation set
+- **Status**: Open, and the blocker for every tuning decision that follows.
+- **Context**: hybrid search ships with several constants chosen from the literature and from
+  inspection, not from measurement on this corpus: RRF's `k=60` (Cormack et al. 2009), the
+  candidate pool multiplier of 5, the 'A'/'B' weighting of body against section heading, and the
+  choice of `english` as the text-search configuration.
+- **Why they are not tunable yet**: tuning requires knowing whether a change helped, which
+  requires a set of questions with known-correct passages. There is none. Without it, adjusting
+  `k` is guessing, and the honest thing is to leave a defensible published default in place.
+- **What exists instead**: the `mode` parameter, which lets a disappointing result be attributed
+  to an arm — "the lexical arm found it and the vector arm did not" is a real diagnosis, and
+  `semantic_rank`/`lexical_rank` on every result make it visible per passage. Measured ad hoc on
+  16 queries, the lexical arm added results the vector arm missed on 6 of them.
+- **Trigger to address**: before tuning anything, and before choosing between embedding models on
+  anything other than cost. Thirty to fifty real A-PAG questions with the passages that answer
+  them would be enough to compute recall@k and MRR, and would turn every constant above from a
+  guess into a decision. That list has to come from people who know the corpus, not from me.
+
+### 31. ✅ Integration tests built their schema from the ORM, so no migration ever ran (Closed)
+- **Found**: writing the first test of the lexical arm, which returned nothing. The query was
+  correct; the trigger that populates `search_vector` had simply never been created.
+- **Cause**: `tests/integration/conftest.py` built the schema with `Base.metadata.create_all()`,
+  which knows only what the ORM declares. Triggers, functions and several constraints live in
+  migrations, so the test database was missing the `audit_log` immutability triggers (`0003`),
+  the partial unique index that is the real dedup guarantee (`0004`), and both tsvector triggers
+  (`0006`, `0015`).
+- **Why it mattered beyond this feature**: any test of DB-enforced behaviour was passing or
+  failing for the wrong reason, and a test asserting that `audit_log` cannot be updated would
+  have passed against a database with no such trigger.
+- **Fix**: the suite now runs `alembic upgrade head` against the throwaway container, so the test
+  schema is the schema that ships. `env.py` was changed to respect a caller-supplied
+  `sqlalchemy.url` instead of unconditionally overriding it with `settings.DATABASE_URL` — which
+  would have pointed the suite's migrations at the developer's real database, exactly what the
+  existing `APAG_ALLOW_DESTRUCTIVE_DB_TESTS` guard exists to prevent.
+
+### 32. The chunking worker loads the embedding model purely to tokenize
+- **Status**: Accepted trade-off, with a cheaper option deliberately not taken.
+- **Context**: sizing chunks in tokens requires the model's tokenizer, and the only robust way to
+  obtain it is `FastEmbedProvider`, which loads the ONNX model. The chunking worker therefore
+  carries ~640MB resident (observed 524MB) for a stage that performs no inference.
+- **The cheaper option**: the tokenizer itself is a 695KB `tokenizer.json` inside fastembed's
+  cache. Loading it directly would cost a few MB. It was **not** taken because finding it means
+  hardcoding fastembed's cache layout (`models--Qdrant--bge-base-en-v1.5-onnx-Q/snapshots/<hash>/`),
+  which is undocumented and would break silently on a fastembed upgrade — and the failure mode
+  is a fallback to the character budget, i.e. a quiet return of debt #28.
+- **What contains it**: `mem_limit` on the chunking container (2g dev, 1200m prod) so the cost is
+  attributable and bounded rather than host-wide, and `ChunkingService.with_model_tokenizer()`
+  falls back to the character budget with a WARNING rather than refusing to start.
+- **Trigger to address**: if the VM proves too small for two model-loading workers, or if
+  fastembed exposes a supported way to fetch a tokenizer without the model. Either makes this a
+  small, local change.

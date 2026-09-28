@@ -1,17 +1,25 @@
 name: CI
 
-# Runs on feature branches (fast feedback while working) and on everything targeting the
-# main_ci gate. Deliberately does NOT run on pushes to `main` — by the time code reaches
-# main it has already passed here; main's job is releasing, not re-verifying.
+# Runs on every working branch and on every pull request, whatever it targets. Deliberately does
+# NOT run on pushes to `main` — by the time code reaches main it has already passed here; main's
+# job is releasing, not re-verifying.
+#
+# The branch list is not just `feature/**`, and `pull_request` carries no `branches:` filter, and
+# both of those are deliberate. Narrower rules silently skipped work rather than failing it: a
+# `fix/**` branch matched no push trigger, and a stacked PR targeting another feature branch
+# matched no pull_request trigger, so a security fix was reviewable with **no checks reported at
+# all**. A gate that is absent looks exactly like a gate that passed, so this errs toward running
+# CI on work that did not need it.
 on:
   push:
     branches:
       - 'feature/**'
+      - 'fix/**'
+      - 'chore/**'
+      - 'docs/**'
+      - 'refactor/**'
       - main_ci
   pull_request:
-    branches:
-      - main_ci
-      - main
 
 # A new push to the same branch cancels the previous in-flight run.
 concurrency:
@@ -50,7 +58,10 @@ jobs:
     # This is a throwaway CI database — the committed dev password is fine here.
     services:
       postgres:
-        image: postgres:16-alpine
+        # pgvector build, not stock postgres: migration 0014 runs CREATE EXTENSION vector, and
+        # the integration tests exercise real similarity search. Stock postgres fails the
+        # migration outright with "extension \"vector\" is not available".
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: apag_knowledge_base
           POSTGRES_USER: postgres
@@ -97,7 +108,10 @@ jobs:
     # DDL would pass all tests and only surface on a real deployment.
     services:
       postgres:
-        image: postgres:16-alpine
+        # pgvector build, not stock postgres: migration 0014 runs CREATE EXTENSION vector, and
+        # the integration tests exercise real similarity search. Stock postgres fails the
+        # migration outright with "extension \"vector\" is not available".
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: apag_knowledge_base
           POSTGRES_USER: postgres

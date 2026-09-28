@@ -1,4 +1,4 @@
-"""Chunking Worker for Stage 6 (splitting into retrievable passages)."""
+"""Embedding Worker for Stage 7 (turning passages into vectors)."""
 
 import logging
 from collections.abc import Callable
@@ -8,9 +8,9 @@ from sqlalchemy.orm import Session
 from src.core.config import settings
 from src.core.errors import PermanentProcessingError, TransientProcessingError
 from src.db.engine import SessionLocal
-from src.modules.document_pipeline.chunking.service import ChunkingService
-from src.modules.document_pipeline.chunking_job_handler import (
-    ChunkingJobHandler,
+from src.modules.document_pipeline.embedding.service import EmbeddingService
+from src.modules.document_pipeline.embedding_job_handler import (
+    EmbeddingJobHandler,
 )
 from src.modules.document_pipeline.repository import PostgreSQLDocumentRepository
 from src.storage.bucket_manager import BucketManager
@@ -19,14 +19,14 @@ from src.workers.base_worker import BaseWorker, JobItem
 logger = logging.getLogger(__name__)
 
 
-class ChunkingWorker(BaseWorker):
-    """Background worker dedicated to CHUNK stage processing."""
+class EmbeddingWorker(BaseWorker):
+    """Background worker dedicated to EMBED stage processing."""
 
     def __init__(
         self,
         session_factory: Callable[[], Session] | None = None,
         bucket_manager: BucketManager | None = None,
-        chunking_service: ChunkingService | None = None,
+        embedding_service: EmbeddingService | None = None,
         poll_interval: float | None = None,
         lease_seconds: int | None = None,
         max_retries: int | None = None,
@@ -37,7 +37,7 @@ class ChunkingWorker(BaseWorker):
         heartbeat_file: str | None = None,
     ):
         super().__init__(
-            stage="CHUNK",
+            stage="EMBED",
             session_factory=session_factory or SessionLocal,
             poll_interval=poll_interval or settings.WORKER_POLL_INTERVAL_SECONDS,
             lease_seconds=lease_seconds or settings.SCAN_WORKER_LEASE_SECONDS,
@@ -49,20 +49,16 @@ class ChunkingWorker(BaseWorker):
             heartbeat_file=heartbeat_file or settings.WORKER_HEARTBEAT_FILE,
         )
         self.bucket_manager = bucket_manager or BucketManager()
-        # Built with the model's tokenizer so chunk sizes are measured in the unit that
-        # actually constrains the embedding stage. This loads the embedding model in the
-        # chunking worker (~640MB) purely to tokenize, which is why the container carries a
-        # memory limit — see docker-compose.yml and KNOWN_DEBTS.md #32.
-        self.chunking_service = chunking_service or ChunkingService.with_model_tokenizer()
+        self.embedding_service = embedding_service or EmbeddingService()
 
     def process_job(self, job: JobItem) -> None:
-        """Processes a claimed CHUNK job by delegating to ChunkingJobHandler."""
+        """Processes a claimed EMBED job by delegating to EmbeddingJobHandler."""
         with self.session_factory() as session:
             repo = PostgreSQLDocumentRepository(session)
-            handler = ChunkingJobHandler(
+            handler = EmbeddingJobHandler(
                 bucket_manager=self.bucket_manager,
                 repository=repo,
-                chunking_service=self.chunking_service,
+                embedding_service=self.embedding_service,
                 db_session=session,
             )
 
@@ -76,6 +72,6 @@ class ChunkingWorker(BaseWorker):
                 raise PermanentProcessingError(outcome.failure_reason)
 
             logger.info(
-                "Chunking job processed: job_id=%s doc_id=%s final_status=%s",
+                "Embedding job processed: job_id=%s doc_id=%s final_status=%s",
                 job.job_id, job.document_id, outcome.status.value,
             )
