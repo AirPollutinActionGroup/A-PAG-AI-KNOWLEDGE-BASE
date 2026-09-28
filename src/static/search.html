@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>A-PAG Knowledge Base</title>
+<link rel="icon" href="/assets/apag-logo.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -65,13 +66,18 @@ button { cursor: pointer; background: none; border: 0; }
 #login { display: grid; place-items: center; min-height: 100dvh; padding: 24px; }
 .login-card { width: 100%; max-width: 21.5rem; }
 .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 26px; }
+/* The real A-PAG mark. It is drawn for a white field — black wordmark, yellow block behind the
+   A — so in dark mode it keeps its own white chip rather than being inverted or knocked out.
+   Recolouring someone's logo to suit a theme is a good way to ship a wrong one. */
 .mark {
-  display: grid; place-items: center; width: 34px; height: 34px; flex: none;
-  background: var(--yellow); color: #14130F; border-radius: 8px;
-  font: 700 14px/1 "Archivo", sans-serif;
+  width: 36px; height: 36px; flex: none; border-radius: 8px;
+  background: #FFFFFF; padding: 2px; object-fit: contain;
+  box-shadow: 0 0 0 1px var(--line);
 }
-.brand b { font: 600 16px/1.2 "Archivo", sans-serif; display: block; }
+.brand b { font: 600 16px/1.2 "Archivo", sans-serif; display: block; letter-spacing: -.01em; }
 .brand span { font-size: 12.5px; color: var(--ink-faint); }
+.brand-lg .mark { width: 46px; height: 46px; }
+.brand-lg b { font-size: 18px; }
 .login-card h1 { font: 600 21px/1.25 "Archivo", sans-serif; margin: 0 0 6px; }
 .login-card > p { margin: 0 0 20px; font-size: 13.5px; color: var(--ink-faint); }
 .login-card label { display: block; font-size: 12.5px; color: var(--ink-soft); margin: 13px 0 5px; }
@@ -280,8 +286,9 @@ details.detail > summary:hover { color: var(--ink); }
 <!-- =============================================== sign in: its own full view -->
 <section id="login">
   <form class="login-card" id="loginForm">
-    <div class="brand">
-      <span class="mark">A</span>
+    <div class="brand brand-lg">
+      <img class="mark" src="/assets/apag-logo.jpg"
+           alt="A-PAG, Air Pollution Action Group" width="36" height="36">
       <span><b>A&#8209;PAG</b><span>Knowledge Base</span></span>
     </div>
     <h1>Sign in</h1>
@@ -300,7 +307,8 @@ details.detail > summary:hover { color: var(--ink); }
   <aside class="rail">
     <div class="rail-top">
       <div class="brand">
-        <span class="mark">A</span>
+        <img class="mark" src="/assets/apag-logo.jpg"
+             alt="A-PAG, Air Pollution Action Group" width="36" height="36">
         <span><b>A&#8209;PAG</b><span>Knowledge Base</span></span>
       </div>
       <button class="rail-btn" id="newChat"><span class="ic">+</span> New chat</button>
