@@ -239,14 +239,17 @@ Transient vs permanent follows the usual split: model load and memory pressure a
 is likely to work); a dimension mismatch or a `CHUNKED` document with no chunks is permanent
 (retrying produces the identical error).
 
-**Token accounting.** Chunks are sized in characters but the model's window is in tokens (512
-here), and where they disagree fastembed truncates — the vector covers only the head of a passage
-stored whole, with no error raised. `count_tokens()` measures true length through a tokenizer with
-**both truncation and padding disabled**: truncation would cap every answer at the window so
-overflow is invisible, and `encode_batch` pads to the longest text in the batch so every passage in
-a batch reports an identical length (that one shipped briefly — `KNOWN_DEBTS.md` #29). 2.9% of the
-current corpus is truncated, concentrated in prose chunks containing code or terminal output, which
-tokenize at ~1.9 chars/token against a 4.11 corpus mean (`KNOWN_DEBTS.md` #28).
+**Token accounting.** `count_tokens()` measures true length through a tokenizer with **both
+truncation and padding disabled**: truncation would cap every answer at the window so overflow —
+the only thing worth measuring — is invisible, and `encode_batch` pads to the longest text in the
+batch so every passage in a batch reports an identical length (that one shipped briefly, and was
+caught by a live response where five passages all claimed 689 tokens — `KNOWN_DEBTS.md` #29).
+
+This is what chunking now sizes against, so **no chunk exceeds the window**: verified 0 of 2,860
+after the fix, down from 83 of 2,816 when the budget was in characters (`KNOWN_DEBTS.md` #28).
+`EmbeddingService` still logs a WARNING and records `truncated_count` if one ever does, because
+the guarantee depends on the chunking stage having a tokenizer — a worker that falls back to
+`CharacterBudget` silently reintroduces the gap.
 
 **Retrieval filters permissions in SQL**, via `visible_documents_clause()` from
 `src/modules/auth/access.py` — the same predicate list and search use. A RESTRICTED chunk filtered
