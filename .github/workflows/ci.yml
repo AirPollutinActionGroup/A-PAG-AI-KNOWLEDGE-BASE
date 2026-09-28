@@ -61,7 +61,7 @@ jobs:
         # pgvector build, not stock postgres: migration 0014 runs CREATE EXTENSION vector, and
         # the integration tests exercise real similarity search. Stock postgres fails the
         # migration outright with "extension \"vector\" is not available".
-        image: pgvector/pgvector:pg16
+        image: paradedb/paradedb:0.25.10-pg16
         env:
           POSTGRES_DB: apag_knowledge_base
           POSTGRES_USER: postgres
@@ -111,7 +111,7 @@ jobs:
         # pgvector build, not stock postgres: migration 0014 runs CREATE EXTENSION vector, and
         # the integration tests exercise real similarity search. Stock postgres fails the
         # migration outright with "extension \"vector\" is not available".
-        image: pgvector/pgvector:pg16
+        image: paradedb/paradedb:0.25.10-pg16
         env:
           POSTGRES_DB: apag_knowledge_base
           POSTGRES_USER: postgres
