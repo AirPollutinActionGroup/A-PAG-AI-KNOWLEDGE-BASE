@@ -49,7 +49,11 @@ class ChunkingWorker(BaseWorker):
             heartbeat_file=heartbeat_file or settings.WORKER_HEARTBEAT_FILE,
         )
         self.bucket_manager = bucket_manager or BucketManager()
-        self.chunking_service = chunking_service or ChunkingService()
+        # Built with the model's tokenizer so chunk sizes are measured in the unit that
+        # actually constrains the embedding stage. This loads the embedding model in the
+        # chunking worker (~640MB) purely to tokenize, which is why the container carries a
+        # memory limit — see docker-compose.yml and KNOWN_DEBTS.md #32.
+        self.chunking_service = chunking_service or ChunkingService.with_model_tokenizer()
 
     def process_job(self, job: JobItem) -> None:
         """Processes a claimed CHUNK job by delegating to ChunkingJobHandler."""

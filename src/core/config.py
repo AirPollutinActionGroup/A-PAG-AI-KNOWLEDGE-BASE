@@ -74,6 +74,27 @@ class Settings(BaseSettings):
     CHUNK_TARGET_CHARS: int = 1600
     CHUNK_MAX_CHARS: int = 2000
 
+    # Token budget, used when the chunking stage has a tokenizer. This is the real constraint —
+    # the character figures above are a proxy that held only while text stayed near the corpus
+    # average, and 2.9% of the corpus was silently truncated where it did not (KNOWN_DEBTS.md
+    # #28). The effective maximum is min(CHUNK_MAX_TOKENS, model window), so a model with a
+    # larger window does not silently produce enormous chunks: precision falls as one passage
+    # covers more distinct ideas, whatever the model can ingest.
+    #
+    # 500 rather than 512 leaves headroom so a boundary case cannot land exactly on the limit.
+    CHUNK_MAX_TOKENS: int = 500
+    CHUNK_TARGET_TOKENS: int = 400
+
+    # Below this cosine similarity, retrieval reports that it found nothing rather than returning
+    # its least-bad guess. Measured on this corpus with bge-base-en-v1.5: on-topic questions score
+    # 0.69-0.84 against their best passage, plainly off-topic ones 0.45-0.50. 0.55 sits in that
+    # gap, leaning permissive — a weak result the reader can judge from its citation is better
+    # than a refusal on a question the corpus does answer.
+    #
+    # Model-specific. Every embedding model has its own similarity distribution, so this needs
+    # re-measuring on a model change, not carrying over.
+    SEARCH_MIN_SIMILARITY: float = 0.55
+
     # Embedding.
     # EMBEDDING_DIMENSIONS must match the migrated vector(N) column. It is not a tuning knob:
     # changing it requires a migration and a full re-embed of the corpus, so FastEmbedProvider

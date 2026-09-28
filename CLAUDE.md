@@ -162,16 +162,35 @@ recovered it from each format's own declarations, and this stage never re-derive
 
 Oversized sections fall back to recursive splitting (paragraph → sentence → hard wrap), and the
 pieces are repacked toward the target so a split section doesn't shatter into one-sentence
-fragments. Tables are never split mid-row; a large table becomes row groups that each **repeat
-the header**, because otherwise group 7 of a budget sheet is a wall of numbers with no column
-names. There is deliberately **no overlap** — a Jan 2026 analysis found it adds indexing cost
+fragments. A hard wrap derives its width from the ratio measured on *that* text rather than a
+global constant — the lesson of #28 being that a ratio holding for prose does not hold for a
+table of numbers. Tables are never split mid-row; a large table becomes row groups that each
+**repeat the header**, because otherwise group 7 of a budget sheet is a wall of numbers with no
+column names. An oversized group is re-split **by rows**, never by characters, since
+hard-wrapping a table produces exactly the fragment the repeated header exists to prevent; a
+single row too wide for the budget is emitted whole for the same reason. There is deliberately **no overlap** — a Jan 2026 analysis found it adds indexing cost
 with no measurable recall gain, and that holds doubly when splitting on real heading boundaries.
 
-Sizing is in **characters, not tokens** (`CHUNK_TARGET_CHARS`/`CHUNK_MAX_CHARS`): the tokenizer
-belongs to the embedding model, which arrives a stage later. The budget is deliberately
-conservative because Devanagari runs 2–3x more tokens per character than English, and a target
-tuned on English prose would silently truncate Hindi documents at embed time — surfacing months
-later as unexplained poor retrieval rather than as an error.
+Sizing is delegated to a `SizeBudget` (`chunking/sizing.py`) and measured in **tokens**, via
+`TokenBudget` built from the configured model's tokenizer. It used to be measured in characters,
+on the reasoning that the tokenizer belongs to the embedding model and that arrives a stage
+later. That proxy held near the corpus average and broke outside it: 2.9% of chunks overflowed
+the 512-token window and were silently truncated at embed time, **every one of them inside the
+character budget** (`KNOWN_DEBTS.md` #28). Cut points were never the problem; the budget could not
+see what it constrained.
+
+`TokenBudget` caps at `min(CHUNK_MAX_TOKENS, model window)`, so neither a generous setting nor a
+model swap to a larger window (BGE-M3's is 8192) can produce a chunk the model would truncate, or
+one so large that precision suffers. `CharacterBudget` remains for callers with no tokenizer —
+unit tests, and a worker whose model fails to load, which logs a WARNING because it quietly
+reintroduces the bug. `TokenCounter` is a narrow Protocol satisfied structurally by
+`EmbeddingProvider`, so chunking depends on *tokenization*, not on embedding; the coupling was
+always there (2000 chars was chosen with a 512-token window in mind) and writing it as a character
+constant hid it rather than removing it.
+
+The cost: `ChunkingWorker` loads the embedding model purely to tokenize (~640MB), which is why
+that container has a `mem_limit`. See `KNOWN_DEBTS.md` #32 for the lighter option and why it was
+not taken.
 
 `document_chunks` is the one pipeline artifact that lives in Postgres instead of object storage.
 That's deliberate: chunks are queried, not merely stored — the embedding stage adds a vector
@@ -220,14 +239,17 @@ Transient vs permanent follows the usual split: model load and memory pressure a
 is likely to work); a dimension mismatch or a `CHUNKED` document with no chunks is permanent
 (retrying produces the identical error).
 
-**Token accounting.** Chunks are sized in characters but the model's window is in tokens (512
-here), and where they disagree fastembed truncates — the vector covers only the head of a passage
-stored whole, with no error raised. `count_tokens()` measures true length through a tokenizer with
-**both truncation and padding disabled**: truncation would cap every answer at the window so
-overflow is invisible, and `encode_batch` pads to the longest text in the batch so every passage in
-a batch reports an identical length (that one shipped briefly — `KNOWN_DEBTS.md` #29). 2.9% of the
-current corpus is truncated, concentrated in prose chunks containing code or terminal output, which
-tokenize at ~1.9 chars/token against a 4.11 corpus mean (`KNOWN_DEBTS.md` #28).
+**Token accounting.** `count_tokens()` measures true length through a tokenizer with **both
+truncation and padding disabled**: truncation would cap every answer at the window so overflow —
+the only thing worth measuring — is invisible, and `encode_batch` pads to the longest text in the
+batch so every passage in a batch reports an identical length (that one shipped briefly, and was
+caught by a live response where five passages all claimed 689 tokens — `KNOWN_DEBTS.md` #29).
+
+This is what chunking now sizes against, so **no chunk exceeds the window**: verified 0 of 2,860
+after the fix, down from 83 of 2,816 when the budget was in characters (`KNOWN_DEBTS.md` #28).
+`EmbeddingService` still logs a WARNING and records `truncated_count` if one ever does, because
+the guarantee depends on the chunking stage having a tokenizer — a worker that falls back to
+`CharacterBudget` silently reintroduces the gap.
 
 **Retrieval filters permissions in SQL**, via `visible_documents_clause()` from
 `src/modules/auth/access.py` — the same predicate list and search use. A RESTRICTED chunk filtered
@@ -283,6 +305,18 @@ the document list/search cannot drift on what "visible" means.
 
 Identity comes from `get_current_user`, never from the request — there is a test asserting a
 `user_id` query parameter is ignored.
+
+**Grounding.** Vector search always returns something: there is no such thing as no nearest
+neighbour. Without a check, a question about cake comes back with the nearest policy passage, a
+page citation and every appearance of confidence. `assess()` gates on raw **cosine similarity**,
+not the RRF score — the score is built from ranks and cannot tell "best in the corpus" from "best
+of a bad lot", whereas similarity is absolute and comparable across queries. Below
+`SEARCH_MIN_SIMILARITY` the endpoint returns `grounded=false` and **withholds the passages**
+rather than flagging them, because a citation beside text that does not answer the question is
+how someone ends up quoting something irrelevant in a government submission. An exact lexical
+match counts as grounded whatever the similarity: if the words are literally in a document, the
+corpus contains them. The 0.55 default was measured on this corpus (on-topic 0.69–0.84,
+off-topic 0.45–0.50) and is **model-specific** — re-measure it on a model change.
 
 ### Storage: 4-bucket + repository abstraction
 

@@ -113,7 +113,7 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 
 | Path | What it is |
 |---|---|
-| `/search` | **Search UI** — ask the corpus a question, get ranked passages with citations and a live token readout. Sign in with the same account as the API. |
+| `/search` | **Knowledge Base UI** — a chat-style page: sign in, ask questions, upload documents inline and watch them become searchable, and open "What happened" on any answer to see the token accounting and which search found each passage. Conversations are kept in your own browser. |
 | `/` | Studio UI — upload and watch the ingestion pipeline (predates auth/multi-file, see `KNOWN_DEBTS.md` #7). |
 | `/docs` | Swagger. |
 

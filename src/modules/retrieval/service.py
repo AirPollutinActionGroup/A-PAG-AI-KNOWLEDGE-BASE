@@ -27,6 +27,7 @@ import uuid
 from sqlalchemy import Float, cast, func, literal, select
 from sqlalchemy.orm import Session
 
+from src.core.config import settings
 from src.db.models import Document as DocumentORM
 from src.db.models import DocumentChunk as ChunkORM
 from src.modules.auth.access import is_admin, visible_documents_clause
@@ -36,7 +37,7 @@ from src.modules.retrieval.models import RetrievedChunk, TokenUsage
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["RetrievalService", "SearchMode", "is_admin"]
+__all__ = ["RetrievalService", "SearchMode", "assess", "is_admin"]
 
 # `websearch_to_tsquery`, not `plainto_tsquery`: it accepts quoted phrases, `or`, and `-term`, and
 # it never raises on malformed input. Quoted phrases matter here — "GRAP Stage III" as a phrase is
@@ -78,6 +79,10 @@ class RetrievalService:
             select(
                 ChunkORM.chunk_id.label("chunk_id"),
                 func.row_number().over(order_by=distance).label("rank"),
+                # Carried alongside the rank because it is the only absolute measure available:
+                # ranks say which passage is nearest, similarity says whether "nearest" means
+                # anything at all.
+                (1 - distance).label("similarity"),
             )
             .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
             .where(ChunkORM.embedding.is_not(None), *self._visible(user_id, viewer_is_admin))
@@ -156,6 +161,7 @@ class RetrievalService:
                 (contribution(sem) + contribution(lex)).label("score"),
                 sem_rank.label("semantic_rank"),
                 lex_rank.label("lexical_rank"),
+                (sem.c.similarity if sem is not None else literal(None)).label("similarity"),
             )
             .select_from(joined)
             .cte("fused")
@@ -173,6 +179,7 @@ class RetrievalService:
                 fused.c.score,
                 fused.c.semantic_rank,
                 fused.c.lexical_rank,
+                fused.c.similarity,
             )
             .select_from(fused)
             .join(ChunkORM, ChunkORM.chunk_id == fused.c.chunk_id)
@@ -204,6 +211,7 @@ class RetrievalService:
                 score=float(row["score"]),
                 semantic_rank=row["semantic_rank"],
                 lexical_rank=row["lexical_rank"],
+                similarity=float(row["similarity"]) if row["similarity"] is not None else None,
                 token_count=n,
                 truncated=n > window,
             )
@@ -228,3 +236,23 @@ class RetrievalService:
             usage.context_tokens, usage.truncated_results,
         )
         return results, usage
+
+
+def assess(results: list[RetrievedChunk]) -> tuple[bool, float | None]:
+    """Did this query actually find anything, or just return its least-bad guess?
+
+    Vector search always returns something — there is no such thing as no nearest neighbour —
+    so without this check a question about cake comes back with the nearest policy passage,
+    a citation, and every appearance of confidence. Cosine similarity is the only absolute
+    measure available; the RRF score is built from ranks and cannot distinguish "best in the
+    corpus" from "best of a bad lot".
+
+    An exact lexical match counts as grounded regardless of similarity: if the words are
+    literally in the document, the corpus does contain them, whatever the embedding thinks.
+    """
+    best = max((r.similarity for r in results if r.similarity is not None), default=None)
+    if any(r.lexical_rank is not None for r in results):
+        return True, best
+    if best is None:
+        return False, None
+    return best >= settings.SEARCH_MIN_SIMILARITY, best

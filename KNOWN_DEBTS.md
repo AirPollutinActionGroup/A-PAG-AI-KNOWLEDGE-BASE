@@ -499,34 +499,31 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   unnormalised, so fusing them with vector scores would need Reciprocal Rank Fusion rather than
   score addition.
 
-### 28. 2.9% of embedded passages were silently truncated at the model's token window
-- **Status**: Detected and surfaced; the underlying cause is not yet fixed.
-- **Context**: chunks are sized in **characters** (`CHUNK_MAX_CHARS=2000`) because the tokenizer
-  belongs to the embedding model, which arrives a stage after chunking. The model's window is in
-  **tokens** (512 for `bge-base-en-v1.5`). Where the two disagree, fastembed truncates: the vector
-  represents only the head of a passage the database stores whole. No exception, no warning.
-- **Measured on the real corpus**: 83 of 2,816 embedded chunks (2.9%) exceed 512 tokens. Worst
-  case 1,023 tokens — **half the passage never reached the model**. Token length p50=177,
-  p90=432, p99=559.
-- **What causes it**: the corpus averages 4.11 characters per token, but the offenders run about
-  **1.9** — they are code blocks, terminal output and ASCII tables (`+-----+`, rows of
-  underscores), where BPE has no useful merges. At 1.9 chars/token, 2000 characters is ~1050
-  tokens. `CLAUDE.md` anticipated exactly this ratio problem for Devanagari; it arrived first in
-  English technical text. None of the 83 are `is_table` chunks — these are prose chunks that
-  *contain* preformatted text, so the table-aware path never saw them.
-- **Why it matters**: a search for something mentioned only in a truncated tail cannot match it.
-  The passage looks complete in the UI, so the reader concludes the corpus lacks the answer.
-- **What was done**: `EmbeddingProvider.count_tokens()` measures true length through a tokenizer
-  with truncation *and padding* disabled; `EmbeddingService` logs a WARNING naming the document
-  and how many tokens were discarded; `GET /api/v1/search` returns `token_count`/`truncated` per
-  passage plus a `usage` block, and the search UI marks a truncated passage and says what it
-  means. A recorded gap can be found; a silent one cannot.
-- **Trigger to address**: before the bulk archive ingest, and certainly before Hindi documents are
-  embedded, where the ratio is worse. The real fix is token-aware chunking — ask the provider for
-  the window and split against it rather than against a character count — which is a chunking
-  change plus a re-chunk and re-embed of the corpus. Cheaper interim options: lower
-  `CHUNK_MAX_CHARS`, which penalises every ordinary chunk to fix 3% of them; or detect dense
-  passages at chunking time by their character-to-whitespace ratio and split those harder.
+### 28. ✅ 2.9% of embedded passages were silently truncated at the model's window (Closed)
+- **Found**: building the token readout for the search UI, which meant measuring real token
+  counts for the first time.
+- **Cause**: chunks were sized in **characters** (`CHUNK_MAX_CHARS = 2000`) while the model's
+  window is in **tokens** (512). Those agree only at a particular ratio. This corpus averages
+  4.11 chars/token — so 512 tokens is ~2100 characters and a 2000-character budget fit with 5%
+  to spare — but passages containing code, terminal output or ASCII tables run ~3.15, where 512
+  tokens is only ~1600 characters. 83 of 2,816 chunks (2.9%) overflowed; the worst was 1,023
+  tokens, meaning **half that passage never reached the model**. fastembed truncated silently:
+  the stored text was whole, the vector covered only its head, and a search for anything in the
+  tail could not match.
+- **The part worth remembering**: every one of the 83 was *within* the character budget, and
+  every one had a proper section heading. The chunker was obeying its rules exactly. The rules
+  were in a unit that could not see what they constrained. `CLAUDE.md` predicted this for
+  Devanagari (2-3x more tokens per character); it arrived first in English technical prose.
+- **Fix**: sizing moved behind a `SizeBudget` (`chunking/sizing.py`). `TokenBudget` measures
+  through the model's own tokenizer and caps at `min(CHUNK_MAX_TOKENS, model window)`, so neither
+  a generous setting nor a model swap can produce a chunk the model would truncate.
+  `CharacterBudget` remains as the fallback for callers with no tokenizer. Table groups are split
+  by **rows** and never by characters, because hard-wrapping a table produces exactly the
+  fragment of numbers the repeated header exists to prevent.
+- **Verified on the real corpus**: re-chunked and re-embedded; chunks 2,816 → 2,860 (the dense
+  ones split further), truncated 83 → 0.
+- **Regression tests**: `tests/unit/test_chunk_sizing.py`, including one that pins the *old*
+  character budget as overflowing, so the bug cannot return unnoticed.
 
 ### 29. ✅ Batch token counting reported the longest text's length for every text (Closed)
 - **Found**: within an hour of writing it, by looking at a live search response where all five
@@ -575,3 +572,20 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   `sqlalchemy.url` instead of unconditionally overriding it with `settings.DATABASE_URL` — which
   would have pointed the suite's migrations at the developer's real database, exactly what the
   existing `APAG_ALLOW_DESTRUCTIVE_DB_TESTS` guard exists to prevent.
+
+### 32. The chunking worker loads the embedding model purely to tokenize
+- **Status**: Accepted trade-off, with a cheaper option deliberately not taken.
+- **Context**: sizing chunks in tokens requires the model's tokenizer, and the only robust way to
+  obtain it is `FastEmbedProvider`, which loads the ONNX model. The chunking worker therefore
+  carries ~640MB resident (observed 524MB) for a stage that performs no inference.
+- **The cheaper option**: the tokenizer itself is a 695KB `tokenizer.json` inside fastembed's
+  cache. Loading it directly would cost a few MB. It was **not** taken because finding it means
+  hardcoding fastembed's cache layout (`models--Qdrant--bge-base-en-v1.5-onnx-Q/snapshots/<hash>/`),
+  which is undocumented and would break silently on a fastembed upgrade — and the failure mode
+  is a fallback to the character budget, i.e. a quiet return of debt #28.
+- **What contains it**: `mem_limit` on the chunking container (2g dev, 1200m prod) so the cost is
+  attributable and bounded rather than host-wide, and `ChunkingService.with_model_tokenizer()`
+  falls back to the character budget with a WARNING rather than refusing to start.
+- **Trigger to address**: if the VM proves too small for two model-loading workers, or if
+  fastembed exposes a supported way to fetch a tokenizer without the model. Either makes this a
+  small, local change.

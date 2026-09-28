@@ -52,6 +52,12 @@ class RetrievedChunk(BaseModel):
     semantic_rank: int | None = None
     lexical_rank: int | None = None
 
+    # Raw cosine similarity from the semantic arm, 0-1, absolute and comparable across queries —
+    # unlike `score`. This is what "did we actually find anything?" is decided on, because an RRF
+    # score cannot answer it: the worst passage in the corpus scores the same as the best if it
+    # happens to rank first. None when the semantic arm did not return this passage.
+    similarity: float | None = None
+
 
 class TokenUsage(BaseModel):
     """What this query cost the embedding model, and what a downstream LLM would be handed.
@@ -81,3 +87,11 @@ class SearchResponse(BaseModel):
     count: int
     results: list[RetrievedChunk] = Field(default_factory=list)
     usage: TokenUsage = Field(default_factory=TokenUsage)
+
+    # False when nothing cleared `SEARCH_MIN_SIMILARITY` — the corpus has nothing on this, and
+    # saying so is more useful than presenting the nearest passages as though they were answers.
+    # Vector search always returns *something*: there is no such thing as no nearest neighbour,
+    # so without this a question about cake returns the nearest policy document with a citation
+    # and full apparent confidence.
+    grounded: bool = True
+    best_similarity: float | None = None
