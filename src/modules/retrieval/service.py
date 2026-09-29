@@ -34,6 +34,7 @@ from src.modules.auth.access import is_admin, visible_documents_clause
 from src.modules.document_pipeline.embedding.provider import EmbeddingProvider
 from src.modules.retrieval.fusion import RRF_K, candidate_pool
 from src.modules.retrieval.models import RetrievedChunk, TokenUsage
+from src.modules.retrieval.rerank import Reranker, RerankUnavailable, get_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ class SearchMode(str, enum.Enum):
 class RetrievalService:
     """Turns a natural-language question into ranked, citable passages."""
 
-    def __init__(self, provider: EmbeddingProvider):
+    def __init__(self, provider: EmbeddingProvider, reranker: Reranker | None = None):
         self._provider = provider
 
     @property
@@ -142,6 +143,54 @@ class RetrievalService:
 
     # --------------------------------------------------------------- search
 
+    @staticmethod
+    def _reranker() -> Reranker | None:
+        return get_reranker()
+
+    @staticmethod
+    def _rerank(reranker, query, rows, limit):
+        """Reorders `rows` by cross-encoder score and keeps the best `limit`.
+
+        Returns the kept rows plus, aligned to them, each one's score and the position it held
+        before reranking. Without a reranker this is the identity: the first `limit` rows, and
+        no scores — a caller must be able to tell "reranking did not move this" from "reranking
+        did not run", because the first is a result and the second is an outage.
+        """
+        if reranker is None or not rows:
+            kept = rows[:limit]
+            return kept, [None] * len(kept), [None] * len(kept)
+
+        # Truncated for scoring only; the full text is still what gets returned and cited. A
+        # cross-encoder costs tokens, and a long table contributes its relevance in the first
+        # few hundred characters — the tail is rows, not subject matter.
+        cap = settings.RERANK_MAX_CHARS
+        passages = [row["text"][:cap] for row in rows]
+
+        try:
+            scores = reranker.scores(query, passages)
+        except RerankUnavailable as e:
+            # Degrade to the fused order rather than failing the search. A reranker is an
+            # improvement on results that are already useful; losing it must cost the best
+            # ordering, not the answer.
+            logger.error("Rerank failed, falling back to fused order: %s", e)
+            kept = rows[:limit]
+            return kept, [None] * len(kept), [None] * len(kept)
+
+        if len(scores) != len(rows):
+            logger.error("Reranker returned %d scores for %d passages; keeping fused order",
+                         len(scores), len(rows))
+            kept = rows[:limit]
+            return kept, [None] * len(kept), [None] * len(kept)
+
+        # Descending by score; ties break on the fused position so a repeated query returns a
+        # repeated order, the same guarantee the SQL tiebreak gives.
+        order = sorted(range(len(rows)), key=lambda i: (-scores[i], i))[:limit]
+        return (
+            [rows[i] for i in order],
+            [float(scores[i]) for i in order],
+            [i + 1 for i in order],
+        )
+
     def search(
         self,
         db: Session,
@@ -151,9 +200,20 @@ class RetrievalService:
         is_admin: bool,
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
+        rerank: bool | None = None,
     ) -> tuple[list[RetrievedChunk], TokenUsage]:
-        """Returns the `limit` passages best matching `query` that this user may see."""
-        pool = candidate_pool(limit)
+        """Returns the `limit` passages best matching `query` that this user may see.
+
+        With reranking on, the SQL fetches a wider pool (`RERANK_CANDIDATES`) and a cross-encoder
+        chooses the `limit` best from it. The wider fetch is the point: the passage that actually
+        answers a question is frequently well outside the top few by fusion, and no amount of
+        reordering can recover a row that was never selected.
+        """
+        reranker = self._reranker() if (rerank is None or rerank) else None
+        # Fetch wide enough for the reranker to have something to choose between, but never
+        # narrower than the caller asked for.
+        fetch = max(limit, settings.RERANK_CANDIDATES) if reranker else limit
+        pool = candidate_pool(fetch)
         needs_vector = mode in (SearchMode.HYBRID, SearchMode.SEMANTIC)
         vector = self._provider.embed_query(query) if needs_vector else None
 
@@ -219,10 +279,15 @@ class RetrievalService:
             # chunk_id is an arbitrary but stable tiebreak, so a repeated query returns a
             # repeated order — an unstable result list reads as a bug to whoever is using it.
             .order_by(fused.c.score.desc(), ChunkORM.chunk_id)
-            .limit(limit)
+            .limit(fetch)
         )
 
         rows = db.execute(stmt).mappings().all()
+
+        # Reranking happens here, on rows the permission predicate has already filtered — a
+        # cross-encoder must never be shown a passage its caller may not see, and putting it
+        # after the SQL means it cannot be.
+        rows, rerank_scores, fusion_ranks = self._rerank(reranker, query, rows, limit)
 
         # Counted here rather than stored on the row: the number belongs to whichever model is
         # configured now, and a stored count would go stale the moment the model changed.
@@ -245,8 +310,10 @@ class RetrievalService:
                 similarity=float(row["similarity"]) if row["similarity"] is not None else None,
                 token_count=n,
                 truncated=n > window,
+                rerank_score=rerank_scores[i],
+                fusion_rank=fusion_ranks[i],
             )
-            for row, n in zip(rows, passage_tokens, strict=True)
+            for i, (row, n) in enumerate(zip(rows, passage_tokens, strict=True))
         ]
         usage = TokenUsage(
             query_tokens=query_tokens,
@@ -266,6 +333,12 @@ class RetrievalService:
             usage.semantic_hits, usage.lexical_hits,
             usage.context_tokens, usage.truncated_results,
         )
+        if any(r.fusion_rank is not None and r.fusion_rank > limit for r in results):
+            # Worth a line in the log: it means the reranker pulled in a passage that the
+            # un-reranked endpoint would never have shown, which is the whole reason it exists.
+            promoted = [r.fusion_rank for r in results if r.fusion_rank and r.fusion_rank > limit]
+            logger.info("Rerank promoted %d passage(s) from beyond the cut: was %s",
+                        len(promoted), promoted)
         return results, usage
 
 

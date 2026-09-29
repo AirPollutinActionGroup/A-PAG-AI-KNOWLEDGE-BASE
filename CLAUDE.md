@@ -373,6 +373,29 @@ the document list/search cannot drift on what "visible" means.
 Identity comes from `get_current_user`, never from the request — there is a test asserting a
 `user_id` query parameter is ignored.
 
+**Reranking** (`retrieval/rerank.py`) runs between the SQL and the result list: the arms fetch
+`RERANK_CANDIDATES` (50) rows, a cross-encoder scores each against the query, and the best
+`limit` are returned. The wider fetch is the point and not an implementation detail — reranking
+cannot recover a row the SQL never selected. Measured on this corpus, the passage that most
+directly answered a question sat at fused rank **9, 16 and 23** on three sample questions;
+with `limit=8` none of them would have been shown at all.
+
+Both retrieval arms score a passage *without ever looking at the query and the passage together*
+— the semantic arm compares two independently-computed vectors, BM25 counts term overlap. A
+cross-encoder reads the pair in one pass, which is why it finds what fusion ranked 23rd, and also
+why it cannot replace retrieval: scoring every chunk against every query is quadratic.
+
+`rerank_score` is an unbounded logit on the model's own scale — like `score`, it orders and does
+not measure. `fusion_rank` carries the pre-rerank position, which is what the UI shows
+("moved up from #23"). Passages are truncated to `RERANK_MAX_CHARS` **for scoring only**; the
+full text is still what is returned and cited. Reranking happens *after* the permission
+predicate, never before — a cross-encoder must not be shown a passage its caller may not see.
+
+A missing or broken reranker degrades to the fused order rather than failing the search, and
+logs at ERROR: it improves results that are already useful, so losing it should cost the best
+ordering and not the answer. `RERANK_ENABLED=false` switches it off entirely; the test suite
+sets that by default (`tests/conftest.py`) so unrelated tests do not download an 80MB model.
+
 **Grounding.** Vector search always returns something: there is no such thing as no nearest
 neighbour. Without a check, a question about cake comes back with the nearest policy passage, a
 page citation and every appearance of confidence. `assess()` gates on raw **cosine similarity**,
@@ -602,6 +625,10 @@ rationale before "fixing" them:
   image). Non-English documents are recorded as `SKIPPED_UNSUPPORTED_LANGUAGE` rather than embedded
   as noise — ~10–15% of A-PAG's corpus is Hindi, and that backlog is deliberately queryable. See
   `KNOWN_DEBTS.md` #20.
+- **Reranking is on by default** and is where most of the retrieval quality now comes from.
+  It is also the only per-query CPU cost in the request path, so `RERANK_MODEL` is a latency
+  decision as much as a quality one. Unlike the embedding model there is no dimension to match
+  and no re-embed to do — changing it changes ordering from the next query onward.
 - **Retrieval filters permissions in SQL**, in `src/modules/retrieval/service.py`. Do not copy the
   Python post-filtering in `src/api/v1/ingestion.py`'s list/search — for top-k that is a
   correctness bug, not untidiness (see the Retrieval section).
