@@ -142,6 +142,85 @@ button { cursor: pointer; background: none; border: 0; }
 .mini { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 11.5px; }
 .mini:hover { border-color: var(--ink-faint); color: var(--ink); }
 
+/* ---- documents, in the rail and full-screen
+   The rail list is the index; the panel is the document. Both reuse the conversation's own
+   shapes (.hit for a passage, .mini for a control) so a document does not arrive looking like a
+   different application. */
+.rail-sec {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 9px 9px 7px; border-radius: 7px; text-align: left;
+  font: 500 10.5px/1 "IBM Plex Mono", monospace; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.rail-sec:hover { background: var(--surface-2); color: var(--ink); }
+.rail-sec .caret { display: inline-block; transition: transform .15s; font-size: 13px; }
+.rail-sec[aria-expanded="true"] .caret { transform: rotate(90deg); }
+.rail-sec .count { margin-left: auto; letter-spacing: 0; }
+.doc-filter {
+  width: calc(100% - 12px); margin: 0 6px 6px; padding: 6px 9px; font-size: 12.5px;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--paper);
+  color: var(--ink); outline: 0;
+}
+.doc-filter:focus { border-color: var(--yellow-deep); }
+.doc-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 9px; border-radius: 7px; font-size: 12.5px; color: var(--ink-soft);
+  text-align: left; border-left: 2px solid transparent;
+}
+.doc-item:hover { background: var(--surface-2); color: var(--ink); }
+.doc-item.active {
+  background: var(--surface-2); color: var(--ink);
+  border-left-color: var(--yellow); font-weight: 500;
+}
+.doc-item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Four states, and the difference that matters is "will this answer a question". Colour never
+   carries it alone — every dot's parent row has a title saying the same thing in words. */
+.dot-st { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ink-faint); }
+.dot-st.live { background: var(--ok); }
+.dot-st.bad { background: var(--danger); }
+.dot-st.off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-faint); }
+.rail-note { font-size: 12px; color: var(--ink-faint); padding: 3px 9px 10px; }
+
+/* ---- the document panel */
+.docview { max-width: 54rem; margin: 0 auto; padding: 22px 20px 48px; }
+.dv-head { display: flex; align-items: flex-start; gap: 12px; }
+.dv-titles { flex: 1; min-width: 0; }
+.dv-head h1 {
+  flex: 1; margin: 0; font: 600 19px/1.3 "Archivo", sans-serif;
+  letter-spacing: -.01em; overflow-wrap: anywhere;
+}
+.dv-path {
+  font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint);
+  margin: 4px 0 0; overflow-wrap: anywhere;
+}
+.dv-meta {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 12px 0 16px;
+  font: 400 11.5px/1.6 "IBM Plex Mono", monospace; color: var(--ink-faint);
+}
+.dv-meta b { color: var(--ink-soft); font-weight: 500; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+.tab {
+  padding: 8px 12px; font-size: 13px; color: var(--ink-faint);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab:hover { color: var(--ink); }
+.tab.on { color: var(--ink); border-bottom-color: var(--yellow); font-weight: 500; }
+.frame {
+  display: block; width: 100%; height: 74vh; min-height: 24rem;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+}
+.dl {
+  display: inline-block; margin-top: 12px; text-decoration: none;
+  border: 1px solid var(--line); border-radius: 7px; padding: 7px 12px;
+  font-size: 13px; color: var(--ink);
+}
+.dl:hover { border-color: var(--yellow-deep); }
+.tag {
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+  font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-faint);
+}
+.tag.warn { color: var(--danger); border-color: var(--danger); }
+
 /* ---- conversation column */
 .column { display: grid; grid-template-rows: 1fr auto; min-height: 0; }
 .scroll { overflow-y: auto; min-height: 0; }
@@ -315,7 +394,10 @@ details.detail > summary:hover { color: var(--ink); }
       <button class="rail-btn" id="uploadBtn"><span class="ic">&#8593;</span> Add documents</button>
       <button class="rail-btn" id="folderBtn"><span class="ic">&#128193;</span> Add a folder</button>
     </div>
-    <div class="chats" id="chats"></div>
+    <div class="chats">
+      <div id="docsSec"></div>
+      <div id="chats"></div>
+    </div>
     <div class="rail-foot">
       <span class="who" id="whoami"></span>
       <button class="mini" id="themeBtn">Theme</button>
@@ -337,9 +419,10 @@ details.detail > summary:hover { color: var(--ink); }
         <div class="seeds" id="seeds"></div>
       </section>
       <div class="thread" id="thread"></div>
+      <section class="docview" id="docview" hidden></section>
     </div>
 
-    <div class="composer-wrap">
+    <div class="composer-wrap" id="composerWrap">
       <div class="composer">
         <div class="field">
           <button class="attach" id="attachBtn" title="Add a document">+</button>
@@ -417,6 +500,7 @@ const saveChats = () => store.set(CHATS_KEY, JSON.stringify(chats.slice(0, 50)))
 const active = () => chats.find((c) => c.id === activeId);
 
 function newChat() {
+  if (openDocId) closeDocView();
   activeId = null;
   $("thread").replaceChildren();
   $("welcome").hidden = false;
@@ -456,6 +540,7 @@ function paintChats() {
 }
 
 function openChat(id) {
+  if (openDocId) closeDocView();
   activeId = id;
   const chat = active();
   if (!chat) return newChat();
@@ -510,12 +595,369 @@ function renderUploadTurn(turn) {
   $("thread").append(wrap);
 }
 
+// ------------------------------------------------------------- documents
+/* The rail lists what is in the knowledge base; clicking one opens it in place.
+
+   Two things are shown, and the second is the one that matters. "Original file" is the file
+   itself, which a browser can only render for PDF -- a .docx, .xlsx or .pptx is a zip, so those
+   get a download instead. "Passages" is what the search index actually holds, and that is the
+   honest view: a document can render perfectly and still answer nothing, because extraction
+   found no text in it. An empty passage list says exactly that, where a rendered page would not.
+
+   The file cannot be put in an iframe by URL: every document endpoint requires a bearer token
+   and an iframe sends no headers. So it is fetched, held as a blob, and shown from an object
+   URL -- which must then be revoked, or a session of browsing leaks the whole corpus into
+   memory. */
+
+let docs = [], docTotal = 0, docFetched = 0, docDupes = 0;
+let docsOpen = false, docsLoading = false;
+let openDocId = null, blobUrl = null, docTab = "passages";
+
+const idOf = (d) => d.id || d.document_id;
+const baseName = (path) => String(path).split("/").pop();
+const folderOf = (path) => {
+  const i = String(path).lastIndexOf("/");
+  return i === -1 ? "" : String(path).slice(0, i);
+};
+
+const fmtSize = (n) => {
+  if (n === null || n === undefined) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+};
+
+/* Grouped by what the reader can do with the document, not by pipeline stage: searchable,
+   stopped, stored-but-never-searchable, or still moving. */
+const ST_FAILED = new Set(["REJECTED", "EXTRACTION_FAILED", "NORMALIZATION_FAILED",
+                           "CHUNKING_FAILED", "EMBEDDING_FAILED"]);
+const ST_INERT = new Set(["DUPLICATE", "SKIPPED_UNSUPPORTED_LANGUAGE", "ARCHIVED", "SUPERSEDED"]);
+
+const readable = (status) => String(status).toLowerCase().replace(/_/g, " ");
+
+function dotFor(status) {
+  if (status === "LIVE") return ["live", "Searchable"];
+  if (ST_FAILED.has(status)) return ["bad", "Stopped — " + readable(status)];
+  if (ST_INERT.has(status)) return ["off", "Stored, but not searchable — " + readable(status)];
+  return ["", "Still being processed — " + readable(status)];
+}
+
+/* Built once and reused, rather than recreated on every keystroke: re-appending the element the
+   user is typing into moves it in the DOM and drops the caret. */
+const docFilterBox = el("input", "doc-filter");
+docFilterBox.type = "search";
+docFilterBox.placeholder = "Filter by name…";
+docFilterBox.setAttribute("aria-label", "Filter documents by name");
+docFilterBox.oninput = () => paintDocList();
+
+async function loadDocs() {
+  docsLoading = true;
+  paintDocs();
+  try {
+    const r = await fetch("/api/v1/documents?limit=200", { headers: authed() });
+    if (r.status === 401) { sessionExpired(); return; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    docsError = "";
+    const all = data.documents || [];
+    docFetched = all.length;
+    docTotal = data.total === undefined ? all.length : data.total;
+
+    /* A DUPLICATE row is the record of a re-upload that was refused, not a document — its
+       bytes were already promoted under the original. Listing them shows every file twice
+       (re-running a folder ingest produced 39 of them against 39 real documents), so they are
+       counted out of the way rather than shown. */
+    docDupes = all.filter((d) => d.status === "DUPLICATE").length;
+    docs = all.filter((d) => d.status !== "DUPLICATE");
+  } catch (e) {
+    docs = []; docTotal = 0; docFetched = 0; docDupes = 0;
+    docsError = e.message;
+  } finally {
+    docsLoading = false;
+    paintDocs();
+  }
+}
+
+let docsError = "";
+
+function paintDocs() {
+  const box = $("docsSec");
+  if (!box) return;
+  box.replaceChildren();
+
+  const head = el("button", "rail-sec");
+  head.setAttribute("aria-expanded", String(docsOpen));
+  head.append(el("span", "caret", "›"), el("span", null, "Documents"));
+  if (docs.length) head.append(el("span", "count", String(docs.length)));
+  head.onclick = () => {
+    docsOpen = !docsOpen;
+    if (docsOpen && !docs.length && !docsLoading) loadDocs();
+    else paintDocs();
+  };
+  box.append(head);
+  if (!docsOpen) return;
+
+  if (docsLoading) { box.append(el("div", "rail-note", "Loading…")); return; }
+  box.append(docFilterBox);
+  const list = el("div", null);
+  list.id = "docList";
+  box.append(list);
+  paintDocList();
+}
+
+function paintDocList() {
+  const list = $("docList");
+  if (!list) return;
+  list.replaceChildren();
+
+  const q = docFilterBox.value.trim().toLowerCase();
+  const shown = q ? docs.filter((d) => String(d.filename).toLowerCase().includes(q)) : docs;
+
+  if (!shown.length) {
+    list.append(el("div", "rail-note",
+      docsError ? "Could not load documents: " + docsError
+      : docs.length ? "Nothing matches that."
+      : "No documents yet — use “Add documents” above."));
+    return;
+  }
+
+  shown.forEach((d) => {
+    const pair = dotFor(d.status);
+    const row = el("button", "doc-item" + (idOf(d) === openDocId ? " active" : ""));
+    row.title = d.filename + "\n" + pair[1];
+    row.append(el("span", "dot-st " + pair[0]), el("span", "nm", baseName(d.filename)));
+    row.onclick = () => openDoc(idOf(d));
+    list.append(row);
+  });
+
+  if (docTotal > docFetched) {
+    list.append(el("div", "rail-note",
+      "Showing the first " + docFetched + " of " + docTotal + "."));
+  }
+  if (docDupes) {
+    const note = el("div", "rail-note",
+      docDupes + " re-upload" + (docDupes === 1 ? "" : "s") + " of files already here, hidden.");
+    note.title = "These were refused as duplicates at upload. The original is in the list above.";
+    list.append(note);
+  }
+}
+
+function refreshDocs() {
+  if (docsOpen) loadDocs();
+}
+
+function releaseBlob() {
+  if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
+}
+
+function showDocView() {
+  $("welcome").hidden = true;
+  $("thread").hidden = true;
+  $("docview").hidden = false;
+  $("composerWrap").hidden = true;
+  $("app").classList.remove("open");
+  $("scroll").scrollTop = 0;
+}
+
+/* Called from the rail as well as from the panel's own button, so starting or reopening a
+   conversation while reading a document puts the conversation back rather than leaving the
+   thread hidden underneath. */
+function closeDocView() {
+  releaseBlob();
+  openDocId = null;
+  $("docview").hidden = true;
+  $("docview").replaceChildren();
+  $("thread").hidden = false;
+  $("composerWrap").hidden = false;
+  paintDocList();
+}
+
+function closeDoc() {
+  closeDocView();
+  if (activeId) openChat(activeId); else newChat();
+}
+
+function openDoc(id) {
+  releaseBlob();
+  openDocId = id;
+  docTab = "passages";
+  paintDocList();
+  showDocView();
+
+  const doc = docs.find((d) => idOf(d) === id);
+  if (!doc) {
+    $("docview").replaceChildren(notice("Not found",
+      " That document is no longer in the list. Close and reopen Documents to refresh it.", true));
+    return;
+  }
+  renderDoc(doc);
+}
+
+const unitWord = (mime) => {
+  const m = mime || "";
+  if (m.includes("presentation")) return "slides";
+  if (m.includes("sheet")) return "sheets";
+  return "pages";
+};
+
+function renderDoc(doc) {
+  const wrap = $("docview");
+  wrap.replaceChildren();
+
+  const head = el("div", "dv-head");
+  const titles = el("div", "dv-titles");
+  titles.append(el("h1", null, doc.title || baseName(doc.filename)));
+  const folder = folderOf(doc.filename);
+  if (folder) titles.append(el("p", "dv-path", folder));
+  const back = el("button", "mini", "← Back to chat");
+  back.onclick = closeDoc;
+  head.append(titles, back);
+  wrap.append(head);
+
+  const meta = el("div", "dv-meta");
+  const bit = (k, v) => {
+    const span = el("span", null, k + " ");
+    span.append(el("b", null, String(v)));
+    meta.append(span);
+  };
+  bit("state", doc.status);
+  if (doc.page_count) bit(unitWord(doc.mime_type), doc.page_count);
+  if (doc.size) bit("size", fmtSize(doc.size));
+  if (doc.classification) bit("access", doc.classification);
+  if (doc.document_date) bit("dated", doc.document_date);
+  if (doc.uploaded_by) bit("added by", doc.uploaded_by);
+  wrap.append(meta);
+
+  /* Anything that is not LIVE cannot answer a question, and the reason belongs on the document
+     rather than in a status code the reader has to interpret. */
+  if (doc.status !== "LIVE") {
+    wrap.append(notice(dotFor(doc.status)[1],
+      " " + (FAILED[doc.status] ||
+        "It is still moving through the pipeline — reopen Documents shortly to refresh."),
+      ST_FAILED.has(doc.status)));
+  }
+
+  const tabs = el("div", "tabs");
+  const panel = el("div", "dv-panel");
+  const mk = (key, label, render) => {
+    const t = el("button", "tab" + (docTab === key ? " on" : ""), label);
+    t.onclick = () => {
+      docTab = key;
+      Array.from(tabs.children).forEach((c) => c.classList.toggle("on", c === t));
+      render(doc, panel);
+    };
+    return t;
+  };
+  tabs.append(mk("passages", "Passages", showPassages),
+              mk("original", "Original file", showOriginal));
+  wrap.append(tabs, panel);
+
+  showPassages(doc, panel);
+}
+
+async function showPassages(doc, panel) {
+  panel.replaceChildren(el("div", "rail-note", "Loading the passages…"));
+  try {
+    const r = await fetch("/api/v1/documents/" + idOf(doc) + "/chunks?limit=500",
+                          { headers: authed() });
+    if (r.status === 401) { sessionExpired(panel); return; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    panel.replaceChildren();
+
+    if (!data.total) {
+      panel.append(notice("No passages",
+        " Nothing was extracted from this file, so search has nothing to match against. " +
+        "For a PDF that usually means it is a scan rather than typed text.", true));
+      return;
+    }
+
+    const missing = data.chunks.filter((c) => !c.embedded).length;
+    let line = data.total + " passage" + (data.total === 1 ? "" : "s");
+    if (data.total > data.chunks.length) line += ", showing the first " + data.chunks.length;
+    if (missing) line += " · " + missing + " not indexed for search";
+    panel.append(el("div", "dv-meta", line));
+    data.chunks.forEach((c) => panel.append(chunkCard(c)));
+  } catch (e) {
+    panel.replaceChildren(notice("Could not load the passages", " " + e.message, true));
+  }
+}
+
+/* Deliberately the same card the search results use, so a passage looks the same whether it was
+   found by a question or read here. */
+function chunkCard(c) {
+  const card = el("article", "hit");
+  const top = el("div", "hit-top");
+  top.append(el("span", "rank", String(c.chunk_index + 1)));
+  const bits = [];
+  if (c.page_number !== null && c.page_number !== undefined) bits.push("p." + c.page_number);
+  if (c.char_count) bits.push(c.char_count + " chars");
+  if (bits.length) top.append(el("span", "cite", bits.join(" · ")));
+  if (c.is_table) top.append(el("span", "tag", "table"));
+  if (!c.embedded) {
+    const t = el("span", "tag warn", "not indexed");
+    t.title = "This passage has no vector, so meaning-based search cannot return it.";
+    top.append(t);
+  }
+  card.append(top);
+  card.append(c.section_heading
+    ? el("div", "hit-head", c.section_heading)
+    : el("div", "hit-head none", "no section recorded"));
+  card.append(el("div", "hit-body" + (c.is_table ? " table" : ""), c.text));
+  return card;
+}
+
+async function showOriginal(doc, panel) {
+  panel.replaceChildren(el("div", "rail-note", "Loading the file…"));
+  releaseBlob();
+  try {
+    const r = await fetch("/api/v1/documents/" + idOf(doc) + "/download", { headers: authed() });
+    if (r.status === 401) { sessionExpired(panel); return; }
+    if (r.status === 409) {
+      panel.replaceChildren(notice("No file to show",
+        " This document never made it past validation, so no content was kept.", true));
+      return;
+    }
+    if (r.status === 410) {
+      panel.replaceChildren(notice("Deleted",
+        " This document was permanently deleted and its bytes were erased.", true));
+      return;
+    }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+
+    const blob = await r.blob();
+    blobUrl = URL.createObjectURL(blob);
+    panel.replaceChildren();
+
+    if (String(doc.mime_type || "").includes("pdf")) {
+      const f = el("iframe", "frame");
+      f.src = blobUrl;
+      f.title = baseName(doc.filename);
+      panel.append(f);
+      return;
+    }
+
+    /* Word, Excel and PowerPoint are zip archives -- no browser renders them, and an iframe
+       pointed at one shows an empty box or silently downloads. The passages tab is the in-app
+       view for these formats. */
+    panel.append(notice("This format opens in its own application",
+      " Word, Excel and PowerPoint files cannot be displayed by a browser. The Passages tab " +
+      "shows the text read out of it, which is what search actually uses."));
+    const a = el("a", "dl", "Download " + baseName(doc.filename));
+    a.href = blobUrl;
+    a.download = baseName(doc.filename);
+    panel.append(a);
+  } catch (e) {
+    panel.replaceChildren(notice("Could not load the file", " " + e.message, true));
+  }
+}
+
 // ------------------------------------------------------------------ auth
 const showLogin = () => { $("login").hidden = false; $("app").hidden = true; };
 const showApp = (email) => {
   $("login").hidden = true; $("app").hidden = false;
   $("whoami").textContent = email || store.get("apag.email") || "";
-  paintChats(); $("q").focus();
+  paintChats(); paintDocs(); loadDocs(); $("q").focus();
 };
 
 $("loginForm").onsubmit = async (e) => {
@@ -888,6 +1330,7 @@ async function uploadMany(files, droppedCount) {
   if (rejected) parts.push(`${rejected} rejected at upload`);
   if (pending.size) parts.push(`${pending.size} still processing in the background`);
   settle(parts.join(" · "));
+  refreshDocs();
 }
 
 async function upload(file) {

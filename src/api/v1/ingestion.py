@@ -26,6 +26,7 @@ from src.core.config import settings
 from src.db.engine import get_db
 from src.db.enums import AuditEventType, UserRole
 from src.db.models import AuditLog as AuditORM
+from src.db.models import DocumentChunk as DocumentChunkORM
 from src.db.models import User
 from src.modules.audit.service import AuditService
 from src.modules.auth.access import can_view, is_admin
@@ -399,6 +400,73 @@ async def download_document(
             "Content-Disposition": f'inline; filename="{_safe_disposition_filename(doc.filename)}"'
         },
     )
+
+
+@router.get(
+    "/{document_id}/chunks",
+    summary="The passages a document was split into — what retrieval actually searches",
+)
+async def get_document_chunks(
+    document_id: uuid.UUID,
+    limit: int = 500,
+    offset: int = 0,
+    repo: DocumentRepository = Depends(get_document_repository),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns a document's chunks in reading order, with their citation metadata.
+
+    This is the only preview that works for every format. A browser can render a PDF and nothing
+    else — a .docx, .xlsx or .pptx is a zip it will offer to download — so for three of the four
+    supported formats the passages *are* the preview. They are also the more honest one: this is
+    what the search index holds, so a document that looks fine but extracted to nothing shows up
+    as an empty list rather than as a page that renders correctly and returns no answers.
+
+    Permission is checked on the parent document, not the chunk, because classification is a
+    document-level property — the same rule `visible_documents_clause()` applies in retrieval.
+    """
+    doc = repo.get_by_id(document_id)
+    if not doc or not _can_view(doc, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found.",
+        )
+
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
+
+    q = db.query(DocumentChunkORM).filter(DocumentChunkORM.document_id == document_id)
+    total = q.count()
+    rows = (
+        q.order_by(DocumentChunkORM.chunk_index)
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+    return {
+        "document_id": str(document_id),
+        "filename": doc.filename,
+        "status": doc.status.value,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "chunks": [
+            {
+                "chunk_id": str(c.chunk_id),
+                "chunk_index": c.chunk_index,
+                "page_number": c.page_number,
+                "section_heading": c.section_heading,
+                "is_table": c.is_table,
+                "char_count": c.char_count,
+                # Whether this passage is actually retrievable. A chunk without a vector is in
+                # the table but invisible to search, and saying so here is the difference
+                # between "we have no answer" and "we never indexed it".
+                "embedded": c.embedding is not None,
+                "text": c.text,
+            }
+            for c in rows
+        ],
+    }
 
 
 @router.delete(
