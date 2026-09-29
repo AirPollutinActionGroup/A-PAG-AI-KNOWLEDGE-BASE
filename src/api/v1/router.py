@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -29,6 +30,14 @@ app.include_router(retrieval_router, prefix="/api/v1")
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 SEARCH_HTML = STATIC_DIR / "search.html"
+
+# Brand assets (the A-PAG logo). Mounted rather than served by a hand-written route so adding an
+# icon later needs no code. Deliberately a *subdirectory* of static/ and not static/ itself: the
+# pages are served by the explicit routes below, and mounting the parent would additionally
+# expose them at a second URL for no reason.
+ASSETS_DIR = STATIC_DIR / "assets"
+if ASSETS_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 
 @app.get("/", response_class=HTMLResponse, tags=["Studio UI"])

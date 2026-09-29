@@ -5,9 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 A-PAG AI Knowledge Base: an async document ingestion pipeline (Python 3.12, FastAPI) that will
-eventually feed a governed RAG platform (vector search over PDFs) plus a Text-to-SQL layer over
-PostgreSQL. **Currently implemented: Stages 1–7** (upload/quarantine → validation/threat scan →
-promotion to raw storage → text extraction → normalization/quality gate → chunking → embedding),
+eventually feed a governed RAG platform (hybrid search over PDF/DOCX/XLSX/PPTX) plus a Text-to-SQL layer over
+PostgreSQL. **Currently implemented: the whole ingestion pipeline** (upload/quarantine → validate, scan and
+promote → extract → normalize/quality gate → chunk → embed),
 plus JWT auth, multi-file upload, pagination, full-text search, and **semantic search**
 (`GET /api/v1/search`) over the pgvector index. Text-to-SQL is not yet built (see Roadmap in
 README.md).
@@ -18,7 +18,8 @@ README.md).
 # Environment
 cp .env.example .env
 
-# Start infra + API + worker (Postgres, MinIO, api, worker containers)
+# Start infra + API + workers (Postgres, MinIO, api, and one container per stage:
+# scan, extract, normalize, chunk, embed)
 docker compose up -d
 
 # Run DB migrations
@@ -39,16 +40,16 @@ python backfill_jobs.py --stage EMBED
 # Tests
 pytest tests/ -v                              # full suite (unit + Postgres integration)
 pytest tests/unit -v                          # unit tests only (in-memory repo, no DB needed)
-pytest tests/integration -v                   # integration tests (spins up a Postgres testcontainer, or falls back to DATABASE_URL if Docker is unavailable)
+pytest tests/integration -v                   # integration tests (throwaway Postgres via testcontainers; SKIPS if Docker is down — never silently falls back to DATABASE_URL, since these tests DELETE whole tables)
 pytest tests/unit/test_ingestion_pipeline.py::TestName::test_case -v   # single test
 
 # Lint
-ruff check src/ tests/ main.py
+ruff check src/ tests/ main.py worker_main.py backfill_jobs.py
 ```
 
 Interactive endpoints once running: Swagger at `/docs`, health at `/health`, Studio UI at `/`
 (note: Studio UI predates auth/multi-file and still expects a synchronous single-file response —
-see `KNOWN_DEBTS.md`). All `/api/v1/documents/*` endpoints require `Authorization: Bearer <token>`
+see `KNOWN_DEBTS.md` #7). All `/api/v1/documents/*` endpoints require `Authorization: Bearer <token>`
 — get one via `POST /api/v1/auth/register` then `POST /api/v1/auth/login`.
 
 ## Architecture
@@ -71,25 +72,28 @@ path (the stage's own `*JobHandler.process()`).
 
 ### Pipeline stages (by module)
 
+Numbered to match `JobStage`, which is the vocabulary the `jobs` table and `worker_main.py` use.
+Stage 1 is the synchronous upload path and has no job of its own — it *creates* the first one:
+
+| # | `JobStage` | Module |
+|---|---|---|
+| 1 | — (the HTTP request) | `upload_service.py` |
+| 2 | `SCAN` | `scan_job_handler.py` |
+| 3 | `EXTRACT` | `extraction_job_handler.py` |
+| 4 | `NORMALIZE` | `normalization_job_handler.py` |
+| 5 | `CHUNK` | `chunking_job_handler.py` |
+| 6 | `EMBED` | `embedding_job_handler.py` |
+
+
 1. **Receive/Quarantine** — `src/modules/document_pipeline/upload_service.py`
    `UploadService.receive()`: writes bytes to the `quarantine/` bucket, inserts a `Document` row
    (status `QUARANTINED`) and a `Job` row (`stage=SCAN`, `status=PENDING`) in the *same* request,
    then returns 202 immediately. Never runs validation itself.
-2. **Claim** — `src/workers/base_worker.py` (`BaseWorker`): generic SKIP LOCKED job-queue engine
-   (polling, atomic claim via `UPDATE ... WHERE ... FOR UPDATE SKIP LOCKED RETURNING`, lease
-   expiry, exponential-backoff retries, a periodic reaper for stuck/expired leases, and a
-   heartbeat file for container healthchecks). Each stage's worker (`ScanWorker`,
-   `ExtractionWorker`, `NormalizationWorker`, in `src/workers/`) subclasses it and only implements
-   `process_job()`, which opens a session and delegates to that stage's job handler. A new
-   pipeline stage follows the same pattern: subclass `BaseWorker`, implement `process_job()`,
-   raise `TransientProcessingError` vs `PermanentProcessingError` (`src/core/errors.py`) to
-   control retry vs. immediate-fail behavior, and register the worker class in `worker_main.py`'s
-   `WORKERS` dict.
-3. **Validate/Scan/Promote** — `src/modules/document_pipeline/scan_job_handler.py`
+2. **Validate/Scan/Promote** — `src/modules/document_pipeline/scan_job_handler.py`
    `ScanJobHandler.process()`: fetches the document, re-reads bytes from quarantine, runs
    `ValidationService` (`src/modules/document_pipeline/validation.py` — a fail-fast ladder: size,
    format lookup, container check, heuristic threat scan, deep structural check, SHA-256 — a
-   decompression-bomb ratio check was tried and removed, see `KNOWN_DEBTS.md`), then either
+   decompression-bomb ratio check was tried and removed, see `KNOWN_DEBTS.md` #9), then either
    rejects (purges quarantine object, sets `REJECTED`) or promotes (copies to `raw/` bucket keyed
    by SHA-256, sets `VALIDATED`, enqueues an `EXTRACT` job). Dedup and promotion are guarded by an
    in-process lock (`self._promotion_lock`) plus a DB partial unique index
@@ -97,7 +101,7 @@ path (the stage's own `*JobHandler.process()`).
    methods are idempotent — re-running `process()` on an already-finalized (or already-promoted)
    document is a safe no-op that returns the existing state (important since jobs can be
    retried/reaped).
-4. **Extract** — `src/modules/document_pipeline/extraction_job_handler.py`
+3. **Extract** — `src/modules/document_pipeline/extraction_job_handler.py`
    `ExtractionJobHandler.process()`: fetches a `VALIDATED` document, reads its `raw/` bytes, and
    dispatches to the `TextExtractor` registered for its MIME type
    (`src/modules/document_pipeline/extraction/extractors.py` — one per format, deliberately
@@ -105,7 +109,7 @@ path (the stage's own `*JobHandler.process()`).
    `extracted/{document_id}.json`, sets `EXTRACTED`, enqueues a `NORMALIZE` job. A file that can't
    be parsed sets `EXTRACTION_FAILED` and stops the pipeline there — no job is queued after a
    failure at any stage.
-5. **Normalize** — `src/modules/document_pipeline/normalization_job_handler.py`
+4. **Normalize** — `src/modules/document_pipeline/normalization_job_handler.py`
    `NormalizationJobHandler.process()`: fetches an `EXTRACTED` document, reads its
    `extracted/{id}.json`, and runs `NormalizationService` (`src/modules/document_pipeline/normalization/`
    — text cleaning, language detection, then a quality gate). This stage never opens the original
@@ -116,19 +120,36 @@ path (the stage's own `*JobHandler.process()`).
    `NORMALIZATION_FAILED` and is never retried (the content was read correctly; retrying produces
    the identical verdict). On success a `CHUNK` job is enqueued — the sensitivity tier is chosen
    by the uploader at upload rather than confirmed at a gate, so nothing here waits on a human.
-6. **Chunk** — `src/modules/document_pipeline/chunking_job_handler.py`
+5. **Chunk** — `src/modules/document_pipeline/chunking_job_handler.py`
    `ChunkingJobHandler.process()`: fetches an `AWAITING_CLASSIFICATION` document, reads its
    `normalized/{id}.json`, and splits it into retrievable passages via `ChunkingService`
    (`src/modules/document_pipeline/chunking/` — see "Chunking" below). Passages are written to
    the `document_chunks` **table**, not a bucket, and the document is set `CHUNKED`. Re-running
    replaces a document's chunks rather than appending, so a reaped or retried job cannot double
    its content. On success an `EMBED` job is enqueued.
-7. **Embed** — `src/modules/document_pipeline/embedding_job_handler.py`
+6. **Embed** — `src/modules/document_pipeline/embedding_job_handler.py`
    `EmbeddingJobHandler.process()`: fetches a `CHUNKED` document, reads its `document_chunks` rows,
    and writes a `vector(768)` back onto each one via `EmbeddingService`
    (`src/modules/document_pipeline/embedding/` — see "Embedding" below). The document becomes
    `LIVE`, which now means what it says: every passage carries a vector and is retrievable.
    Nothing is queued after this stage — it is the end of ingestion.
+
+### How a stage runs: the claim loop
+
+Not a pipeline stage — the engine every stage runs on, which is why it carries no number and
+no `JobStage` value.
+
+`src/workers/base_worker.py` (`BaseWorker`): generic SKIP LOCKED job-queue engine
+(polling, atomic claim via `UPDATE ... WHERE ... FOR UPDATE SKIP LOCKED RETURNING`, lease
+expiry, exponential-backoff retries, a periodic reaper for stuck/expired leases, and a
+heartbeat file for container healthchecks). Each stage's worker (`ScanWorker`,
+`ExtractionWorker`, `NormalizationWorker`, `ChunkingWorker`, `EmbeddingWorker`, in
+`src/workers/`) subclasses it and only implements
+`process_job()`, which opens a session and delegates to that stage's job handler. A new
+pipeline stage follows the same pattern: subclass `BaseWorker`, implement `process_job()`,
+raise `TransientProcessingError` vs `PermanentProcessingError` (`src/core/errors.py`) to
+control retry vs. immediate-fail behavior, and register the worker class in `worker_main.py`'s
+`WORKERS` dict.
 
 ### Text extraction: deliberately non-ML
 
@@ -325,14 +346,15 @@ off-topic 0.45–0.50) and is **model-specific** — re-measure it on a model ch
   `BucketManager` per `settings.STORAGE_BACKEND`. Buckets: `quarantine/` (untrusted, purged after
   promotion or rejection) → `raw/` (validated bytes, permanent) → `extracted/` (per-document
   `{id}.json`, the raw extraction result) → `normalized/` (per-document `{id}.json`, cleaned +
-  quality-gated — the artifact a future chunking stage will read). `extracted/`/`normalized/` keys
+  quality-gated — the artifact the chunking stage reads). `extracted/`/`normalized/` keys
   are deterministic (`storage_keys.py`'s `extraction_key_for`/`normalized_key_for`), not
   content-addressed like `raw/` — two documents with identical bytes were already deduplicated at
   promotion, so keying by document_id needs no lookup for a handler to find its own output.
 - `src/modules/document_pipeline/repository.py` defines `DocumentRepository` (abstract) with
   `PostgreSQLDocumentRepository` (production, wraps a SQLAlchemy `Session`) and
-  `InMemoryDocumentRepository` (unit tests / concurrency tests, no DB needed). Both `UploadService`
-  and `ScanJobHandler` take a repository via constructor injection — prefer adding new methods to
+  `InMemoryDocumentRepository` (unit tests / concurrency tests, no DB needed). **Every** handler
+  takes a repository via constructor injection — `UploadService` and all five `*JobHandler`
+  classes; none reaches for a `Session` directly for document state. Prefer adding new methods to
   the abstract base and both implementations together, not special-casing one.
 
 ### Audit trail
@@ -341,7 +363,9 @@ off-topic 0.45–0.50) and is **model-specific** — re-measure it on a model ch
 (DB-level triggers forbid UPDATE/DELETE — migration `0003_revoke_audit_log_writes.py`). Every
 state transition should call `self._audit(...)` (both `UploadService` and `ScanJobHandler` have a
 private `_audit()` wrapper) with a `correlation_id` threaded through the whole request/job
-lifecycle. Audit writes are **best-effort, not transactional** with the state change — a failure is
+lifecycle. Every handler has that wrapper — `UploadService` and all five `*JobHandler` classes
+— so a new stage is expected to as well. Audit writes are **best-effort, not transactional** with
+the state change — a failure is
 logged at ERROR but never blocks the pipeline (deliberate trade-off, see `KNOWN_DEBTS.md` #1). The
 worker-side `_audit()` additionally de-dupes by checking for an existing `(document_id,
 event_type)` row first, since jobs can be retried.
@@ -374,9 +398,12 @@ event_type)` row first, since jobs can be retried.
 ### Supported formats
 
 `src/modules/document_pipeline/formats.py` is the single registry of accepted formats (PDF, DOCX,
-XLSX, PPTX). **Adding a format means adding one `FormatSpec` to `FORMATS`, not editing
-`validation.py`** — the validator owns the shared ladder, the spec owns everything format-specific
-(extension, magic bytes, identifying zip part, unit counting, and the two check callables).
+XLSX, PPTX). **Adding a format means two registry entries and no edits to the stages themselves**:
+a `FormatSpec` in `FORMATS` here, and a `TextExtractor` in `EXTRACTORS`
+(`extraction/extractors.py`). Adding only the first gets the file accepted and promoted and then
+killed at `EXTRACTION_FAILED`, which reads as a parser bug rather than a missing registration.
+The validator owns the shared ladder; the spec owns everything format-specific (extension, magic
+bytes, identifying zip part, unit counting, and the two check callables).
 `storage_keys.py` derives object-key extensions from the same registry, so there is one source of
 truth rather than a second map to keep in sync.
 
@@ -426,6 +453,12 @@ RESTRICTED visibility effectively admin-only, and `doc_type` (a content category
 derived from a file and nothing read it. Access control is now owner-scoped — see
 `ARCHITECTURE.md` §6b.
 
+`0011_extract_normalize_statuses` widens `chk_documents_status` (adds `EXTRACTED`,
+`EXTRACTION_FAILED`, `NORMALIZATION_FAILED`) and `chk_audit_log_event_type` (adds the matching
+`EXTRACTION_*`/`NORMALIZATION_*` event types) for the extract and normalize stages. It repurposes the existing
+`VALIDATED` status rather than adding a new one — defined since `0002`, never assigned by any
+code before this.
+
 `0012_reclassification` adds the `DOCUMENT_RECLASSIFIED` audit event and
 `documents.document_date` (the date printed on the document, as distinct from `created_at` which
 is upload time — without it a 2019 policy ingested today looks current). `0013_document_chunks`
@@ -442,12 +475,6 @@ the `vector` extension installed, since other objects may depend on it. Both lea
 Postgres validates existing rows when creating a CHECK, so narrowing would mean deleting audit
 rows, and migration `0003` makes that log append-only precisely so it cannot be rewritten. One
 spare value in a typo guard is cheaper than a hole in the audit trail.
-
-`0011_extract_normalize_statuses` widens `chk_documents_status` (adds `EXTRACTED`,
-`EXTRACTION_FAILED`, `NORMALIZATION_FAILED`) and `chk_audit_log_event_type` (adds the matching
-`EXTRACTION_*`/`NORMALIZATION_*` event types) for Stages 4–5. It repurposes the existing
-`VALIDATED` status rather than adding a new one — defined since `0002`, never assigned by any
-code before this.
 
 **Revision id length**: `alembic_version.version_num` defaults to `VARCHAR(32)` — keep every new
 revision id ≤32 characters, or the final version-bump statement fails and rolls back the entire

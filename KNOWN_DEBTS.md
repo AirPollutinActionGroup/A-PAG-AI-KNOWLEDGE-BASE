@@ -589,3 +589,28 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Trigger to address**: if the VM proves too small for two model-loading workers, or if
   fastembed exposes a supported way to fetch a tokenizer without the model. Either makes this a
   small, local change.
+
+### 33. `AWAITING_CLASSIFICATION` no longer means what it says
+- **Status**: Open. A rename, not a design flaw.
+- **Context**: the status was named when a human classification gate was planned. That gate was
+  dropped — the uploader picks the sensitivity tier at upload — and the status was repurposed to
+  mean "normalized, ready to chunk". Nothing classifies anything at that point.
+- **Why it costs something**: a name that states the wrong thing is worse than an opaque one,
+  because a reader trusts it. It has already cost review time more than once, and anyone new to
+  the pipeline reasonably assumes a document sitting there is waiting on a person.
+- **Why not yet**: it spans `DocumentStatus`, a CHECK-constraint migration, five handlers, the
+  backfill script's `STAGE_ENTRY_STATUS` map, both UIs and a number of tests, and it touches
+  documents currently in that state. Worth one deliberate change rather than a drive-by.
+- **Trigger to address**: the next migration that touches `chk_documents_status` anyway —
+  `NORMALIZED` is the honest name.
+
+### 34. ✅ `/documents/test-preset/{name}` served fixtures without authentication (Closed)
+- **Found**: a documentation review challenged the claim that all of `/documents/*` requires a
+  bearer token. It did not: this one route had no `current_user` dependency.
+- **Impact**: anyone who could reach the API could download the validation fixtures, including
+  `disguised_malware.pdf` and `threat_exploit_sample.pdf`. They are crafted to trip the validator
+  rather than to do harm, and `preset_name` is matched against a fixed map so there was no path
+  traversal — but an unauthenticated endpoint handing out files named malware does not belong on
+  a box with a public IP, and it made a documented security claim false.
+- **Fix**: the route now depends on `get_current_user` like every other. The Studio UI already had
+  an `authHeaders()` helper and simply was not using it for this one call.

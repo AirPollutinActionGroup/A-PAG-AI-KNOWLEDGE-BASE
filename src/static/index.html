@@ -1291,7 +1291,7 @@
             // Attempt to load authentic fixture from backend API
             try {
                 if (['valid_v1', 'corrupt_header', 'truncated_eof', 'fake_exe', 'malicious', 'encrypted'].includes(type)) {
-                    const fixtureRes = await fetch(`/api/v1/documents/test-preset/${type}`);
+                    const fixtureRes = await fetch(`/api/v1/documents/test-preset/${type}`, { headers: authHeaders() });
                     if (fixtureRes.ok) {
                         blob = await fixtureRes.blob();
                         const disposition = fixtureRes.headers.get('content-disposition');

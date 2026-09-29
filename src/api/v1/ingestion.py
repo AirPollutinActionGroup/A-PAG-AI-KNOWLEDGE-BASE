@@ -530,8 +530,20 @@ async def search_documents(
     "/test-preset/{preset_name}",
     summary="Get binary fixture for testing presets",
 )
-async def get_test_preset(preset_name: str):
-    """Returns actual binary test PDF fixtures for the interactive studio."""
+async def get_test_preset(
+    preset_name: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Returns binary test PDF fixtures for the interactive studio.
+
+    Authenticated like every other route under `/documents/*`. It previously was not, which made
+    it the one exception to that rule and an unauthenticated file-server for fixtures named
+    `disguised_malware.pdf` and `threat_exploit_sample.pdf`. They are crafted to trip the
+    validator rather than to do harm, and `preset_name` is matched against a fixed map so there
+    is no path traversal — but an unauthenticated endpoint handing out files called malware is
+    not something to leave on a box with a public IP, and the documented claim that all of
+    `/documents/*` needs a bearer token was simply false while it stood.
+    """
     from pathlib import Path
 
     from fastapi.responses import Response
