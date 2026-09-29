@@ -108,6 +108,28 @@ class Settings(BaseSettings):
     # Skipping records the gap instead. Set False when a multilingual model is configured.
     EMBEDDING_SKIP_NON_ENGLISH: bool = True
 
+    # OCR — the fallback for a PDF page that has no text layer, because it is a photograph of a
+    # page rather than a typed document. Off-by-default was considered and rejected: a scan that
+    # silently becomes an unreadable document is the failure this exists to fix, and a setting
+    # nobody turns on fixes nothing.
+    OCR_ENABLED: bool = True
+    # 144 dpi (pdfplumber renders at `resolution`). Enough for a 10pt government typeface;
+    # doubling it roughly quadruples the pixels and the time for no measured accuracy gain.
+    OCR_RESOLUTION: int = 144
+    # Explicit, because the default is not a tuning detail: unset measured 20.5s per page against
+    # 4.0s at 8 intra-op threads. 0 means min(8, cpu_count) rather than "let onnxruntime decide".
+    OCR_THREADS: int = 0
+    # A page with fewer than this many characters of real text is treated as unread. Not zero:
+    # a scanned page often carries a stray character from a stamp or a page-number overlay.
+    OCR_MIN_NATIVE_CHARS: int = 20
+    # Below this, a line is more likely a signature, a stamp or a scan artifact than a word.
+    # Dropping it leaves a gap; keeping it puts an invented word into a passage that will be
+    # cited, and nothing downstream can tell a guessed word from a read one.
+    OCR_MIN_CONFIDENCE: float = 0.5
+    # A ceiling on how long one document can hold a worker: at ~4s a page, 500 pages is ~33
+    # minutes. Pages past the cap are recorded as unread rather than quietly dropped.
+    OCR_MAX_PAGES: int = 500
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _pin_postgres_driver(cls, value: str) -> str:

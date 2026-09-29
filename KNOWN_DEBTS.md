@@ -244,39 +244,66 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   DOCX/XLSX/PPTX validation paths — add fixtures under `tests/fixtures/ooxml/` (or generate them
   in-process, as `tests/unit/test_formats.py` already does) and extend `fixture_map`.
 
-### 13. Extraction is non-ML; Docling deferred until a document proves it necessary
-- **Status**: Deliberate choice, revisit on evidence.
-- **Context**: The design docs specify Docling for layout-aware parsing, and current research
-  still rates it the best self-hosted option. It was evaluated and rejected for now: `docling`
-  resolves to **78 packages** including `torch`, `torchvision`, `transformers`, `opencv-python`
-  and an OCR engine, on a 2 vCPU/8GiB VM already running the whole stack, in a shared worker
-  image every container pulls. What it buys is layout inference for complex PDFs and OCR — and
-  OCR was separately ruled out (debt #14), while this corpus is typed documents whose structure
-  the file already states. The four libraries used instead (`pdfplumber`, `python-docx`,
-  `python-pptx`, `openpyxl`) add 8 small MIT/BSD packages and no ML runtime.
-- **What this costs**: weaker results on genuinely complex PDFs — multi-column layouts where
-  reading order must be inferred, and tables without ruling lines that pdfplumber can't segment.
-- **Trigger to address**: a real document that comes out mangled, not a hypothetical. The
-  `TextExtractor` ABC and the `EXTRACTORS` registry exist precisely so this is a per-format swap:
-  adding a `DoclingExtractor` for `PDF_MIME` alone touches the registry and nothing else — no
-  pipeline, handler, or worker changes. If that happens, consider a separate image for the
-  extraction worker so the scan worker doesn't carry the ML stack.
+### 13. Extraction is non-ML for typed documents; Docling still deferred, on narrower grounds
+- **Status**: Deliberate choice, **re-evaluated once the original reason expired**.
+- **Context**: The design docs specify Docling for layout-aware parsing. It was first rejected on
+  two grounds: that it resolves to **78 packages** including `torch`, `torchvision`,
+  `transformers` and an OCR engine; and that this corpus is typed documents whose structure the
+  file already states, so there is nothing for layout inference to recover.
+  **The second ground turned out to be false.** Three of A-PAG's first 39 documents are scans
+  with no text layer at all (debt #14), so the corpus is not uniformly typed and the question
+  had to be asked again rather than inherited.
+- **What the re-evaluation found**: the rejection survives, for a different reason. A layout
+  parser earns its cost on **scanned tables** — reconstructing a grid from pixels is exactly what
+  an OCR engine alone cannot do, and Docling leads the field at it (97.9% table-cell accuracy).
+  Measured on these scans, there are no tables: sampling pages across the 162-page set and
+  counting detected lines that share a horizontal band (prose sits alone on a row, table cells
+  sit beside neighbours) found **0 such rows on every page sampled**. They are prose
+  notifications. So the cost — ~500MB of models plus PyTorch, in an image already carrying a
+  640MB embedding model — buys nothing this corpus needs. `rapidocr` was added instead: ~200MB,
+  no PyTorch, and it runs on the onnxruntime that is in the image for embeddings already.
+- **The hosted parsers were ruled out on a different axis entirely**: LlamaParse and
+  unstructured's API tier are cloud services, so using either would send **every document out of
+  the deployment at ingestion time**. That inverts the control the boundary between this system
+  and an external model exists to enforce — and it cannot be reconciled with redacting PII before
+  anything leaves, because the document has already left. Self-hosting unstructured's `hi_res`
+  path wants a GPU; published figures put a single g5.2xlarge at $800–1,200/month.
+- **What this costs**: a scanned *table* would come out as ungrouped text lines — the
+  wall-of-numbers failure that repeated table headers exist to prevent.
+- **Trigger to address**: scanned tables, specifically. Not complex PDFs in general and not a
+  hypothetical. The `TextExtractor` ABC and the `EXTRACTORS` registry make it a per-format swap,
+  and Docling accepts RapidOCR as its own OCR backend — so today's OCR layer sits *underneath* a
+  future Docling, rather than being thrown away for it. If that happens, consider a separate
+  image for the extraction worker so the scan worker doesn't carry the ML stack.
 
-### 14. No OCR — scanned documents are flagged, not read
-- **Status**: Deliberate, with an explicit detector rather than an assumption.
-- **Context**: OCR exists to recover text from pages that have none — scans and photographs.
-  A-PAG's documents are digitally authored (Word/Excel/PowerPoint, or PDFs exported from them),
-  so every file has a real text layer and the OCR path would never fire. Building it would mean
-  carrying an OCR engine for a code path that never runs.
-- **Why this is safe to assume**: because the assumption is checked rather than trusted. A file
-  with no text layer extracts to near-nothing, and the normalization quality gate stops it at
-  `NORMALIZATION_FAILED` with `EMPTY_TEXT` or `LOW_TEXT_DENSITY`, recording character and unit
-  counts in the audit trail. A scan cannot silently become an empty document in the knowledge
-  base — it fails loudly, naming the check that caught it.
-- **Trigger to address**: `LOW_TEXT_DENSITY`/`EMPTY_TEXT` failures appearing for documents people
-  actually need searchable. That is the signal that scanned material has entered the corpus, and
-  the point to add an OCR extractor behind the same `TextExtractor` interface. Until then the
-  absence of those failures is evidence the decision was right.
+### 14. OCR exists now — the detector that said it would be needed was right
+- **Status**: **Resolved.** Kept as a record of how the decision was made and what it costs.
+- **What was assumed**: that A-PAG's documents were digitally authored, so every file would have
+  a real text layer and an OCR path would be dead code.
+- **What actually happened**: the detector fired. This entry's stated trigger was
+  "`LOW_TEXT_DENSITY`/`EMPTY_TEXT` failures appearing for documents people actually need
+  searchable", and three arrived in the first real folder — a Ministry of Power office
+  memorandum, NITI Aayog meeting minutes, and a **162-page** set of CPCB directions under
+  Section 5 of the Environment (Protection) Act. All three extracted to **zero characters** and
+  stopped at `NORMALIZATION_FAILED`. Probed directly, every page was a full-page image.
+  The safety net worked exactly as designed: the gap was recorded and findable rather than
+  silent, which is the whole reason the check was built before the capability.
+- **What was built**: `extraction/ocr.py`, a fallback in `PdfTextExtractor` for pages with no
+  text layer. Decided **per page**, because a government PDF is routinely a typed covering
+  letter with a scanned annexure behind it.
+- **Measured**: 0.99 mean confidence on these documents; 3.5s median per page after warm-up
+  (min 2.0, max 3.8), so the 162-page document takes about 10 minutes. Thread count is set
+  explicitly — left at the onnxruntime default the same pages measured 20.5s.
+- **What it still costs**: OCR drops word boundaries — `FGDinexisting plantswere`,
+  `13.10.2017as well asNOx by2022` — and occasionally a letter (`Subjeet`, `Stakcholder`). That
+  hurts the **lexical** arm more than the semantic one: BM25 cannot match a term that was never
+  tokenised as a term. A passage read this way carries `method=OCR` so a reader can tell before
+  quoting it in a submission. Lines below `OCR_MIN_CONFIDENCE` are dropped rather than kept,
+  because an invented word inside a cited passage is worse than a gap.
+- **Still open**: chunk-level OCR provenance. `method` is recorded per extracted page, but
+  `document_chunks` has no column for it, so the document panel can say a document needed OCR
+  and not yet which passages came from it. That is a migration plus carrying the flag through
+  normalization and chunking.
 
 ### 15. Every worker container carries the full application image
 - **Status**: Accepted for current scale.

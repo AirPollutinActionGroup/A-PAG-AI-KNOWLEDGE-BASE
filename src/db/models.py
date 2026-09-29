@@ -89,6 +89,11 @@ class Document(Base):
     )
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # NATIVE, OCR or MIXED — how this document's text was obtained. Nullable because documents
+    # ingested before the OCR fallback existed have no recorded answer, and writing NATIVE
+    # across them would assert a fact nobody measured.
+    extraction_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     # Groups documents submitted together in one multi-file upload request
     upload_batch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
 
@@ -174,6 +179,10 @@ class Document(Base):
         CheckConstraint(
             "classification IS NULL OR classification IN ('PUBLIC', 'RESTRICTED')",
             name="chk_documents_classification",
+        ),
+        CheckConstraint(
+            "extraction_method IS NULL OR extraction_method IN ('NATIVE', 'OCR', 'MIXED')",
+            name="chk_documents_extraction_method",
         ),
         Index(
             "uq_documents_active_sha256",

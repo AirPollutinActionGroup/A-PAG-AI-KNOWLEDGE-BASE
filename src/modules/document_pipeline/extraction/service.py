@@ -36,12 +36,24 @@ class ExtractionService:
             units=content.units,
             headings=content.headings,
             tables=content.tables,
+            ocr_pages=content.ocr_pages,
+            ocr_skipped_pages=content.ocr_skipped_pages,
         )
+        # Derived from the pages rather than passed in, so the recorded method cannot disagree
+        # with the units it describes.
+        result.extraction_method = result.resolve_method()
+
         logger.info(
-            "Extraction complete: doc_id=%s mime=%s units=%d chars=%d tables=%d headings=%d",
-            document_id, mime_type, result.unit_count, result.char_count,
-            len(result.tables), len(result.headings),
+            "Extraction complete: doc_id=%s mime=%s method=%s units=%d chars=%d tables=%d "
+            "headings=%d ocr_pages=%d",
+            document_id, mime_type, result.extraction_method, result.unit_count,
+            result.char_count, len(result.tables), len(result.headings), result.ocr_page_count,
         )
+        if content.ocr_skipped_pages:
+            logger.warning(
+                "doc_id=%s: %d page(s) past the OCR budget were left unread: %s",
+                document_id, len(content.ocr_skipped_pages), content.ocr_skipped_pages[:20],
+            )
         return result
 
 

@@ -6,6 +6,11 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
+    # OpenCV, which RapidOCR uses, links against these. The slim base image has neither, and
+    # without them `import cv2` fails at worker start with a bare "libGL.so.1: cannot open
+    # shared object file" that names nothing to do with OCR.
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install python dependencies
@@ -23,6 +28,12 @@ RUN pip install --no-cache-dir .
 # must change with it, or the model is downloaded at runtime after all.
 ENV FASTEMBED_CACHE_PATH=/app/.model_cache
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-base-en-v1.5')"
+
+# Same for the OCR models, for the same reason. Constructing RapidOCR resolves and downloads all
+# three (detection, classification, recognition) into site-packages, which `COPY . .` below does
+# not disturb. ~15MB, against a worker that would otherwise reach for the network the first time
+# it met a scanned page — mid-job, inside a lease.
+RUN python -c "from rapidocr import RapidOCR; RapidOCR()"
 
 # Copy application source code
 COPY . .

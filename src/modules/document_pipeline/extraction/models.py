@@ -9,9 +9,11 @@ import uuid
 
 from pydantic import BaseModel, Field, computed_field
 
-# Set on every result today. The field exists so a future OCR path (or a swapped-in layout-aware
-# parser) is distinguishable in stored artifacts without a schema change — see KNOWN_DEBTS.md.
-METHOD_NATIVE = "NATIVE"
+from src.modules.document_pipeline.extraction.ocr import (
+    METHOD_MIXED,
+    METHOD_NATIVE,
+    METHOD_OCR,
+)
 
 
 class ExtractedUnit(BaseModel):
@@ -25,6 +27,12 @@ class ExtractedUnit(BaseModel):
     index: int
     label: str
     text: str
+
+    # How this page's text was obtained. Per page rather than per document, because a government
+    # PDF is routinely a typed letter with a scanned annexure behind it. A reader deciding
+    # whether to quote a passage in a submission should know it was read from pixels: OCR
+    # measured 0.99 confidence on this corpus and still drops word boundaries.
+    method: str = METHOD_NATIVE
 
 
 class ExtractedTable(BaseModel):
@@ -62,6 +70,8 @@ class ExtractionResult(BaseModel):
     units: list[ExtractedUnit] = Field(default_factory=list)
     headings: list[Heading] = Field(default_factory=list)
     tables: list[ExtractedTable] = Field(default_factory=list)
+    ocr_pages: list[int] = Field(default_factory=list)
+    ocr_skipped_pages: list[int] = Field(default_factory=list)
 
     @computed_field
     @property
@@ -80,6 +90,24 @@ class ExtractionResult(BaseModel):
     def char_count(self) -> int:
         return len(self.full_text)
 
+    @computed_field
+    @property
+    def ocr_page_count(self) -> int:
+        return len(self.ocr_pages)
+
+    def resolve_method(self) -> str:
+        """NATIVE, OCR or MIXED, from what the pages actually needed.
+
+        Derived rather than set, so it cannot disagree with the units it describes. MIXED is a
+        real and common case here, not a theoretical one -- a typed covering letter in front of
+        a scanned annexure."""
+        if not self.ocr_pages:
+            return METHOD_NATIVE
+        readable = [u for u in self.units if u.text.strip()]
+        if readable and len(self.ocr_pages) >= len(readable):
+            return METHOD_OCR
+        return METHOD_MIXED
+
 
 class ExtractedContent(BaseModel):
     """What an individual extractor returns — the document-level fields (id, mime type) are the
@@ -88,6 +116,12 @@ class ExtractedContent(BaseModel):
     units: list[ExtractedUnit] = Field(default_factory=list)
     headings: list[Heading] = Field(default_factory=list)
     tables: list[ExtractedTable] = Field(default_factory=list)
+
+    # Which pages needed OCR, and which were past the page budget and left unread. The second
+    # list is the important one: a document truncated without a record looks exactly like a
+    # document that was short.
+    ocr_pages: list[int] = Field(default_factory=list)
+    ocr_skipped_pages: list[int] = Field(default_factory=list)
 
 
 class ExtractionError(Exception):

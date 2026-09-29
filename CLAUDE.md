@@ -37,6 +37,10 @@ WORKER_STAGE=EMBED python worker_main.py
 python backfill_jobs.py --stage EMBED --dry-run
 python backfill_jobs.py --stage EMBED
 
+# Re-run a stage over documents it already finished, for when the *stage* improved rather than
+# the document being stranded (--reset moves them back to the stage's entry status first)
+python backfill_jobs.py --stage EXTRACT --status NORMALIZATION_FAILED --reset --dry-run
+
 # Tests
 pytest tests/ -v                              # full suite (unit + Postgres integration)
 pytest tests/unit -v                          # unit tests only (in-memory repo, no DB needed)
@@ -159,18 +163,43 @@ are already grids. PDF is the only format with no semantic structure, so it gets
 ruling-line table detection plus a font-size heading heuristic (weighted by character count, not
 line count — see the code comment on why a line-count tie can eat a document's only heading).
 Docling (the design docs' choice, and still current best practice for self-hosted layout parsing)
-was evaluated and rejected for now: it resolves to 78 packages including `torch`/`transformers`/
-`opencv-python` for capabilities — OCR, multi-column layout inference — this corpus doesn't need,
-since A-PAG's documents are typed, not scanned. See `KNOWN_DEBTS.md` #13 before reintroducing it;
-the `TextExtractor` ABC and `EXTRACTORS` registry exist so swapping one format's extractor is a
-one-line registry change, not a pipeline rewrite.
+was evaluated and rejected, then **re-evaluated when the original reason expired** — the corpus
+turned out not to be uniformly typed. The rejection survived on narrower grounds: a layout parser
+earns its cost on scanned tables, and these scans have none. See `KNOWN_DEBTS.md` #13 for the
+measurement and the trigger to revisit; the `TextExtractor` ABC and `EXTRACTORS` registry exist so
+swapping one format's extractor is a one-line registry change, not a pipeline rewrite, and Docling
+takes RapidOCR as its own OCR backend so today's layer would sit underneath it rather than be
+discarded.
 
-**No OCR** (`KNOWN_DEBTS.md` #14) is the corresponding decision on the input side — this corpus has
-no scanned/photographed documents, so an OCR fallback would be dead code. The safety net for that
-assumption being wrong is the normalization quality gate's `LOW_TEXT_DENSITY`/`EMPTY_TEXT` checks
-(`src/modules/document_pipeline/normalization/quality_checker.py`), scoped to PDF since it's the
-only format that can be a scan — a sparse `.pptx` or `.xlsx` is a legitimate document, not a
-failed extraction.
+**OCR** (`extraction/ocr.py`) is the one exception, added because the corpus disagreed with the
+assumption above. Three of the first 39 real documents are scans with no text layer at all —
+including a 162-page set of CPCB directions — and they extracted to **zero characters** and
+stopped at `NORMALIZATION_FAILED`. That is the quality gate working (`LOW_TEXT_DENSITY` /
+`EMPTY_TEXT` in `normalization/quality_checker.py`, scoped to PDF since it's the only format that
+can be a scan): the gap was recorded and findable rather than silent, which is why the check was
+built before the capability existed.
+
+The fallback is decided **per page, not per document** — a government PDF is routinely a typed
+covering letter with a scanned annexure behind it, and a per-document switch loses one half
+whichever way it is set. A page qualifies when it has almost no text *and* has images on it; both
+halves matter, or a typed corpus pays ~3.5s a page for nothing, or every blank separator page
+costs seconds to confirm it is blank. `ExtractedUnit.method` records `NATIVE` or `OCR` per page
+and `ExtractionResult.resolve_method()` derives the document-level `NATIVE`/`OCR`/`MIXED` from
+them, so the two cannot disagree.
+
+RapidOCR (ONNX) rather than Docling or a hosted parser, and the reasoning is in `KNOWN_DEBTS.md`
+#13: a layout parser earns its ~500MB and PyTorch on scanned **tables**, and these scans measured
+zero table structure — they are prose. LlamaParse and unstructured's API tier would send every
+document out of the deployment at ingestion, which cannot be reconciled with redacting anything
+before it leaves. `rapidocr` runs on the onnxruntime already in the image for embeddings, and
+rasterisation needs nothing new since pdfplumber already depends on pypdfium2.
+
+Two things to know before changing it. **Thread count is not a tuning detail**: left at the
+onnxruntime default these pages measured 20.5s each against 3.5s at 8 intra-op threads, so
+`OCR_THREADS` is set explicitly. And **OCR drops word boundaries** (`FGDinexisting plantswere`),
+which costs the lexical arm a term it can never match — BM25 cannot match what was never
+tokenised. Lines below `OCR_MIN_CONFIDENCE` are dropped rather than kept, because an invented
+word inside a passage that will later be cited is worse than a gap.
 
 ### Chunking: structure-aware, and why chunks live in Postgres
 
@@ -553,9 +582,11 @@ rationale before "fixing" them:
   scanned/complex-layout PDFs Docling's layout inference exists for. See `KNOWN_DEBTS.md` #13
   before adding it back; the `TextExtractor` registry is designed for a one-format swap, not a
   wholesale rewrite, if a real document proves the trade-off wrong.
-- There is **no OCR** — deliberate for the same reason (no scanned documents expected), with the
-  normalization quality gate's `LOW_TEXT_DENSITY` check as the explicit safety net rather than a
-  silent assumption. See `KNOWN_DEBTS.md` #14 for the trigger to revisit.
+- **OCR exists, for scanned PDF pages only** (`rapidocr`, ONNX, no PyTorch). It was added
+  because debt #14's stated trigger fired: three real documents arrived with no text layer. It is
+  a *fallback*, not a parser — it returns text lines, not table grids, so a scanned table would
+  come out as ungrouped numbers. `OCR_ENABLED=false` switches it off entirely and is
+  authoritative even over an injected engine. See `KNOWN_DEBTS.md` #13/#14.
 - The Postgres image is **`paradedb/paradedb:0.25.10-pg16`**, not `pgvector/pgvector:pg16`. It
   carries pgvector *and* `pg_search` on the same Postgres 16.15, so the switch was not a version
   upgrade and the data directory was unchanged. `pg_search` must be in
