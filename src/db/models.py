@@ -280,6 +280,19 @@ class DocumentChunk(Base):
             postgresql_with={"m": 16, "ef_construction": 64},
         ),
         Index("idx_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
+        # BM25 (pg_search / ParadeDB), migration 0016. Declared here as well as in the migration
+        # so `alembic check` stays meaningful — it caught this index's absence from the model the
+        # moment it was created. `key_field` is how pg_search keys the scores it returns; both
+        # searchable fields are indexed because a chunk's heading is signal its body often does
+        # not repeat.
+        Index(
+            "idx_document_chunks_bm25",
+            "chunk_id",
+            "text",
+            "section_heading",
+            postgresql_using="bm25",
+            postgresql_with={"key_field": "'chunk_id'"},
+        ),
     )
 
 

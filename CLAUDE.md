@@ -286,10 +286,27 @@ predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`. The shape is
 - **semantic** — `embed_query()` (never `embed_passages()`, see the Embedding section), ranked by
   pgvector's `<=>` cosine distance, the operator the HNSW index was built for. Any other distance
   function returns correct results as a sequential scan over the whole corpus.
-- **lexical** — `websearch_to_tsquery` against `document_chunks.search_vector` (migration `0015`,
-  trigger-maintained, body weighted 'A' and section heading 'B'). `websearch_` rather than
-  `plainto_` because it accepts quoted phrases, which is exactly the query the lexical arm exists
-  to serve, and never raises on malformed input.
+- **lexical** — **BM25** via `pg_search` (ParadeDB), migration `0016`. Indexed over both `text`
+  and `section_heading`, queried with `paradedb.boolean(should => [match(text), match(heading)])`
+  and ranked by `paradedb.score()`.
+
+  This replaced a `tsvector`/`ts_rank` arm (`0015`), and the reason was **recall, not ranking**.
+  `websearch_to_tsquery` builds a conjunction — every term must appear in the same chunk — which
+  on this corpus returned **0** rows for "penalties for non-compliance", 1 for "air quality
+  targets" and 2 for "enforcement obligations": precisely the multi-word policy questions the
+  system exists to answer. BM25 scores partial matches and returned a full page for all three.
+  Across 16 sample queries, the arm went from silent on 2 of them to contributing on all 16.
+  It also drops `ts_rank`'s length bias (no document-length normalisation): same queries,
+  `ts_rank` returned chunks averaging 1,237 characters against BM25's 892.
+
+  Both fields are searched because only 1,056 of 2,475 headed chunks repeat their heading in the
+  body — `@@@` applied to a single column searches that column alone, which silently ignored
+  headings until it was measured. `paradedb.match()` is used rather than interpolating the query
+  into pg_search's syntax, so a question containing a colon, a quote or the word "OR" cannot be
+  reinterpreted as operators.
+
+  The `0015` tsvector column and trigger are **still present and now unread** — kept so the switch
+  stays revertible. Removing them is the immediate follow-up (`KNOWN_DEBTS.md` #35).
 
 They fail differently — an embedding blurs "Section 114" into whatever it is semantically near,
 while a word index is blind to paraphrase — which is why fusing beats either. Measured on this
@@ -539,6 +556,12 @@ rationale before "fixing" them:
 - There is **no OCR** — deliberate for the same reason (no scanned documents expected), with the
   normalization quality gate's `LOW_TEXT_DENSITY` check as the explicit safety net rather than a
   silent assumption. See `KNOWN_DEBTS.md` #14 for the trigger to revisit.
+- The Postgres image is **`paradedb/paradedb:0.25.10-pg16`**, not `pgvector/pgvector:pg16`. It
+  carries pgvector *and* `pg_search` on the same Postgres 16.15, so the switch was not a version
+  upgrade and the data directory was unchanged. `pg_search` must be in
+  `shared_preload_libraries`: a fresh container gets that from ParadeDB's own entrypoint, but an
+  existing volume initialised by the older image does not, which is why `docker-compose` passes
+  it as an explicit `command` flag and CI does not need to.
 - Vectors live in **Postgres via pgvector**, not Qdrant/Pinecone/Weaviate — a passage's text, its
   citation metadata and its embedding are one row, so retrieval returns the answer, what to cite,
   and the permission check in a single query. A separate vector store would mean resolving ids

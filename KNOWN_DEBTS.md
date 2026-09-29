@@ -614,3 +614,17 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   a box with a public IP, and it made a documented security claim false.
 - **Fix**: the route now depends on `get_current_user` like every other. The Studio UI already had
   an `authHeaders()` helper and simply was not using it for this one call.
+
+### 35. The `0015` tsvector is now dead weight
+- **Status**: Open, and the immediate follow-up to `0016`.
+- **Context**: the lexical arm moved from `ts_rank` to BM25. `document_chunks.search_vector`, its
+  GIN index and the trigger that maintains it are all still there and nothing reads them.
+- **Why it was kept**: so the switch stays revertible until BM25 has run against real questions
+  for a while. The measurement that justified the switch was recall on 16 sample queries, which
+  is evidence but not an evaluation set.
+- **What it costs meanwhile**: the trigger recomputes a tsvector on every chunk insert and
+  update, and the GIN index is maintained for nothing. Invisible at 2,860 chunks; not free during
+  a bulk archive ingest.
+- **Trigger to address**: once BM25 has served real A-PAG queries without a reason to go back —
+  or immediately before the bulk ingest, whichever comes first. One migration dropping the index,
+  the trigger, the function and the column.

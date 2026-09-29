@@ -1,6 +1,12 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: paradedb/paradedb:0.25.10-pg16
+    # pg_search must be in shared_preload_libraries; it refuses to CREATE EXTENSION otherwise.
+    # ParadeDB's image sets this when it initialises a fresh data directory — but ours was
+    # initialised by the pgvector image it replaces, so that init never ran and the existing
+    # postgresql.conf has no such line. Passing it as a flag is what makes the swap work on an
+    # existing volume rather than only on a clean one.
+    command: postgres -c shared_preload_libraries=pg_search
     container_name: apag-postgres
     ports:
       - "5432:5432"

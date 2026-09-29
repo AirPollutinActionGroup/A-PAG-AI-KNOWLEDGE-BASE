@@ -31,6 +31,28 @@ if not config.get_main_option("sqlalchemy.url", None):
 
 target_metadata = Base.metadata
 
+# Tables that belong to extensions, not to this application.
+#
+# The ParadeDB image ships PostGIS and its own internals, so a *fresh* container already contains
+# `spatial_ref_sys` and `_typmod_cache` before a single migration runs. `alembic check` compares
+# the live schema against the ORM and reported them as tables it should drop, failing CI on a
+# green migration chain. It passed locally only because the developer volume predates that image.
+#
+# Filtered by name rather than by "anything not in target_metadata": the latter would also
+# silence the genuine drift this check exists to catch — a table created by a migration and never
+# added to the ORM. If a future extension adds more tables, the failure names them and they get
+# added here deliberately.
+_EXTENSION_TABLES = {
+    "spatial_ref_sys",   # PostGIS
+    "_typmod_cache",     # ParadeDB internal
+}
+
+
+def include_object(obj, name, type_, reflected, compare_to):
+    """Excludes extension-owned tables from autogenerate and `alembic check`."""
+    return not (type_ == "table" and name in _EXTENSION_TABLES)
+
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
@@ -42,6 +64,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         compare_server_default=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -62,6 +85,7 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             compare_type=True,
             compare_server_default=True,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

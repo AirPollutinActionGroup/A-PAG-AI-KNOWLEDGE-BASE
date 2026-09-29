@@ -24,7 +24,7 @@ import enum
 import logging
 import uuid
 
-from sqlalchemy import Float, cast, func, literal, select
+from sqlalchemy import Float, cast, func, literal, select, text
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
@@ -39,10 +39,9 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["RetrievalService", "SearchMode", "assess", "is_admin"]
 
-# `websearch_to_tsquery`, not `plainto_tsquery`: it accepts quoted phrases, `or`, and `-term`, and
-# it never raises on malformed input. Quoted phrases matter here — "GRAP Stage III" as a phrase is
-# precisely the query a lexical arm exists to serve, and plainto_ would scatter it into loose AND.
-_TS_CONFIG = "english"
+# pg_search parses the query string itself: bare terms, "quoted phrases", +required, -excluded.
+# Quoted phrases matter here — "GRAP Stage III" as a phrase is precisely the query a lexical arm
+# exists to serve.
 
 
 class SearchMode(str, enum.Enum):
@@ -92,19 +91,51 @@ class RetrievalService:
         )
 
     def _lexical_cte(self, query, pool, user_id, viewer_is_admin):
-        tsquery = func.websearch_to_tsquery(_TS_CONFIG, query)
-        rank = func.ts_rank(ChunkORM.search_vector, tsquery)
+        """BM25 over chunk bodies, via pg_search's `@@@` operator and `paradedb.score()`.
+
+        This replaced a `tsvector`/`ts_rank` arm, and the reason was recall rather than ranking.
+        `websearch_to_tsquery` builds a conjunction: every term must appear in the same chunk.
+        Measured on this corpus, that returned **0** rows for "penalties for non-compliance",
+        1 for "air quality targets" and 2 for "enforcement obligations" — the multi-word policy
+        questions this system exists to answer. BM25 scores partial matches instead, ranking by
+        how many terms hit and how rare they are, and returned a full page for all three.
+
+        It also fixes the bias `ts_rank` is known for: no document-length normalisation, so long
+        passages score high merely for being long. On the same queries `ts_rank` returned chunks
+        averaging 1,237 characters against BM25's 892.
+
+        Weaker partial matches do now enter the pool. That is handled where it should be — RRF
+        ranks them low, and the grounding gate drops the result set entirely if nothing clears
+        the similarity bar.
+        """
+        score = func.paradedb.score(ChunkORM.chunk_id)
+
+        # Both indexed fields are searched, not just the body: only 1,056 of 2,475 headed chunks
+        # repeat their heading in the text, so for the other 1,419 the heading is signal the body
+        # does not carry. `@@@` applied to one column searches that column alone, which silently
+        # ignored headings until this was measured.
+        #
+        # `paradedb.match()` rather than interpolating the query into pg_search's own syntax: it
+        # takes the raw user string and tokenizes it, so a question containing a colon, a quote
+        # or the word "OR" cannot be reinterpreted as query operators.
+        matches = text(
+            "document_chunks.chunk_id @@@ paradedb.boolean(should => ARRAY["
+            "  paradedb.match('text', :lexical_q),"
+            "  paradedb.match('section_heading', :lexical_q)"
+            "])"
+        ).bindparams(lexical_q=query)
+
         return (
             select(
                 ChunkORM.chunk_id.label("chunk_id"),
-                func.row_number().over(order_by=rank.desc()).label("rank"),
+                func.row_number().over(order_by=score.desc()).label("rank"),
             )
             .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
             .where(
-                ChunkORM.search_vector.op("@@")(tsquery),
+                matches,
                 *self._visible(user_id, viewer_is_admin),
             )
-            .order_by(rank.desc())
+            .order_by(score.desc())
             .limit(pool)
             .cte("lexical_arm")
         )

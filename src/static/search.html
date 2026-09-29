@@ -312,7 +312,8 @@ details.detail > summary:hover { color: var(--ink); }
         <span><b>A&#8209;PAG</b><span>Knowledge Base</span></span>
       </div>
       <button class="rail-btn" id="newChat"><span class="ic">+</span> New chat</button>
-      <button class="rail-btn" id="uploadBtn"><span class="ic">&#8593;</span> Add a document</button>
+      <button class="rail-btn" id="uploadBtn"><span class="ic">&#8593;</span> Add documents</button>
+      <button class="rail-btn" id="folderBtn"><span class="ic">&#128193;</span> Add a folder</button>
     </div>
     <div class="chats" id="chats"></div>
     <div class="rail-foot">
@@ -364,7 +365,10 @@ details.detail > summary:hover { color: var(--ink); }
   </div>
 </div>
 
-<input type="file" id="file" accept=".pdf,.docx,.xlsx,.pptx" hidden>
+<input type="file" id="file" accept=".pdf,.docx,.xlsx,.pptx" multiple hidden>
+<!-- webkitdirectory is what lets a browser hand over a whole folder. It is non-standard but
+     supported everywhere this will run, and there is no standard alternative. -->
+<input type="file" id="folder" webkitdirectory directory multiple hidden>
 
 <script>
 (() => {
@@ -454,11 +458,56 @@ function paintChats() {
 function openChat(id) {
   activeId = id;
   const chat = active();
+  if (!chat) return newChat();
+
   $("welcome").hidden = true;
   $("thread").replaceChildren();
-  chat.turns.forEach((t) => renderTurn(t.q, t.data));
+
+  chat.turns.forEach((t) => {
+    if (t.kind === "upload") renderUploadTurn(t);
+    else renderTurn(t.q, t.data);
+  });
+
+  /* A conversation with nothing to replay must still show something. This produced a genuinely
+     blank page: adding a document created a conversation but recorded no turn, so reopening it
+     hid the welcome screen and rendered an empty thread. Uploads now record a turn, and this
+     covers the remaining case — a question interrupted before its answer arrived. */
+  if (!chat.turns.length) {
+    $("thread").append(notice(
+      "Nothing saved in this conversation",
+      "It was started but never finished — most likely a question that was interrupted " +
+      "before the answer came back. Ask again below."
+    ));
+  }
+
   paintChats();
   $("scroll").scrollTop = $("scroll").scrollHeight;
+}
+
+/* Replays a finished upload from what was saved. Deliberately a static summary rather than the
+   live card: the polling that drove it belongs to the moment it ran, and resurrecting it on
+   reopen would re-poll documents that settled hours ago. */
+function renderUploadTurn(turn) {
+  const wrap = el("section", "turn");
+  const box = el("div", "upload");
+  box.append(el("div", "name", turn.title));
+  if (turn.dropped) {
+    box.append(el("div", "cite", `${turn.dropped} other file(s) in the folder were skipped`));
+  }
+  box.append(el("div", "thinking", turn.summary || "Added to the knowledge base."));
+
+  if (turn.names?.length) {
+    const list = el("div", "steps");
+    turn.names.forEach((n) => {
+      const chip = el("span", "step", n.length > 22 ? n.slice(0, 21) + "…" : n);
+      chip.title = n;
+      list.append(chip);
+    });
+    box.append(list);
+  }
+
+  wrap.append(box);
+  $("thread").append(wrap);
 }
 
 // ------------------------------------------------------------------ auth
@@ -575,7 +624,13 @@ function renderTurn(question, data) {
   turn.append(bot);
   $("thread").append(turn);
 
-  if (data) fillAnswer(bot, data);
+  if (data) {
+    fillAnswer(bot, data);
+  } else {
+    // Only reached when replaying a saved turn: the question was asked but the answer never
+    // came back. Saying so beats an empty space under the question.
+    bot.append(el("div", "thinking", "No answer was recorded for this question."));
+  }
   return bot;
 }
 
@@ -638,6 +693,12 @@ async function ask(question) {
   $("welcome").hidden = true;
   const chat = ensureChat(question);
 
+  // Recorded before the request, for the same reason uploads are: a turn written only on
+  // success leaves the conversation empty if the tab closes while the search is running.
+  const record = { q: question, data: null };
+  chat.turns.push(record);
+  saveChats();
+
   const bot = renderTurn(question, null);
   const thinking = el("div", "thinking");
   thinking.append(el("span", "dot"), el("span", null, "Searching the documents…"));
@@ -660,7 +721,7 @@ async function ask(question) {
   } catch { data = { error: "Could not reach the server." }; }
 
   fillAnswer(bot, data);
-  chat.turns.push({ q: question, data });
+  record.data = data;
   saveChats();
   $("scroll").scrollTop = $("scroll").scrollHeight;
 }
@@ -703,10 +764,142 @@ function markSteps(steps, status) {
   });
 }
 
+/* The API accepts MAX_FILES_PER_UPLOAD (5) files per request, so a folder goes in waves. Each
+   wave is awaited before the next: a browser firing forty parallel uploads at a rate-limited
+   endpoint produces 429s that look, to the person watching, exactly like the folder failing.
+
+   Only the *upload* is batched. Reading and indexing stay asynchronous on the workers, which is
+   why this reports "queued" and then follows each document to LIVE rather than blocking. */
+const UPLOAD_BATCH = 5;
+
+async function uploadMany(files, droppedCount) {
+  if (!store.get(TOKEN_KEY)) return showLogin();
+  if (files.length === 1 && !droppedCount) return upload(files[0]);
+
+  $("welcome").hidden = true;
+  const chat = ensureChat(`${files.length} documents`);
+
+  /* Recorded before anything is uploaded, not after it settles. A turn written only on success
+     leaves the conversation empty if the tab is closed mid-upload — which is exactly how
+     reopening one produced a blank page. `record.summary` is updated in place as it progresses. */
+  const record = {
+    kind: "upload",
+    title: `${files.length} document${files.length === 1 ? "" : "s"}`,
+    names: files.map((f) => f.name),
+    dropped: droppedCount || 0,
+    summary: "Uploading…",
+  };
+  chat.turns.push(record);
+  saveChats();
+
+  const remember = (text) => { record.summary = text; saveChats(); };
+
+  const turn = el("section", "turn");
+  const box = el("div", "upload");
+  box.append(el("div", "name", `${files.length} document${files.length === 1 ? "" : "s"}`));
+  if (droppedCount) {
+    box.append(el("div", "cite", `${droppedCount} other file(s) in the folder were skipped`));
+  }
+  const status = el("div", "thinking");
+  status.append(el("span", "dot"), el("span", null, "Uploading…"));
+  box.append(status);
+  const list = el("div", "steps");
+  box.append(list);
+  turn.append(box);
+  $("thread").append(turn);
+  $("scroll").scrollTop = $("scroll").scrollHeight;
+
+  const say = (t) => status.replaceChildren(el("span", "dot"), el("span", null, t));
+  const settle = (t) => { remember(t); status.replaceChildren(el("span", null, t)); };
+
+  const queued = [];
+  let rejected = 0;
+
+  for (let i = 0; i < files.length; i += UPLOAD_BATCH) {
+    const wave = files.slice(i, i + UPLOAD_BATCH);
+    say(`Uploading ${Math.min(i + wave.length, files.length)} of ${files.length}…`);
+
+    const form = new FormData();
+    wave.forEach((f) => form.append("files", f));
+    try {
+      const r = await fetch("/api/v1/documents/upload",
+                            { method: "POST", body: form, headers: authed() });
+      if (r.status === 401) return sessionExpired(box);
+      if (!r.ok) { rejected += wave.length; continue; }
+      const body = await r.json();
+      (Array.isArray(body) ? body : [body]).forEach((row) => {
+        if (row?.document_id) queued.push({ id: row.document_id, name: row.filename });
+      });
+    } catch {
+      rejected += wave.length;
+    }
+  }
+
+  if (!queued.length) {
+    return settle("None of those files could be uploaded.");
+  }
+
+  // One chip per document, so a folder of forty is a wall of state rather than a single
+  // spinner that says nothing about which document is stuck.
+  const chips = new Map();
+  queued.forEach((d) => {
+    const chip = el("span", "step", d.name.length > 22 ? d.name.slice(0, 21) + "…" : d.name);
+    chip.title = d.name;
+    chips.set(d.id, chip);
+    list.append(chip);
+  });
+
+  say(`Reading ${queued.length} document${queued.length === 1 ? "" : "s"}…`);
+
+  const pending = new Set(queued.map((d) => d.id));
+  const done = { live: 0, failed: 0 };
+  const deadline = Date.now() + 30 * 60 * 1000;
+
+  while (pending.size && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2500));
+    for (const id of [...pending]) {
+      let st;
+      try {
+        const r = await fetch(`/api/v1/documents/${id}/status`, { headers: authed() });
+        if (r.status === 401) return sessionExpired(box);
+        if (!r.ok) continue;
+        st = await r.json();
+      } catch { continue; }
+
+      const chip = chips.get(id);
+      if (st.status === "LIVE") {
+        chip.className = "step done";
+        pending.delete(id);
+        done.live += 1;
+      } else if (FAILED[st.status]) {
+        chip.className = "step bad";
+        chip.title = `${chip.title} — ${FAILED[st.status]}`;
+        pending.delete(id);
+        done.failed += 1;
+      } else {
+        chip.className = "step now";
+      }
+    }
+    say(`${done.live} ready, ${done.failed} failed, ${pending.size} still reading…`);
+  }
+
+  const parts = [`${done.live} ready to search`];
+  if (done.failed) parts.push(`${done.failed} could not be read`);
+  if (rejected) parts.push(`${rejected} rejected at upload`);
+  if (pending.size) parts.push(`${pending.size} still processing in the background`);
+  settle(parts.join(" · "));
+}
+
 async function upload(file) {
   if (!store.get(TOKEN_KEY)) return showLogin();
   $("welcome").hidden = true;
-  ensureChat(file.name);
+  const chat = ensureChat(file.name);
+  const record = {
+    kind: "upload", title: file.name, names: [file.name], dropped: 0,
+    summary: "Uploading…",
+  };
+  chat.turns.push(record);
+  saveChats();
 
   const turn = el("section", "turn");
   const card = uploadCard(file.name);
@@ -715,7 +908,11 @@ async function upload(file) {
   $("scroll").scrollTop = $("scroll").scrollHeight;
 
   const say = (text) => { card.status.replaceChildren(el("span", "dot"), el("span", null, text)); };
-  const settle = (node) => { card.status.replaceChildren(node); };
+  const settle = (node) => {
+    record.summary = typeof node === "string" ? node : node.textContent;
+    saveChats();
+    card.status.replaceChildren(typeof node === "string" ? el("span", null, node) : node);
+  };
 
   let docId;
   try {
@@ -781,13 +978,42 @@ q.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(
 
 $("newChat").onclick = newChat;
 $("burger").onclick = () => $("app").classList.toggle("open");
+const ACCEPTED = [".pdf", ".docx", ".xlsx", ".pptx"];
+
+/* A folder picker hands over everything in the tree, including things that are not documents and
+   the `~$name.docx` lock files Word leaves beside anything currently open. Filtering here keeps
+   the server from rejecting a pile of files the user never meant to send — the same filter
+   bulk_ingest.py applies when walking a directory. Content still decides the format server-side;
+   this only avoids uploading obvious non-documents. */
+function acceptable(file) {
+  const name = file.name.toLowerCase();
+  if (file.name.startsWith("~$")) return false;
+  return ACCEPTED.some((ext) => name.endsWith(ext));
+}
+
+function pickFiles(input) {
+  const all = [...(input.files || [])];
+  input.value = "";
+  const keep = all.filter(acceptable);
+  return { keep, dropped: all.length - keep.length };
+}
+
 $("file").onchange = (e) => {
-  const f = e.target.files?.[0];
-  e.target.value = "";
-  if (f) upload(f);
+  const { keep, dropped } = pickFiles(e.target);
+  if (keep.length) uploadMany(keep, dropped);
 };
+
+$("folder").onchange = (e) => {
+  const { keep, dropped } = pickFiles(e.target);
+  if (keep.length) uploadMany(keep, dropped);
+  else if (dropped) {
+    alert(`That folder has no PDF, Word, Excel or PowerPoint files (${dropped} other file(s) skipped).`);
+  }
+};
+
 $("uploadBtn").onclick = () => $("file").click();
 $("attachBtn").onclick = () => $("file").click();
+$("folderBtn").onclick = () => $("folder").click();
 
 [
   "What are the enforcement obligations for thermal power plants?",
