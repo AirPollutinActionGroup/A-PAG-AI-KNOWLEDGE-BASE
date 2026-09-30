@@ -452,6 +452,40 @@ sentence containing an invented number. `GeneratedAnswer.boundary` carries the r
 caller, and the "What happened" panel shows what was masked, how many passages were withheld,
 and where it was sent.
 
+### Generation: which Sarvam model, and why it is not the obvious one
+
+Sarvam exposes two models. They share a name and behave completely differently, and the
+difference is not documented anywhere except in what they return.
+
+`sarvam-105b` is a **reasoning** model: it writes a chain of thought into `reasoning_content`
+and only then writes the answer into `content`. Both are billed as completion tokens and the
+reasoning is far the larger. Measured against a real eight-passage context from this corpus:
+
+| model | time | completion tokens | answer | cost |
+|---|---|---|---|---|
+| `sarvam-105b` | 75.4s | 6,229 | 932 chars | ₹0.584 |
+| `sarvam-105b-conversations` | **1.6s** | **251** | 775 chars | **₹0.147** |
+
+47× faster and 4× cheaper for an answer of the same quality, both correctly cited. Worse, the
+reasoning model is *unreliable* here: at four passages it exhausted an 8,192-token budget
+thinking and returned `content: null` — a 200 response with a full token bill and no answer.
+Reasoning buys nothing for this task, which is extraction from passages the model has already
+been given.
+
+Two consequences encoded in the code. `SarvamProvider` treats an empty `content` as a
+`GenerationError` rather than returning `""`: an answer box that is blank after a successful
+request reads as a broken deployment, and the one thing worse than no answer is no answer that
+looks like one. And `GENERATION_MAX_TOKENS` must cover reasoning *and* answer if anyone
+configures the reasoning model, which is why the setting says to change it together with
+`GENERATION_REASONING_EFFORT` rather than separately.
+
+**Models are baked into the image, including the reranker.** This was missed on the reranker at
+first and showed up as `Fetching 5 files` in the API's startup log — 16 seconds of HuggingFace
+download in front of the first question, paid again by every fresh container, and a hard failure
+in any deployment without egress to huggingface.co. The `lifespan` handler additionally warms
+both models on boot, in a thread so the health check does not block: without it the first caller
+paid a 36-second load for a question that takes 2.5 seconds warm.
+
 ### Storage: 4-bucket + repository abstraction
 
 - `src/storage/object_storage.py` defines `ObjectStorage` (abstract) with `LocalFileSystemStorage`

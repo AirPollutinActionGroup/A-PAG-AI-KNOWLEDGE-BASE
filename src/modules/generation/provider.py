@@ -79,6 +79,10 @@ class SarvamProvider(AnswerProvider):
             # invention is the failure mode; there is nothing to gain from sampling variety.
             "temperature": settings.GENERATION_TEMPERATURE,
             "max_tokens": settings.GENERATION_MAX_TOKENS,
+            # sarvam-105b reasons before it answers, and the reasoning is billed. Left at the
+            # default it spent 2,682 completion tokens to produce a fourteen-character answer;
+            # at "low" it spent 419 for the same one. See GENERATION_REASONING_EFFORT.
+            "reasoning_effort": settings.GENERATION_REASONING_EFFORT,
         }
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -104,13 +108,40 @@ class SarvamProvider(AnswerProvider):
 
         try:
             body = response.json()
-            text = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            message = choice["message"]
         except (ValueError, KeyError, IndexError) as e:
             raise GenerationError(f"Unexpected response shape from Sarvam: {e}") from e
 
+        # `content` is null, not absent, when the model ran out of budget mid-reasoning.
+        text = message.get("content") or ""
+        reasoning = message.get("reasoning_content") or ""
+        finish = choice.get("finish_reason")
         usage = body.get("usage") or {}
-        return (
-            text or "",
-            int(usage.get("prompt_tokens", 0)),
-            int(usage.get("completion_tokens", 0)),
-        )
+        completion = int(usage.get("completion_tokens", 0))
+
+        if not text:
+            # This shipped once as a silent empty string: a 200 response, a full token bill, and
+            # an answer box with nothing in it. An empty answer must be an error, because the
+            # one thing worse than no answer is no answer that looks like one.
+            if finish == "length":
+                raise GenerationError(
+                    f"The model used its entire {settings.GENERATION_MAX_TOKENS}-token budget "
+                    f"reasoning and never wrote an answer. Raise GENERATION_MAX_TOKENS or lower "
+                    f"GENERATION_REASONING_EFFORT."
+                )
+            raise GenerationError(
+                f"Sarvam returned no answer text (finish_reason={finish!r})."
+            )
+
+        # The reasoning is the model's scratchpad and is deliberately discarded: it is not
+        # grounded in the passages the way the answer is required to be, it carries no
+        # citations, and showing it beside a cited answer invites it being read as one.
+        if reasoning and completion:
+            logger.info(
+                "Sarvam: %d completion tokens, of which ~%d were reasoning (%d chars) for a "
+                "%d-char answer",
+                completion, max(0, completion - len(text) // 4), len(reasoning), len(text),
+            )
+
+        return text, int(usage.get("prompt_tokens", 0)), completion

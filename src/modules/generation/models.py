@@ -2,7 +2,7 @@
 
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from src.modules.gateway.models import BoundaryRecord
 
@@ -58,8 +58,17 @@ class GeneratedAnswer(BaseModel):
     # evidence — an answer containing <PHONE_1> should be explainable without reading a log.
     boundary: BoundaryRecord | None = None
 
+    @computed_field
     @property
     def cost_inr(self) -> float:
-        """Rupees for this answer, at Sarvam's published rates. Shown because a per-question cost
-        is the number that decides whether this scales to the whole organisation."""
+        """Rupees for this answer, at Sarvam's published rates.
+
+        `@computed_field`, not a bare `@property`: pydantic does not serialise plain properties,
+        so this was absent from every API response while appearing to work in Python. The UI
+        read it as missing and showed nothing.
+
+        `output_tokens` is Sarvam's `completion_tokens`, which **includes the reasoning the
+        model does before writing** — usually most of it. That is correct for cost, because
+        reasoning is billed, but it means the number is not "tokens of answer".
+        """
         return (self.input_tokens / 1e6) * 29.28 + (self.output_tokens / 1e6) * 73.2

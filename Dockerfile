@@ -29,6 +29,15 @@ RUN pip install --no-cache-dir .
 ENV FASTEMBED_CACHE_PATH=/app/.model_cache
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-base-en-v1.5')"
 
+# The reranker, for exactly the same reason — and it was missed at first, which showed up as
+# "Fetching 5 files" in the API's startup log and 16 seconds of HuggingFace download in front of
+# the first question anyone asked. Every fresh container paid it again, and a deployment without
+# egress to huggingface.co would never have got a reranked result at all.
+#
+# Uses the same RERANK_MODEL default as src/core/config.py. If that default changes, this must
+# change with it, or the model is fetched at runtime after all.
+RUN python -c "from fastembed.rerank.cross_encoder import TextCrossEncoder; TextCrossEncoder('Xenova/ms-marco-MiniLM-L-6-v2')"
+
 # Same for the OCR models, for the same reason. Constructing RapidOCR resolves and downloads all
 # three (detection, classification, recognition) into site-packages, which `COPY . .` below does
 # not disturb. ~15MB, against a worker that would otherwise reach for the network the first time

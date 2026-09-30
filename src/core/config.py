@@ -103,13 +103,46 @@ class Settings(BaseSettings):
     # Sarvam-M and Sarvam-30B were both deprecated within a year of release, so treat the model
     # name as something that will change again and not as a constant.
     SARVAM_API_KEY: str = ""
-    SARVAM_MODEL: str = "sarvam-105b"
-    SARVAM_TIMEOUT_SECONDS: float = 60.0
+    # Sarvam exposes two models and they behave completely differently, despite the shared
+    # name. `sarvam-105b` is a **reasoning** model: against a real eight-passage context it
+    # spent 6,229 completion tokens and 75 seconds writing 17,000 characters of chain-of-thought
+    # to produce a 932-character answer — and at 4 passages it exhausted an 8,192-token budget
+    # and returned nothing at all. `sarvam-105b-conversations` does no reasoning:
+    #
+    #   sarvam-105b                  8 passages   75.4s   6,229 tokens   Rs 0.584
+    #   sarvam-105b-conversations    8 passages    1.6s     251 tokens   Rs 0.147
+    #
+    # 47x faster and 4x cheaper for an answer of the same quality, both correctly cited.
+    # Reasoning buys nothing here: the task is extraction from supplied passages, and the model
+    # was deliberating over text it had already been given.
+    SARVAM_MODEL: str = "sarvam-105b-conversations"
+    # Generous relative to the 1.6s the conversations model takes, because the failure this
+    # guards against is a hung connection, not a slow answer — and the reasoning model, if
+    # anyone configures it, needs well over 60.
+    SARVAM_TIMEOUT_SECONDS: float = 120.0
 
     # Low, not zero: the task is extraction and summary over supplied text, where invention is
     # the failure mode and sampling variety buys nothing.
     GENERATION_TEMPERATURE: float = 0.2
-    GENERATION_MAX_TOKENS: int = 1024
+
+    # sarvam-105b is a **reasoning model**: it writes a chain of thought into
+    # `reasoning_content` and only then writes the answer into `content`. Both are billed as
+    # completion tokens, and the reasoning is far the larger of the two.
+    #
+    # Measured on one short question, identical answer both times:
+    #   default effort      2,682 completion tokens  ->  "[1] 36 months."
+    #   reasoning_effort=low   419 completion tokens  ->  "[1] 36 months"
+    #
+    # 6.4x the cost for the same sentence. This task is extraction from supplied passages, not
+    # a problem that rewards deliberation, so "low" is the default. Sarvam accepts only 'low',
+    # 'medium' or 'high' — reasoning cannot be turned off, and `thinking: false` is ignored.
+    GENERATION_REASONING_EFFORT: str = "low"
+
+    # Must cover the reasoning *and* the answer, because the reasoning is spent first. At 300
+    # the model used the entire budget thinking and returned `content: null` with
+    # finish_reason "length" — an empty answer with a full token bill. 2048 leaves headroom at
+    # low effort; raise it together with GENERATION_REASONING_EFFORT, never separately.
+    GENERATION_MAX_TOKENS: int = 2048
 
     # How many retrieved passages are sent. More context is not free — it costs money per token,
     # dilutes the model's attention, and past a point lowers answer quality rather than raising
