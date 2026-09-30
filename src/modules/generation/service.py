@@ -21,8 +21,9 @@ import logging
 import re
 
 from src.core.config import settings
+from src.modules.gateway.service import BoundaryRefusal, DataBoundaryGateway
 from src.modules.generation.models import Citation, GeneratedAnswer
-from src.modules.generation.provider import AnswerProvider, GenerationError
+from src.modules.generation.provider import GenerationError
 from src.modules.retrieval.models import RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -43,27 +44,38 @@ passages carries both, like [1][3].
 
 
 class AnswerService:
-    """Composes the prompt, calls the provider, and verifies what comes back."""
+    """Composes the prompt, sends it **through the boundary gateway**, and verifies what comes
+    back.
 
-    def __init__(self, provider: AnswerProvider):
-        self._provider = provider
+    It takes a gateway rather than a provider deliberately. A redaction step that callers invoke
+    politely is not a boundary; a boundary is one that cannot be gone around because there is no
+    other route to the model. Holding the gateway here means no future caller can add a second
+    path out by accident.
+    """
+
+    def __init__(self, gateway: DataBoundaryGateway):
+        self._gateway = gateway
 
     @staticmethod
-    def build_context(chunks: list[RetrievedChunk]) -> str:
+    def build_context(chunks: list[RetrievedChunk], texts: list[str] | None = None) -> str:
         """Numbers the passages and labels each with where it came from.
 
         The source line is included deliberately: the model does better at attributing a claim
         when it can see that passage 2 is a different document from passage 3, and a reader
         comparing the answer against the citation list sees the same labels.
         """
+        bodies = texts if texts is not None else [c.text for c in chunks]
         parts = []
-        for i, c in enumerate(chunks, 1):
+        for i, (c, body) in enumerate(zip(chunks, bodies, strict=True), 1):
             where = [c.filename]
             if c.page_number is not None:
                 where.append(f"p.{c.page_number}")
             if c.section_heading:
                 where.append(c.section_heading)
-            parts.append(f"[{i}] ({' · '.join(where)})\n{c.text}")
+            # `body` is the redacted text when the gateway supplied one. The citation metadata
+            # around it is never redacted: a filename and a page number are how a reader checks
+            # the claim, and masking those would defeat the point of citing at all.
+            parts.append(f"[{i}] ({' · '.join(where)})\n{body}")
         return "\n\n".join(parts)
 
     def answer(
@@ -72,27 +84,58 @@ class AnswerService:
         chunks: list[RetrievedChunk],
         *,
         grounded: bool,
+        tiers: list[str | None] | None = None,
     ) -> GeneratedAnswer:
+        """Writes an answer from `chunks`, sending nothing that the boundary would not allow.
+
+        `tiers` is each passage's classification, positionally aligned with `chunks`. It has no
+        default value on purpose at the call site: omitting it here means "unknown", and the
+        gateway treats unknown as the highest tier rather than the lowest — a passage whose
+        classification nobody recorded is not evidence that it is public.
+        """
         if not grounded or not chunks:
             # Deliberately no model call. See rule 1.
             return GeneratedAnswer(
-                question=question, grounded=False, model=self._provider.model_name
+                question=question, grounded=False, model=self._gateway.model_name
             )
 
         usable = chunks[: settings.GENERATION_MAX_PASSAGES]
-        user = (
-            f"{self.build_context(usable)}\n\n"
-            f"---\n\nQuestion: {question}"
-        )
+        supplied = list(tiers or [None] * len(chunks))[: len(usable)]
+
+        # What the model was actually shown, which is not always what it was offered:
+        # classification can drop passages at the boundary, and a citation marker has to point
+        # at a passage that was really sent. Filled in by `compose` below, from the indices the
+        # gateway reports back.
+        sent: list[RetrievedChunk] = []
+
+        def compose(kept: list[tuple[int, str]]) -> str:
+            sent.clear()
+            sent.extend(usable[i] for i, _ in kept)
+            bodies = [body for _, body in kept]
+            return (
+                f"{self.build_context(sent, bodies)}\n\n"
+                f"---\n\nQuestion: {question}"
+            )
 
         try:
-            text, in_tokens, out_tokens = self._provider.complete(SYSTEM_PROMPT, user)
+            text, in_tokens, out_tokens, record = self._gateway.send(
+                SYSTEM_PROMPT, [c.text for c in usable], supplied, build_user=compose,
+            )
+        except BoundaryRefusal as e:
+            # Not a failure: the boundary did its job. Reported as ungrounded rather than as an
+            # error, because from the reader's side the honest statement is "I have nothing I
+            # can answer this from", and saying so is the same contract as an empty corpus.
+            logger.info("Boundary refused the request for %r: %s", question[:80], e)
+            return GeneratedAnswer(
+                question=question, grounded=False, model=self._gateway.model_name,
+                excluded_restricted=len(usable),
+            )
         except GenerationError:
             raise
         except Exception as e:
             raise GenerationError(f"Generation failed: {e}") from e
 
-        cleaned, citations, invalid = self._verify_citations(text, usable)
+        cleaned, citations, invalid = self._verify_citations(text, sent)
 
         if invalid:
             logger.warning(
@@ -106,9 +149,11 @@ class AnswerService:
             grounded=True,
             citations=citations,
             invalid_markers=invalid,
-            model=self._provider.model_name,
+            model=self._gateway.model_name,
             input_tokens=in_tokens,
             output_tokens=out_tokens,
+            boundary=record,
+            excluded_restricted=record.passages_withheld_restricted,
         )
 
     @staticmethod

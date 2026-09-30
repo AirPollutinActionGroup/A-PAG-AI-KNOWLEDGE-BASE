@@ -129,6 +129,14 @@ class Settings(BaseSettings):
     # never leaving the building.
     GENERATION_INCLUDE_RESTRICTED: bool = False
 
+    # Whether the gateway scans and masks sensitive values before anything is sent.
+    #
+    # On by default and intended to stay on: the point of a boundary is that it cannot be
+    # bypassed, and a control that ships off is a control nobody has tested. The switch exists
+    # for diagnosing a recogniser that is firing wrongly on a specific corpus, not as a
+    # deployment choice.
+    GATEWAY_REDACT: bool = True
+
     # Embedding.
     # EMBEDDING_DIMENSIONS must match the migrated vector(N) column. It is not a tuning knob:
     # changing it requires a migration and a full re-embed of the corpus, so FastEmbedProvider

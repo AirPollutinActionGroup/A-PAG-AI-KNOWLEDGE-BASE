@@ -408,6 +408,50 @@ match counts as grounded whatever the similarity: if the words are literally in 
 corpus contains them. The 0.55 default was measured on this corpus (on-topic 0.69–0.84,
 off-topic 0.45–0.50) and is **model-specific** — re-measure it on a model change.
 
+### The Data Boundary Gateway: the only route to an external model
+
+`src/modules/gateway/` is the single place anything leaves this deployment. Its value comes
+entirely from being the *only* route — a redaction function that callers invoke politely is not
+a boundary. That is why `AnswerService` takes a `DataBoundaryGateway` rather than an
+`AnswerProvider`, and the provider is wrapped exactly once, in `get_answer_service()`: there is
+no assembly in which Sarvam is reachable without crossing it.
+
+Three steps, in this order:
+
+1. **Classify.** A request takes the **highest tier present across every passage** — seven
+   PUBLIC passages and one RESTRICTED passage is a RESTRICTED request, with no averaging and no
+   majority rule. Anything not *explicitly* PUBLIC is withheld, which includes a classification
+   that is missing or unrecognised: matching only the literal string `"RESTRICTED"` would send
+   a passage whose tier could not be looked up while `classify()` simultaneously recorded the
+   request as restricted, so the record would claim the boundary held when it had not. Fail
+   closed. If nothing survives, `BoundaryRefusal` is raised and **no call is made**.
+2. **Redact.** `recognizers.py` holds deterministic patterns — GSTIN, PAN, Aadhaar, credit card,
+   IFSC, email, Indian mobile — and matches are replaced with typed placeholders. Numbering is
+   shared across the whole request, so one phone number appearing in three passages is
+   `<PHONE_1>` in all three; otherwise the model is handed what looks like three different
+   people. Replacements run **right to left** so removing one does not invalidate the offsets of
+   those before it. Recogniser order is load-bearing: GSTIN embeds a PAN and must be tried first.
+3. **Record.** A `BoundaryRecord` is written on **every** crossing, not only when something
+   fired — a record kept on detection alone cannot distinguish "nothing sensitive was present"
+   from "the scan never ran".
+
+**Checksums are what make this usable on this corpus.** Aadhaar carries a Verhoeff digit and
+cards carry Luhn, and without those tests a 12-digit tonnage in an emissions table reads as an
+identity number. A control that mangles the corpus gets switched off, and then it protects
+nothing — `test_gateway.py` pins the false-positive behaviour on real corpus text (emission
+figures, `S.O. 3305 (E)`, `Section 5 ... 1986`) as tightly as it pins the true positives.
+
+Detection is **patterns, not a model**, deliberately. The cost is that a person's name in prose
+is not detected, because a name has no shape. What it buys is that every detection is
+reproducible, testable and explainable, which is what a control whose job is to be *shown* needs
+more than it needs recall. Presidio with NER is the upgrade path if names become a requirement.
+
+Placeholders deliberately survive into the answer: a model given `<PHONE_1>` writes `<PHONE_1>`,
+and the UI marks it up so a reader sees where a real value was withheld rather than a fluent
+sentence containing an invented number. `GeneratedAnswer.boundary` carries the record to the
+caller, and the "What happened" panel shows what was masked, how many passages were withheld,
+and where it was sent.
+
 ### Storage: 4-bucket + repository abstraction
 
 - `src/storage/object_storage.py` defines `ObjectStorage` (abstract) with `LocalFileSystemStorage`
@@ -596,6 +640,10 @@ rationale before "fixing" them:
   The one exception: concurrent dedup promotion races on `uq_documents_active_sha256` are caught
   as an `IntegrityError` in `ScanJobHandler.process()` and routed to `DUPLICATE` — that DB
   constraint is the real guarantee, application code is just handling its failure mode.
+- **Nothing reaches an external model except through `DataBoundaryGateway`.** Adding a second
+  path out — a provider called directly, a new endpoint that composes its own prompt — defeats
+  the control entirely, and no test would catch it. `AnswerService` holds a gateway, not a
+  provider, so that mistake requires deliberately changing a constructor signature.
 - Auth is **JWT + bcrypt against local Postgres**, not SSO — deliberate for the current
   50-employee, no-existing-SSO phase. See `ARCHITECTURE.md` §6a.
 - Registration is **open** (`POST /auth/register` has no invite/admin gate) — deliberate only

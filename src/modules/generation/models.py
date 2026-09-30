@@ -4,6 +4,8 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+from src.modules.gateway.models import BoundaryRecord
+
 
 class Citation(BaseModel):
     """A passage the answer actually drew on.
@@ -49,6 +51,12 @@ class GeneratedAnswer(BaseModel):
     model: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
+
+    # What the boundary did on the way out: the tier the request took, how many passages were
+    # withheld, and what was masked. Carried on the answer rather than logged alone, because the
+    # person reading the answer is the one who needs to know it was built from redacted
+    # evidence — an answer containing <PHONE_1> should be explainable without reading a log.
+    boundary: BoundaryRecord | None = None
 
     @property
     def cost_inr(self) -> float:

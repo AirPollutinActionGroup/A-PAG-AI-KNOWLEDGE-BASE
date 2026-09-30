@@ -142,6 +142,21 @@ button { cursor: pointer; background: none; border: 0; }
 .mini { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 11.5px; }
 .mini:hover { border-color: var(--ink-faint); color: var(--ink); }
 
+/* ---- a written answer, and what the boundary did to produce it */
+.answer { font-size: 15.5px; line-height: 1.65; white-space: pre-wrap; margin-bottom: 14px; }
+/* Citation markers and boundary placeholders are both "this stands for something else", so
+   they read as one family -- but the placeholder is a warning and the marker is a link, so
+   only one of them carries the accent. */
+.answer .mk {
+  font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--ink);
+  background: var(--yellow); border-radius: 4px; padding: 2px 4px; vertical-align: 1px;
+}
+.answer .masked {
+  font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 4px; padding: 1px 4px; vertical-align: 1px;
+}
+.cost { font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint); }
+
 /* ---- documents, in the rail and full-screen
    The rail list is the index; the panel is the document. Both reuse the conversation's own
    shapes (.hit for a passage, .mini for a control) so a document does not arrive looking like a
@@ -342,6 +357,8 @@ details.detail > summary:hover { color: var(--ink); }
   display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
   margin-top: 8px; font: 400 11.5px/1.4 "IBM Plex Mono", monospace; color: var(--ink-faint);
 }
+.tog { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.tog input { accent-color: var(--yellow-deep); margin: 0; }
 .hint select { border: 1px solid var(--line); border-radius: 6px; padding: 2px 5px; background: var(--paper); color: var(--ink); }
 .grow { flex: 1; }
 
@@ -432,6 +449,7 @@ details.detail > summary:hover { color: var(--ink); }
         <div class="hint">
           <span>Enter to send &middot; Shift+Enter for a new line</span>
           <span class="grow"></span>
+          <label class="tog"><input type="checkbox" id="answerMode" checked> write an answer</label>
           <label for="mode">match
             <select id="mode">
               <option value="hybrid" selected>hybrid</option>
@@ -1099,7 +1117,143 @@ function renderTurn(question, data) {
   return bot;
 }
 
+function fillWrittenAnswer(bot, data) {
+  bot.replaceChildren();
+
+  if (!data.grounded) {
+    /* Same contract as search: withhold rather than flag. The model was never called, so there
+       is no answer to hedge — and a citation beside text that does not answer the question is
+       how someone quotes the wrong thing in a submission. */
+    bot.append(notice(
+      "I don't have anything on that.",
+      data.excluded_restricted
+        ? " Every passage that matched is restricted, so none of it could be sent to the model."
+        : " Nothing in the documents I can see is close enough to this question to answer it."
+    ));
+    return;
+  }
+
+  bot.append(answerText(data.answer));
+
+  const cites = data.citations || [];
+  if (cites.length) {
+    const src = disclosure("Sources", `${cites.length} cited`, true);
+    cites.forEach((c) => {
+      const card = el("article", "hit");
+      const top = el("div", "hit-top");
+      top.append(el("span", "rank", String(c.marker)), el("span", "src", baseName(c.filename)));
+      if (c.page_number != null) top.append(el("span", "cite", "p." + c.page_number));
+      card.append(top);
+      card.append(c.section_heading
+        ? el("div", "hit-head", c.section_heading)
+        : el("div", "hit-head none", "no section recorded"));
+      card.append(el("div", "hit-body", c.text));
+      src.body.append(card);
+    });
+    bot.append(src.root);
+  }
+
+  /* The worst error this system can make: a claim wearing a citation that points at nothing.
+     Surfaced rather than logged, because the reader is the one who would otherwise trust it. */
+  if (data.invalid_markers && data.invalid_markers.length) {
+    bot.append(notice(
+      "Some citations were removed",
+      ` The model referred to ${data.invalid_markers.length} passage(s) it was not given `
+      + `(${data.invalid_markers.join(", ")}). Those markers were stripped — treat any claim `
+      + `they were attached to as unsupported.`, true));
+  }
+
+  const b = data.boundary;
+  const masked = b && b.masked ? b.masked : [];
+  const maskedTotal = masked.reduce((n, m) => n + m.count, 0);
+
+  /* What crossed the boundary, and what did not. Shown on the answer rather than only in a
+     log, because the person reading it is the one who needs to know it was built from
+     redacted evidence. */
+  const pill = maskedTotal
+    ? `${maskedTotal} value${maskedTotal === 1 ? "" : "s"} masked`
+    : (b ? "nothing withheld" : "");
+  const det = disclosure("What happened", pill, maskedTotal > 0);
+
+  const rows = [];
+  if (b) {
+    rows.push(["sent to", b.model || "—"]);
+    rows.push(["request tier", b.tier]);
+    rows.push(["passages sent", `${b.passages_sent} of ${b.passages_considered}`]);
+    if (b.passages_withheld_restricted) {
+      rows.push(["withheld as restricted", `${b.passages_withheld_restricted} passage(s)`, true]);
+    }
+  }
+  rows.push(["tokens", `${(data.input_tokens || 0).toLocaleString()} in, `
+                     + `${(data.output_tokens || 0).toLocaleString()} out`]);
+  det.body.append(kvRows(rows));
+
+  if (maskedTotal) {
+    const head = el("div", "cite");
+    head.style.margin = "10px 0 6px";
+    head.textContent = "Removed before anything was sent — these never left this deployment:";
+    det.body.append(head);
+    const list = el("div", "steps");
+    masked.forEach((m) => {
+      const chip = el("span", "step", `${m.count}× ${m.label.toLowerCase().replace(/_/g, " ")}`);
+      chip.title = (m.placeholders || []).join(", ");
+      list.append(chip);
+    });
+    det.body.append(list);
+    const note = el("div", "cite");
+    note.style.marginTop = "8px";
+    note.textContent = "The model saw a placeholder in each position, so anything it wrote "
+                     + "about them is about the placeholder, not the real value.";
+    det.body.append(note);
+  } else if (b) {
+    const note = el("div", "cite");
+    note.style.marginTop = "6px";
+    note.textContent = "No phone numbers, emails or identifiers were found in these passages, "
+                     + "so nothing needed masking.";
+    det.body.append(note);
+  }
+
+  bot.append(det.root);
+
+  if (data.cost_inr != null) {
+    const cost = el("div", "cost", `about \u20b9${Number(data.cost_inr).toFixed(3)} for this answer`);
+    bot.append(cost);
+  }
+}
+
+function say2(node, text) {
+  node.replaceChildren(el("span", "dot"), el("span", null, text));
+}
+
+/* Splits an answer into text, citation markers [3], and boundary placeholders <PHONE_1>.
+
+   The placeholders are the point. The model wrote them because that is literally what it was
+   given — the real value never left this deployment — and rendering them as ordinary text
+   would leave a reader guessing whether `<PHONE_1>` was a redaction or something the model
+   invented. Marked up, it says plainly: a real value stood here and was withheld. */
+const _TOKEN = /(\[\d+\]|<[A-Z_]+_\d+>)/g;
+
+function answerText(text) {
+  const box = el("div", "answer");
+  for (const part of String(text).split(_TOKEN)) {
+    if (!part) continue;
+    if (/^\[\d+\]$/.test(part)) {
+      box.append(el("span", "mk", part.slice(1, -1)));
+    } else if (/^<[A-Z_]+_\d+>$/.test(part)) {
+      const kind = part.slice(1, -1).replace(/_\d+$/, "").toLowerCase().replace(/_/g, " ");
+      const tag = el("span", "masked", part);
+      tag.title = `A ${kind} stood here. It was removed before the question was sent, and `
+                + `never left this deployment.`;
+      box.append(tag);
+    } else {
+      box.append(document.createTextNode(part));
+    }
+  }
+  return box;
+}
+
 function fillAnswer(bot, data) {
+  if (data && data.kind === "answer") return fillWrittenAnswer(bot, data);
   bot.replaceChildren();
 
   if (data.error) { bot.append(notice("Something went wrong", data.error, true)); return; }
@@ -1122,6 +1276,12 @@ function fillAnswer(bot, data) {
     ]));
     bot.append(d.root);
     return;
+  }
+
+  if (data.answerFailed) {
+    bot.append(notice(
+      "Couldn't write an answer",
+      " " + data.answerFailed + " The passages below are what retrieval found, unchanged."));
   }
 
   const n = data.count;
@@ -1171,19 +1331,44 @@ async function ask(question) {
   $("scroll").scrollTop = $("scroll").scrollHeight;
 
   let data;
-  try {
+  const search = async () => {
     const url = `/api/v1/search?q=${encodeURIComponent(question)}`
       + `&limit=${$("k").value}&mode=${$("mode").value}`;
     const r = await fetch(url, { headers: authed() });
-    if (r.status === 401) return sessionExpired(bot);
+    if (r.status === 401) { sessionExpired(bot); return null; }
     if (!r.ok) {
       let detail = `Search failed (${r.status}).`;
       try { const j = await r.json(); if (j.detail) detail = String(j.detail); } catch { /* not json */ }
-      data = { error: detail };
+      return { error: detail };
+    }
+    return await r.json();
+  };
+
+  try {
+    if ($("answerMode").checked) {
+      /* Ask for a written answer first. If generation is unavailable — no API key, the model
+         unreachable — fall back to the passages rather than showing nothing: retrieval still
+         works, and saying so is more useful than an error. */
+      say2(thinking, "Reading the documents and writing an answer…");
+      const url = `/api/v1/ask?q=${encodeURIComponent(question)}&passages=${$("k").value}`;
+      const r = await fetch(url, { method: "POST", headers: authed() });
+      if (r.status === 401) return sessionExpired(bot);
+      if (r.ok) {
+        data = await r.json();
+        data.kind = "answer";
+      } else {
+        let why = `Answer unavailable (${r.status}).`;
+        try { const j = await r.json(); if (j.detail) why = String(j.detail); } catch { /* not json */ }
+        say2(thinking, "Falling back to passages…");
+        data = await search();
+        if (data) { data.kind = "passages"; data.answerFailed = why; }
+      }
     } else {
-      data = await r.json();
+      data = await search();
+      if (data) data.kind = "passages";
     }
   } catch { data = { error: "Could not reach the server." }; }
+  if (!data) return;
 
   fillAnswer(bot, data);
   record.data = data;

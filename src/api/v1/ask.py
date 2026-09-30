@@ -16,11 +16,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from src.api.v1.retrieval import get_retrieval_service
-from src.core.config import settings
 from src.db.engine import get_db
-from src.db.enums import Classification
 from src.db.models import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.gateway.service import DataBoundaryGateway
 from src.modules.generation.models import GeneratedAnswer
 from src.modules.generation.provider import GenerationError, SarvamProvider
 from src.modules.generation.service import AnswerService
@@ -35,10 +34,15 @@ _service: AnswerService | None = None
 
 def get_answer_service() -> AnswerService:
     """A dependency rather than a module-level singleton, so tests can substitute a provider and
-    importing this module does not require an API key to exist."""
+    importing this module does not require an API key to exist.
+
+    The provider is wrapped in the gateway here and nowhere else. `AnswerService` holds the
+    gateway, not the provider, so there is no assembly in which a caller reaches Sarvam without
+    crossing the boundary.
+    """
     global _service
     if _service is None:
-        _service = AnswerService(provider=SarvamProvider())
+        _service = AnswerService(gateway=DataBoundaryGateway(provider=SarvamProvider()))
     return _service
 
 
@@ -79,26 +83,14 @@ async def ask(
     )
     grounded, _best = assess(results, question)
 
-    # Retrieval already decided the caller may see these. This is the separate question of
-    # whether they may leave the network — see GENERATION_INCLUDE_RESTRICTED.
-    # Architecture §3 and §5: external inference is for non-restricted content, and a request
-    # takes the highest tier present across every passage — one restricted passage makes the
-    # whole request restricted. Rather than refusing outright, the restricted passages are
-    # withheld and the caller is told how many, so an answer built from part of the evidence is
-    # never mistaken for the whole of it.
-    withheld = 0
-    if not settings.GENERATION_INCLUDE_RESTRICTED:
-        kept = [r for r in results if _is_public(db, r.document_id)]
-        withheld = len(results) - len(kept)
-        if withheld:
-            logger.info("Withheld %d restricted passage(s) from generation", withheld)
-        results = kept
-        grounded = grounded and bool(results)
+    # Retrieval already decided the caller may *see* these. Whether they may *leave the
+    # network* is a separate question, and it belongs to the gateway rather than here: this
+    # endpoint's job is to say which tier each passage carries, and the boundary's job is to
+    # decide what that means. Deciding it in two places is how two places drift apart.
+    tiers = _tiers_for(db, results)
 
     try:
-        answer = answers.answer(question, results, grounded=grounded)
-        answer.excluded_restricted = withheld
-        return answer
+        return answers.answer(question, results, grounded=grounded, tiers=tiers)
     except GenerationError as e:
         # A model outage must not look like an empty corpus. Retrieval worked; say so.
         logger.error("Generation failed for %r: %s", question[:80], e)
@@ -108,10 +100,23 @@ async def ask(
         ) from e
 
 
-def _is_public(db: Session, document_id) -> bool:
+def _tiers_for(db: Session, results) -> list[str | None]:
+    """Each passage's classification, positionally aligned with `results`.
+
+    One query for the whole set rather than one per passage: the previous version issued a
+    SELECT per result, which on a ten-passage answer was ten round trips to decide something
+    the database could answer once.
+
+    A document whose classification cannot be found yields None, and the gateway reads None as
+    the highest tier rather than the lowest. A missing record is not evidence of safety.
+    """
     from src.db.models import Document as DocumentORM
 
-    classification = db.query(DocumentORM.classification).filter(
-        DocumentORM.document_id == document_id
-    ).scalar()
-    return classification != Classification.RESTRICTED.value
+    ids = {r.document_id for r in results}
+    if not ids:
+        return []
+    rows = db.query(DocumentORM.document_id, DocumentORM.classification).filter(
+        DocumentORM.document_id.in_(ids)
+    ).all()
+    by_id = {row[0]: row[1] for row in rows}
+    return [by_id.get(r.document_id) for r in results]

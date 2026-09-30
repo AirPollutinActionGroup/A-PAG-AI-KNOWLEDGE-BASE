@@ -13,6 +13,7 @@ import uuid
 
 import pytest
 
+from src.modules.gateway.service import DataBoundaryGateway
 from src.modules.generation.provider import AnswerProvider, GenerationError
 from src.modules.generation.service import SYSTEM_PROMPT, AnswerService
 from src.modules.retrieval.models import RetrievedChunk
@@ -47,8 +48,25 @@ def chunk(n: int, text: str = "Body text.", **kw) -> RetrievedChunk:
 
 
 def service(reply="The limit is 50 mg/Nm3 [1].", fail=False):
+    """The service under test, assembled the only way it can be: around a gateway.
+
+    `AnswerService` takes a gateway rather than a provider precisely so there is no arrangement
+    in which the model is reachable without crossing the boundary — including in a test, where
+    a convenience constructor that skipped it would quietly stop exercising the thing that
+    matters.
+    """
     provider = FakeProvider(reply=reply, fail=fail)
-    return AnswerService(provider=provider), provider
+    return AnswerService(gateway=DataBoundaryGateway(provider=provider)), provider
+
+
+def public(n: int) -> list[str]:
+    """`n` passages classified PUBLIC.
+
+    Spelled out in every call rather than defaulted, because the gateway withholds anything not
+    explicitly public — a test that omitted this would pass for the wrong reason, having sent
+    nothing at all.
+    """
+    return ["PUBLIC"] * n
 
 
 # ==============================================================================
@@ -71,7 +89,7 @@ def test_an_ungrounded_question_never_reaches_the_model():
 def test_no_passages_means_no_call_even_if_marked_grounded():
     svc, provider = service()
 
-    result = svc.answer("anything", [], grounded=True)
+    result = svc.answer("anything", [], grounded=True, tiers=public(99))
 
     assert provider.calls == []
     assert result.grounded is False
@@ -86,7 +104,7 @@ def test_passages_are_numbered_and_labelled_with_their_source():
     passage 3, and the reader sees the same labels in the citation list."""
     svc, provider = service()
 
-    svc.answer("q", [chunk(1, "First."), chunk(2, "Second.")], grounded=True)
+    svc.answer("q", [chunk(1, "First."), chunk(2, "Second.")], grounded=True, tiers=public(99))
 
     _system, user = provider.calls[0]
     assert "[1] (doc1.pdf · p.1 · 1. Section)" in user
@@ -97,7 +115,7 @@ def test_passages_are_numbered_and_labelled_with_their_source():
 def test_the_question_is_included_after_the_passages():
     svc, provider = service()
 
-    svc.answer("what are the limits", [chunk(1)], grounded=True)
+    svc.answer("what are the limits", [chunk(1)], grounded=True, tiers=public(99))
 
     _system, user = provider.calls[0]
     assert user.index("[1]") < user.index("what are the limits"), "context first, then the ask"
@@ -106,7 +124,7 @@ def test_the_question_is_included_after_the_passages():
 def test_the_system_prompt_forbids_outside_knowledge():
     svc, provider = service()
 
-    svc.answer("q", [chunk(1)], grounded=True)
+    svc.answer("q", [chunk(1)], grounded=True, tiers=public(99))
 
     system, _user = provider.calls[0]
     assert system == SYSTEM_PROMPT
@@ -120,7 +138,7 @@ def test_passages_are_capped(monkeypatch):
     monkeypatch.setattr(config.settings, "GENERATION_MAX_PASSAGES", 3)
     svc, provider = service()
 
-    svc.answer("q", [chunk(i) for i in range(1, 11)], grounded=True)
+    svc.answer("q", [chunk(i) for i in range(1, 11)], grounded=True, tiers=public(99))
 
     _system, user = provider.calls[0]
     assert "[3]" in user
@@ -136,7 +154,7 @@ def test_only_cited_passages_are_returned():
     actually used."""
     svc, _ = service(reply="Limits are set in [2] and enforced under [4].")
 
-    result = svc.answer("q", [chunk(i) for i in range(1, 6)], grounded=True)
+    result = svc.answer("q", [chunk(i) for i in range(1, 6)], grounded=True, tiers=public(99))
 
     assert [c.marker for c in result.citations] == [2, 4]
     assert result.citations[0].filename == "doc2.pdf"
@@ -147,7 +165,7 @@ def test_a_fabricated_citation_is_stripped_and_reported():
     seventh; leaving [7] in the text would attach real-looking provenance to an invented claim."""
     svc, _ = service(reply="Emissions fell sharply [7] and limits tightened [2].")
 
-    result = svc.answer("q", [chunk(1), chunk(2), chunk(3)], grounded=True)
+    result = svc.answer("q", [chunk(1), chunk(2), chunk(3)], grounded=True, tiers=public(99))
 
     assert result.invalid_markers == [7]
     assert "[7]" not in result.answer, "the marker must not survive into the answer"
@@ -159,7 +177,7 @@ def test_stripping_a_marker_leaves_clean_text():
     is read by people, and the repair should be invisible."""
     svc, _ = service(reply="Emissions fell [9] , then rose [1] .")
 
-    result = svc.answer("q", [chunk(1)], grounded=True)
+    result = svc.answer("q", [chunk(1)], grounded=True, tiers=public(99))
 
     assert "  " not in result.answer
     assert " ," not in result.answer and " ." not in result.answer
@@ -169,7 +187,7 @@ def test_a_marker_at_the_boundary_is_valid():
     """Off-by-one here would either reject a real citation or accept a fabricated one."""
     svc, _ = service(reply="See [3].")
 
-    result = svc.answer("q", [chunk(1), chunk(2), chunk(3)], grounded=True)
+    result = svc.answer("q", [chunk(1), chunk(2), chunk(3)], grounded=True, tiers=public(99))
 
     assert result.invalid_markers == []
     assert [c.marker for c in result.citations] == [3]
@@ -178,7 +196,7 @@ def test_a_marker_at_the_boundary_is_valid():
 def test_zero_is_not_a_valid_marker():
     svc, _ = service(reply="See [0].")
 
-    result = svc.answer("q", [chunk(1)], grounded=True)
+    result = svc.answer("q", [chunk(1)], grounded=True, tiers=public(99))
 
     assert result.invalid_markers == [0]
     assert result.citations == []
@@ -187,7 +205,7 @@ def test_zero_is_not_a_valid_marker():
 def test_a_repeated_citation_is_listed_once():
     svc, _ = service(reply="It says [1]. It also says [1] elsewhere.")
 
-    result = svc.answer("q", [chunk(1), chunk(2)], grounded=True)
+    result = svc.answer("q", [chunk(1), chunk(2)], grounded=True, tiers=public(99))
 
     assert [c.marker for c in result.citations] == [1]
 
@@ -197,7 +215,7 @@ def test_citations_carry_full_provenance():
     svc, _ = service(reply="Stated in [1].")
     source = chunk(1, "The limit is 50 mg/Nm3.")
 
-    result = svc.answer("q", [source], grounded=True)
+    result = svc.answer("q", [source], grounded=True, tiers=public(99))
 
     c = result.citations[0]
     assert c.chunk_id == source.chunk_id
@@ -213,7 +231,7 @@ def test_an_answer_with_no_citations_still_returns():
     answer and must not be treated as a failure."""
     svc, _ = service(reply="The passages do not state a deadline.")
 
-    result = svc.answer("q", [chunk(1)], grounded=True)
+    result = svc.answer("q", [chunk(1)], grounded=True, tiers=public(99))
 
     assert result.grounded is True
     assert result.citations == []
@@ -229,14 +247,14 @@ def test_a_provider_failure_is_raised_not_swallowed():
     svc, _ = service(fail=True)
 
     with pytest.raises(GenerationError):
-        svc.answer("q", [chunk(1)], grounded=True)
+        svc.answer("q", [chunk(1)], grounded=True, tiers=public(99))
 
 
 def test_token_usage_and_cost_are_reported():
     """A per-question cost is what decides whether this scales to the whole organisation."""
     svc, _ = service()
 
-    result = svc.answer("q", [chunk(1)], grounded=True)
+    result = svc.answer("q", [chunk(1)], grounded=True, tiers=public(99))
 
     assert result.input_tokens == 1200
     assert result.output_tokens == 60
