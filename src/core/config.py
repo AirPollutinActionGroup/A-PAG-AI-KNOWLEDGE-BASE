@@ -183,6 +183,23 @@ class Settings(BaseSettings):
     # Skipping records the gap instead. Set False when a multilingual model is configured.
     EMBEDDING_SKIP_NON_ENGLISH: bool = True
 
+    # How much of a document must be running prose before its detected language is believed.
+    #
+    # Language detection needs sentences. Given a grid it answers anyway, and confidently: a
+    # 130,000-character emissions spreadsheet — `em  country  units  X2000  X2001 ...` — was
+    # detected as **Croatian** and skipped, taking 460 chunks out of the index with no signal
+    # beyond a status nobody was looking at.
+    #
+    # Measured on this corpus, the separation is wide: that file scores 0.054, while real
+    # documents score 0.53-0.72. Deliberately *not* a rule about spreadsheets — another .xlsx
+    # here scores 0.723 and is detected correctly, so excluding the format would have been both
+    # wrong and a coincidence that happened to work.
+    #
+    # Below this, the detection is treated as unknown rather than as non-English, and the
+    # document is embedded. The downside is bounded: a genuinely Devanagari *table* would be
+    # embedded as noise. The upside is that a column of English plant names stays searchable.
+    EMBEDDING_MIN_PROSE_RATIO: float = 0.15
+
     # OCR — the fallback for a PDF page that has no text layer, because it is a photograph of a
     # page rather than a typed document. Off-by-default was considered and rejected: a scan that
     # silently becomes an unreadable document is the failure this exists to fix, and a setting

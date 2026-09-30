@@ -218,10 +218,8 @@ def test_document_versioning_and_superseding(tmp_path):
         scan_handler=handler,
         filename="delhi_policy.pdf",
         data=data_v2,
-        request_meta=UploadRequest(
-            supersedes_doc_id=res1.document_id,
-            keep_previous_version=True,
-        ),
+        request_meta=UploadRequest(classification=Classification.PUBLIC, supersedes_doc_id=res1.document_id,
+            keep_previous_version=True,),
     )
     doc_v2 = repo.get_by_id(res2.document_id)
     assert doc_v2.version == 2
@@ -526,6 +524,7 @@ def test_api_upload_multiple_files_share_batch_id():
             ("files", ("multi_a.pdf", data1, "application/pdf")),
             ("files", ("multi_b.pdf", data2, "application/pdf")),
         ],
+        data={"classification": "PUBLIC"},
     )
     assert res.status_code == 202
     body = res.json()
@@ -539,9 +538,27 @@ def test_api_upload_rejection_422():
     res = client.post(
         "/api/v1/documents/upload",
         files=[("files", ("empty.pdf", b"", "application/pdf"))],
+        data={"classification": "PUBLIC"},
     )
     assert res.status_code == 422
     assert "EMPTY_FILE" in res.json()["detail"]
+
+
+def test_api_upload_without_a_classification_is_refused():
+    """There is no default tier. The Data Boundary Gateway reads `classification` to decide what
+    may be sent to an external model, so a document uploaded without one would have been treated
+    as PUBLIC and become eligible to leave the deployment — on a value nobody chose."""
+    with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as fh:
+        data = fh.read()
+
+    res = client.post(
+        "/api/v1/documents/upload",
+        files=[("files", ("policy.pdf", data, "application/pdf"))],
+    )
+
+    assert res.status_code == 422
+    body = res.json()["detail"]
+    assert any("classification" in str(item.get("loc", "")) for item in body), body
 
 
 def test_api_upload_unauthenticated_rejected_401():
@@ -836,7 +853,7 @@ def _promote_fixture(stack, filename="delete_me.pdf", owner_id=None):
     """Uploads + synchronously processes a valid fixture PDF, returning the terminal response."""
     with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
         data = f.read()
-    meta = UploadRequest(owner_id=owner_id or _test_user.user_id)
+    meta = UploadRequest(classification=Classification.PUBLIC, owner_id=owner_id or _test_user.user_id)
     resp = upload_and_process_sync(stack.service, stack.handler, filename, data, request_meta=meta)
     assert resp.status == DocumentStatus.VALIDATED
     return resp

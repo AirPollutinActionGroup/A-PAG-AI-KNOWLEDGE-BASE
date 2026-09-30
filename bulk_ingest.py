@@ -229,7 +229,10 @@ def main() -> int:
     parser.add_argument("path", type=Path, help="A file, or a directory to walk recursively.")
     parser.add_argument("--owner", required=True,
                         help="Email of the user who will own these documents.")
-    parser.add_argument("--classification", default=Classification.PUBLIC.value,
+    # Required, not defaulted. The whole point of this script is ingesting a folder nobody
+    # will review file by file, which is exactly when an unstated PUBLIC is most dangerous:
+    # the gateway reads this field to decide what may be sent to an external model.
+    parser.add_argument("--classification", required=True,
                         choices=[c.value for c in Classification],
                         help="Sensitivity tier for every document in this run (default PUBLIC).")
     parser.add_argument("--dry-run", action="store_true",

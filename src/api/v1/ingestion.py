@@ -124,8 +124,10 @@ async def upload_documents(
         ..., description="One or more document binary streams (PDF, DOCX, XLSX, PPTX)"
     ),
     classification: Classification = Form(
-        Classification.PUBLIC,
-        description="2-Tier security classification (PUBLIC / RESTRICTED)",
+        ...,
+        description="Required. PUBLIC (org-wide) or RESTRICTED (owner + admins only). "
+                    "There is no default: an unclassified document would be treated as "
+                    "PUBLIC and become eligible to be sent to an external model.",
     ),
     description: str | None = Form(
         None,

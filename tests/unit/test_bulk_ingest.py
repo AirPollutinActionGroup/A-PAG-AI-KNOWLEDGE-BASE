@@ -15,7 +15,7 @@ import pytest
 import bulk_ingest
 from bulk_ingest import Tally, discover, ingest_one
 from src.modules.document_pipeline.formats import PDF_MIME
-from src.modules.document_pipeline.models import UploadRequest
+from src.modules.document_pipeline.models import Classification, UploadRequest
 
 PDF_BYTES = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\ntrailer\n%%EOF\n"
 
@@ -38,7 +38,11 @@ class FakeService:
 
 @pytest.fixture
 def meta():
-    return UploadRequest(owner_id=uuid.uuid4(), upload_batch_id=uuid.uuid4())
+    return UploadRequest(
+        classification=Classification.PUBLIC,
+        owner_id=uuid.uuid4(),
+        upload_batch_id=uuid.uuid4(),
+    )
 
 
 # ==============================================================================

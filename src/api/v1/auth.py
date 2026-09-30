@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.db.engine import get_db
+from src.db.enums import UserRole
 from src.db.models import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.auth.models import Token, UserOut, UserRegister
@@ -28,8 +29,14 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 async def register(payload: UserRegister, db: Session = Depends(get_db)):
     """Creates a new employee account.
 
-    NOTE: open registration is intentional for the 50-person internal-org bootstrap phase.
-    Before any wider or external rollout, gate this behind admin invite / SSO instead.
+    Always creates a **USER**. The role is not caller-supplied: with open registration a
+    caller-supplied role meant anyone who could reach this endpoint could make themselves an
+    administrator and read every RESTRICTED document in the corpus.
+
+    NOTE: open registration itself is still intentional for the 50-person internal-org
+    bootstrap phase. Before any wider or external rollout, gate this behind admin invite / SSO.
+    With the role fixed, the remaining exposure is that a stranger who reaches the API can see
+    PUBLIC documents — bad, but bounded, and not the whole corpus.
     """
     service = AuthService(db)
     try:
@@ -37,7 +44,10 @@ async def register(payload: UserRegister, db: Session = Depends(get_db)):
             email=payload.email,
             full_name=payload.full_name,
             password=payload.password,
-            role=payload.role,
+            # Never from the payload. See UserRegister: `role` there made registration a
+            # privilege-escalation endpoint, because registration is open and ADMIN can read
+            # every RESTRICTED document in the corpus.
+            role=UserRole.USER,
         )
     except EmailAlreadyRegisteredError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from e
