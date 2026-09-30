@@ -95,6 +95,40 @@ class Settings(BaseSettings):
     # re-measuring on a model change, not carrying over.
     SEARCH_MIN_SIMILARITY: float = 0.55
 
+    # ---- Answer generation (Sarvam) -------------------------------------------------------
+    # The one place text leaves the deployment. Sarvam was chosen over OpenAI/Anthropic because
+    # it is an Indian provider with data staying in India, which is the nearest thing to the
+    # sovereignty the rest of this system has by construction.
+    #
+    # Sarvam-M and Sarvam-30B were both deprecated within a year of release, so treat the model
+    # name as something that will change again and not as a constant.
+    SARVAM_API_KEY: str = ""
+    SARVAM_MODEL: str = "sarvam-105b"
+    SARVAM_TIMEOUT_SECONDS: float = 60.0
+
+    # Low, not zero: the task is extraction and summary over supplied text, where invention is
+    # the failure mode and sampling variety buys nothing.
+    GENERATION_TEMPERATURE: float = 0.2
+    GENERATION_MAX_TOKENS: int = 1024
+
+    # How many retrieved passages are sent. More context is not free — it costs money per token,
+    # dilutes the model's attention, and past a point lowers answer quality rather than raising
+    # it. Ten passages at ~200 tokens each is roughly 2,000 tokens of context.
+    GENERATION_MAX_PASSAGES: int = 8
+
+    # Whether RESTRICTED documents may be sent to the API. The retrieval layer has already
+    # decided the *caller* may see them; this is the separate question of whether they may leave
+    # the network.
+    #
+    # **False, because the architecture requires it.** Agent 0101 §3 states that external
+    # inference is for non-restricted content only and that the gateway "refuses to send
+    # restricted material at all"; §5 adds that a request takes the highest tier present across
+    # every passage, with no averaging — seven public passages and one restricted one is a
+    # restricted request. This defaulted to true in its first draft, which contradicted the
+    # security keystone of the design. Data residency in India is not the same guarantee as
+    # never leaving the building.
+    GENERATION_INCLUDE_RESTRICTED: bool = False
+
     # Embedding.
     # EMBEDDING_DIMENSIONS must match the migrated vector(N) column. It is not a tuning knob:
     # changing it requires a migration and a full re-embed of the corpus, so FastEmbedProvider

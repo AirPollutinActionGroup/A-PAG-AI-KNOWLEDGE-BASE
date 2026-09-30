@@ -281,8 +281,14 @@ def test_an_on_topic_question_is_grounded(stack):
 def test_an_exact_word_match_is_grounded_even_at_low_similarity(stack):
     """If the words are literally in a document, the corpus contains them, whatever the
     embedding thinks. Rare identifiers — a statute number, a district name — are exactly the
-    case where similarity is low and the match is real."""
-    stack.service._results = [_chunk(similarity=0.41, semantic_rank=None, lexical_rank=1)]
+    case where similarity is low and the match is real.
+
+    Note the fixture carries the term in its *text*: a lexical rank alone is no longer enough,
+    because BM25 ranks partial matches (see the override tests at the end of this file)."""
+    stack.service._results = [
+        _chunk(similarity=0.41, semantic_rank=None, lexical_rank=1,
+               text="Escalation follows GRAPSTAGETHREE as notified.")
+    ]
 
     body = client.get("/api/v1/search", params={"q": "GRAPSTAGETHREE"}).json()
 
@@ -297,3 +303,63 @@ def test_no_results_at_all_is_not_grounded(stack):
 
     assert body["grounded"] is False
     assert body["best_similarity"] is None
+
+
+# ==============================================================================
+# The lexical override — a regression BM25 introduced
+# ==============================================================================
+
+def test_a_weak_lexical_hit_does_not_ground_an_off_topic_question(stack):
+    """The bug BM25 introduced. The override accepted *any* lexical hit, which was sound while
+    the lexical arm required every term to match. BM25 scores partial matches, so nearly every
+    question returned hits and the gate stopped firing: "what is the best chocolate cake recipe"
+    came back grounded at 0.434 similarity against a corpus of power-plant filings."""
+    stack.service._results = [
+        _chunk(similarity=0.43, lexical_rank=1,
+               text="Flue gas desulphurisation timelines for thermal plants.")
+    ]
+
+    body = client.get(
+        "/api/v1/search", params={"q": "what is the best chocolate cake recipe"}
+    ).json()
+
+    assert body["grounded"] is False
+    assert body["results"] == []
+
+
+def test_a_literal_match_still_grounds_a_rare_identifier(stack):
+    """What the override is actually for: a statute number or code where the embedding is lost
+    but the string is plainly in the document."""
+    stack.service._results = [
+        _chunk(similarity=0.41, lexical_rank=1,
+               text="Escalation follows GRAPSTAGETHREE as notified.")
+    ]
+
+    body = client.get("/api/v1/search", params={"q": "GRAPSTAGETHREE"}).json()
+
+    assert body["grounded"] is True
+    assert body["count"] == 1
+
+
+def test_the_override_needs_every_informative_word(stack):
+    """A passage containing half the question is not a literal match. "penalties" alone must not
+    ground "penalties for cake decorating"."""
+    stack.service._results = [
+        _chunk(similarity=0.40, lexical_rank=1, text="Penalties apply to non-compliant units.")
+    ]
+
+    body = client.get("/api/v1/search", params={"q": "penalties for cake decorating"}).json()
+
+    assert body["grounded"] is False
+
+
+def test_stopwords_do_not_block_a_literal_match(stack):
+    """"what are the FGD timelines" must still match a passage saying "FGD timelines" — the
+    override checks informative words, not every token."""
+    stack.service._results = [
+        _chunk(similarity=0.42, lexical_rank=1, text="FGD timelines are set out in the annexure.")
+    ]
+
+    body = client.get("/api/v1/search", params={"q": "what are the FGD timelines"}).json()
+
+    assert body["grounded"] is True

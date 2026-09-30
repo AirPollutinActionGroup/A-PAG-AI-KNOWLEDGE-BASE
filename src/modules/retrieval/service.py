@@ -22,6 +22,7 @@ are asymmetric, and using the passage form for a query degrades retrieval with n
 
 import enum
 import logging
+import re
 import uuid
 
 from sqlalchemy import Float, cast, func, literal, select, text
@@ -342,7 +343,40 @@ class RetrievalService:
         return results, usage
 
 
-def assess(results: list[RetrievedChunk]) -> tuple[bool, float | None]:
+# Words too common to carry meaning in a question. A short list on purpose: this is not the
+# stopword handling retrieval needs — BM25 does that — it only decides which of the asker's words
+# a passage must literally contain for the lexical override below to apply.
+_UNINFORMATIVE = frozenset({
+    "the", "a", "an", "of", "for", "and", "or", "in", "on", "to", "is", "are", "was", "were",
+    "what", "which", "who", "whom", "when", "where", "why", "how", "does", "do", "did", "can",
+    "could", "should", "would", "that", "this", "these", "those", "with", "from", "by", "at",
+    "as", "be", "been", "being", "it", "its", "any", "all", "best", "about", "there", "their",
+    "you", "your", "our", "we", "they", "them", "has", "have", "had", "will", "may", "must",
+})
+
+
+def informative_terms(query: str) -> list[str]:
+    """The words of a question that would have to appear verbatim for a literal match to mean
+    anything. Short words are dropped with the stopwords: a two-letter token matches everywhere."""
+    return [
+        t for t in re.findall(r"[\w-]+", query.lower())
+        if len(t) > 2 and t not in _UNINFORMATIVE
+    ]
+
+
+def _has_literal_match(query: str, results: list[RetrievedChunk]) -> bool:
+    """True when some returned passage contains *every* informative word of the question."""
+    terms = informative_terms(query)
+    if not terms:
+        return False
+    return any(
+        all(term in chunk.text.lower() for term in terms)
+        for chunk in results
+        if chunk.lexical_rank is not None
+    )
+
+
+def assess(results: list[RetrievedChunk], query: str = "") -> tuple[bool, float | None]:
     """Did this query actually find anything, or just return its least-bad guess?
 
     Vector search always returns something — there is no such thing as no nearest neighbour —
@@ -351,11 +385,21 @@ def assess(results: list[RetrievedChunk]) -> tuple[bool, float | None]:
     measure available; the RRF score is built from ranks and cannot distinguish "best in the
     corpus" from "best of a bad lot".
 
-    An exact lexical match counts as grounded regardless of similarity: if the words are
-    literally in the document, the corpus does contain them, whatever the embedding thinks.
+    **The lexical override requires the words to actually be there.** It exists for rare
+    identifiers — "GRAPSTAGETHREE", a statute number — where similarity is low and the string is
+    plainly in the document. It originally accepted *any* lexical hit, which was sound while the
+    lexical arm was a conjunction requiring every term to match. BM25 scores partial matches, so
+    under it nearly every question returns lexical hits and the gate stopped firing: "what is the
+    best chocolate cake recipe" came back grounded at 0.434 similarity against a corpus of
+    power-plant filings. The override now checks what it always meant to — that some returned
+    passage literally contains every informative word of the question.
+
+    `query` defaults to empty so the override simply does not apply when a caller has no query to
+    check against, which is the safe direction.
     """
     best = max((r.similarity for r in results if r.similarity is not None), default=None)
-    if any(r.lexical_rank is not None for r in results):
+
+    if query and _has_literal_match(query, results):
         return True, best
     if best is None:
         return False, None
