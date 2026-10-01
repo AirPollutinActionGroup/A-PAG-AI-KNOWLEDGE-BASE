@@ -123,7 +123,11 @@ class RetrievalService:
         matches = text(
             "document_chunks.chunk_id @@@ paradedb.boolean(should => ARRAY["
             "  paradedb.match('text', :lexical_q),"
-            "  paradedb.match('section_heading', :lexical_q)"
+            "  paradedb.match('section_heading', :lexical_q),"
+            # Lets a question name the document it is about. Without this, "summarise the MoP OM
+            # dated 20 November" found nothing while that document sat in the corpus, because a
+            # filename appears nowhere in the chunk text it indexes. See migration 0018.
+            "  paradedb.match('document_title', :lexical_q)"
             "])"
         ).bindparams(lexical_q=query)
 

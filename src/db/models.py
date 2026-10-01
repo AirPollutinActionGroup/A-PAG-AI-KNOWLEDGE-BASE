@@ -241,6 +241,11 @@ class DocumentChunk(Base):
 
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    # The parent document's title, denormalised so the BM25 index can match on it: a bm25 index
+    # covers one table, and without this you could not ask for a document by name. Stale if a
+    # document is ever renamed without re-chunking — see migration 0018.
+    document_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Nullable because a chunk exists before it is embedded — chunking and embedding are separate
     # stages precisely so a model change is a re-embed, not a re-chunk.
     #
@@ -299,6 +304,8 @@ class DocumentChunk(Base):
             "chunk_id",
             "text",
             "section_heading",
+            # So a question can name the document instead of quoting from it.
+            "document_title",
             postgresql_using="bm25",
             postgresql_with={"key_field": "'chunk_id'"},
         ),

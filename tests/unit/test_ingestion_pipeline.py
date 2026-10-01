@@ -867,7 +867,7 @@ def test_delete_erases_object_from_storage(purge_stack):
     assert purge_stack.storage.object_exists(purge_stack.buckets.raw, raw_key), \
         "Precondition failed: object was never promoted to raw."
 
-    res = client.delete(f"/api/v1/documents/{resp.document_id}")
+    res = client.delete(f"/api/v1/documents/{resp.document_id}?permanent=true")
     assert res.status_code == 200
     assert res.json()["permanent"] is True
 
@@ -879,7 +879,7 @@ def test_delete_tombstones_row_without_removing_it(purge_stack):
     """The row must survive as a tombstone (supersedes chains and audit rows reference this
     document_id) with purged_at/deleted_at stamped and sha256/raw_path cleared."""
     resp = _promote_fixture(purge_stack)
-    client.delete(f"/api/v1/documents/{resp.document_id}")
+    client.delete(f"/api/v1/documents/{resp.document_id}?permanent=true")
 
     doc = purge_stack.repo.get_by_id(resp.document_id)
     assert doc is not None, "Row was hard-deleted — audit trail and version chains would dangle."
@@ -894,7 +894,7 @@ def test_delete_frees_sha256_for_reupload(purge_stack):
     `sha256 IS NOT NULL`, so an erased file must be re-uploadable rather than flagged
     DUPLICATE against a document whose bytes no longer exist."""
     first = _promote_fixture(purge_stack, filename="v1.pdf")
-    client.delete(f"/api/v1/documents/{first.document_id}")
+    client.delete(f"/api/v1/documents/{first.document_id}?permanent=true")
 
     second = _promote_fixture(purge_stack, filename="v1_again.pdf")
     assert second.was_duplicate is False, \
@@ -906,7 +906,7 @@ def test_delete_writes_permanent_audit_event(purge_stack):
     """The audit row is the only surviving record of what was destroyed, so it must capture
     the erased hash and filename."""
     resp = _promote_fixture(purge_stack)
-    client.delete(f"/api/v1/documents/{resp.document_id}")
+    client.delete(f"/api/v1/documents/{resp.document_id}?permanent=true")
 
     with Session(purge_stack.engine) as session:
         events = (
@@ -940,14 +940,48 @@ def test_delete_forbidden_for_non_owner_non_admin(purge_stack):
 
 
 def test_delete_allowed_for_owner_who_is_not_admin(purge_stack):
-    """The uploader can delete their own document without being an ADMIN."""
-    owner = _FakeUser(role=UserRole.USER.value)
-    resp = _promote_fixture(purge_stack, owner_id=owner.user_id)
-    app.dependency_overrides[get_current_user] = lambda: owner
+    """An uploader may remove their own upload from the knowledge base.
+
+    Reversible, because that is the default now: the document leaves search immediately and its
+    bytes survive. Erasing the bytes is a stronger, separate act — the permanent tests above
+    cover it, and the next test shows an owner is refused it.
+    """
+    resp = _promote_fixture(purge_stack, owner_id=_test_user.user_id)
 
     res = client.delete(f"/api/v1/documents/{resp.document_id}")
+
     assert res.status_code == 200
-    assert purge_stack.repo.get_by_id(resp.document_id).purged_at is not None
+    assert res.json()["permanent"] is False
+
+
+def test_a_soft_deleted_document_still_has_its_bytes(purge_stack):
+    """The point of the reversible kind. Someone may have cited this in a submission last week,
+    and an accidental delete should be a mistake rather than a loss."""
+    resp = _promote_fixture(purge_stack, owner_id=_test_user.user_id)
+
+    client.delete(f"/api/v1/documents/{resp.document_id}")
+
+    doc = purge_stack.repo.get_by_id(resp.document_id)
+    assert doc.deleted_at is not None, "removed from the knowledge base"
+    assert doc.purged_at is None, "but not erased"
+    assert doc.raw_path is not None, "and the bytes are still there"
+
+
+def test_an_owner_cannot_permanently_erase_only_an_admin_can(purge_stack):
+    """Erasing bytes is irreversible. An uploader tidying up gets the recoverable kind;
+    destroying the evidence is an administrator's decision."""
+    owner = _FakeUser(role=UserRole.USER.value)
+    previous = app.dependency_overrides.get(get_current_user)
+    resp = _promote_fixture(purge_stack, owner_id=owner.user_id)
+    app.dependency_overrides[get_current_user] = lambda: owner
+    try:
+        res = client.delete(f"/api/v1/documents/{resp.document_id}?permanent=true")
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_current_user] = previous
+
+    assert res.status_code == 403
+    assert "ADMIN" in res.json()["detail"]
 
 
 def test_delete_allowed_for_admin_who_is_not_owner(purge_stack):
@@ -967,7 +1001,7 @@ def test_delete_twice_returns_404(purge_stack):
 def test_download_after_delete_returns_410(purge_stack):
     """410 rather than 404 — the document demonstrably existed and was deliberately erased."""
     resp = _promote_fixture(purge_stack)
-    client.delete(f"/api/v1/documents/{resp.document_id}")
+    client.delete(f"/api/v1/documents/{resp.document_id}?permanent=true")
 
     res = client.get(f"/api/v1/documents/{resp.document_id}/download")
     assert res.status_code == 410

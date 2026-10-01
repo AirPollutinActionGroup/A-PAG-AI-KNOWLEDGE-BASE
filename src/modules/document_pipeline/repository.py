@@ -67,6 +67,19 @@ class DocumentRepository(ABC):
         Returns (page, total visible count). See `list_paginated` on the required arguments."""
 
     @abstractmethod
+    def soft_delete(self, doc_id: uuid.UUID) -> bool:
+        """Removes a document from the knowledge base without erasing it.
+
+        The reversible kind of delete, and the default: the document leaves search and the
+        document list immediately, but its bytes, its chunks and its audit trail survive. That
+        matters because someone may have cited it in a submission last week, and because an
+        accidental delete should be a mistake rather than a loss.
+
+        `purge()` is the other kind -- bytes erased, irreversible, administrators only.
+        """
+        ...
+
+    @abstractmethod
     def purge(self, doc_id: uuid.UUID) -> bool:
         """Tombstones a document whose bytes have already been erased from object storage:
         stamps deleted_at/purged_at and nulls sha256 + raw_path. Nulling sha256 is what frees
@@ -224,6 +237,28 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         orms = self.db.execute(stmt, {"q": query}).scalars().all()
         return [self._to_dto(o) for o in orms], total
 
+    def soft_delete(self, doc_id: uuid.UUID) -> bool:
+        """Removes a document from the knowledge base without erasing it.
+
+        The reversible kind of delete, and the default: the document leaves search and the
+        document list immediately, but its bytes, its chunks and its audit trail survive. That
+        matters because someone may have cited it in a submission last week, and because an
+        accidental delete should be a mistake rather than a loss.
+
+        `purge()` is the other kind -- bytes erased, irreversible, administrators only.
+        """
+        stmt = select(DocumentORM).where(
+            DocumentORM.document_id == doc_id,
+            DocumentORM.deleted_at.is_(None),
+            DocumentORM.purged_at.is_(None),
+        )
+        orm = self.db.execute(stmt).scalar_one_or_none()
+        if orm is None:
+            return False
+        orm.deleted_at = datetime.now(UTC)
+        self.db.flush()
+        return True
+
     def purge(self, doc_id: uuid.UUID) -> bool:
         stmt = select(DocumentORM).where(
             DocumentORM.document_id == doc_id, DocumentORM.purged_at.is_(None)
@@ -327,6 +362,15 @@ class InMemoryDocumentRepository(DocumentRepository):
             total = len(matches)
             page = matches[offset : offset + limit]
             return [d.model_copy(deep=True) for d in page], total
+
+    def soft_delete(self, doc_id: uuid.UUID) -> bool:
+        """Removes a document from the knowledge base without erasing it. See the base class."""
+        with self._lock:
+            doc = self._storage.get(doc_id)
+            if doc is None or doc.deleted_at is not None or doc.purged_at is not None:
+                return False
+            doc.deleted_at = datetime.now(UTC)
+            return True
 
     def purge(self, doc_id: uuid.UUID) -> bool:
         with self._lock:

@@ -225,6 +225,10 @@ button { cursor: pointer; background: none; border: 0; }
 .docview { max-width: 54rem; margin: 0 auto; padding: 22px 20px 48px; }
 .dv-head { display: flex; align-items: flex-start; gap: 12px; }
 .dv-titles { flex: 1; min-width: 0; }
+.dv-actions { display: flex; gap: 6px; flex: none; }
+.mini.danger { color: var(--danger); border-color: var(--line); }
+.mini.danger:hover { border-color: var(--danger); }
+.mini.danger.armed { background: var(--danger-bg); border-color: var(--danger); font-weight: 500; }
 .dv-head h1 {
   flex: 1; margin: 0; font: 600 19px/1.3 "Archivo", sans-serif;
   letter-spacing: -.01em; overflow-wrap: anywhere;
@@ -803,6 +807,59 @@ function refreshDocs() {
    between picking files and the request going out does what the person expects. */
 const tier = () => ($("uploadTier") && $("uploadTier").value) || "PUBLIC";
 
+/* Two clicks, no modal. A dialog for this is heavier than the action deserves, and the
+   second click carries the consequence in its own label — which is the part people read. */
+function confirmDelete(doc, button) {
+  if (button.dataset.armed !== "1") {
+    button.dataset.armed = "1";
+    button.textContent = "Really delete?";
+    button.classList.add("armed");
+    setTimeout(() => {
+      if (button.dataset.armed === "1") {
+        button.dataset.armed = "";
+        button.textContent = "Delete";
+        button.classList.remove("armed");
+      }
+    }, 4000);
+    return;
+  }
+  doDelete(doc, button);
+}
+
+async function doDelete(doc, button) {
+  button.disabled = true;
+  button.textContent = "Deleting\u2026";
+  try {
+    const r = await fetch(`/api/v1/documents/${idOf(doc)}`, {
+      method: "DELETE", headers: authed(),
+    });
+    if (r.status === 401) return sessionExpired();
+    if (!r.ok) {
+      let why = `Delete failed (${r.status}).`;
+      try { const j = await r.json(); if (j.detail) why = String(j.detail); } catch { /* not json */ }
+      button.disabled = false;
+      button.textContent = "Delete";
+      button.classList.remove("armed");
+      $("docview").prepend(notice("Could not delete", " " + why, true));
+      return;
+    }
+    /* Gone from search immediately, bytes retained. Saying both is the point: "deleted" alone
+       would leave someone unsure whether a document they cited last week still exists. */
+    docs = docs.filter((d) => idOf(d) !== idOf(doc));
+    docTotal = Math.max(0, docTotal - 1);
+    closeDocView();
+    paintDocs();
+    $("thread").prepend(notice(
+      "Removed from the knowledge base",
+      ` \u201c${baseName(doc.filename)}\u201d will no longer appear in search or answers. `
+      + `The file itself is kept \u2014 ask an administrator if it needs to be erased entirely.`));
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = "Delete";
+    $("docview").prepend(notice("Could not delete", " " + e.message, true));
+  }
+}
+
 function releaseBlob() {
   if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
 }
@@ -868,7 +925,23 @@ function renderDoc(doc) {
   if (folder) titles.append(el("p", "dv-path", folder));
   const back = el("button", "mini", "← Back to chat");
   back.onclick = closeDoc;
-  head.append(titles, back);
+
+  const actions = el("div", "dv-actions");
+  actions.append(back);
+
+  /* Offered to the uploader and to administrators — the same rule the endpoint enforces. The
+     server checks again regardless; hiding it here only avoids presenting an action that would
+     be refused. */
+  const mine = me && doc.owner_id && me.user_id === doc.owner_id;
+  const admin = me && me.role === "ADMIN";
+  if (mine || admin) {
+    const del = el("button", "mini danger", "Delete");
+    del.title = "Remove this document from the knowledge base. Recoverable — the file is kept.";
+    del.onclick = () => confirmDelete(doc, del);
+    actions.append(del);
+  }
+
+  head.append(titles, actions);
   wrap.append(head);
 
   const meta = el("div", "dv-meta");
@@ -1024,10 +1097,23 @@ async function showOriginal(doc, panel) {
 
 // ------------------------------------------------------------------ auth
 const showLogin = () => { $("login").hidden = false; $("app").hidden = true; };
+/* Needed to decide whether to offer Delete. Fetched rather than inferred from the token,
+   because the token is a bearer credential and the UI should not be parsing claims out of it
+   to make authorisation decisions — the server re-checks anyway, so this only governs whether
+   a button that would be refused is shown at all. */
+let me = null;
+
+async function loadMe() {
+  try {
+    const r = await fetch("/api/v1/auth/me", { headers: authed() });
+    if (r.ok) me = await r.json();
+  } catch { /* the button simply stays hidden */ }
+}
+
 const showApp = (email) => {
   $("login").hidden = true; $("app").hidden = false;
   $("whoami").textContent = email || store.get("apag.email") || "";
-  paintChats(); paintDocs(); loadDocs(); $("q").focus();
+  paintChats(); paintDocs(); loadDocs(); loadMe(); $("q").focus();
 };
 
 $("loginForm").onsubmit = async (e) => {

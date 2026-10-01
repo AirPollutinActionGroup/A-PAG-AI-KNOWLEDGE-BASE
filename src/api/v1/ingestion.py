@@ -473,10 +473,11 @@ async def get_document_chunks(
 
 @router.delete(
     "/{document_id}",
-    summary="Permanently delete a document and erase its bytes (owner or ADMIN only)",
+    summary="Delete a document (owner or ADMIN). Reversible unless ?permanent=true",
 )
 async def delete_document(
     document_id: uuid.UUID,
+    permanent: bool = False,
     repo: DocumentRepository = Depends(get_document_repository),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -503,6 +504,40 @@ async def delete_document(
 
     if doc.purged_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document with ID {document_id} not found.")
+
+    # Erasing the bytes is a separate, stronger act than removing a document from the knowledge
+    # base, and only an administrator may do it. An uploader deleting their own upload gets the
+    # reversible kind: the document leaves search immediately, and the bytes survive long enough
+    # for the mistake to be noticed — someone may have cited it in a submission last week.
+    if permanent and current_user.role != UserRole.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="FORBIDDEN: Only an ADMIN may permanently erase a document's bytes. "
+                   "Delete without ?permanent to remove it from search reversibly.",
+        )
+
+    if not permanent:
+        try:
+            AuditService.log_event(
+                db=db,
+                document_id=document_id,
+                event_type=AuditEventType.DOCUMENT_DELETED,
+                details={
+                    "deleted_by": str(current_user.user_id),
+                    "permanent": False,
+                    "filename": doc.filename,
+                },
+                user_id=str(current_user.user_id),
+            )
+        except Exception:
+            logger.exception("AUDIT WRITE FAILED: doc_id=%s event=DOCUMENT_DELETED", document_id)
+
+        if not repo.soft_delete(document_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found.",
+            )
+        return {"document_id": document_id, "status": "DELETED", "permanent": False}
 
     # Audit before destroying anything — this is the only surviving record of what the
     # erased bytes were, so it must not depend on the delete succeeding.
