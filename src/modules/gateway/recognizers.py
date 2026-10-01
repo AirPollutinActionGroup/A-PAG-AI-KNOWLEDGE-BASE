@@ -85,6 +85,26 @@ def _verhoeff(text: str) -> bool:
     return c == 0
 
 
+def _plausible_landline(text: str) -> bool:
+    """An Indian landline: STD code starting 0, then the subscriber number, ten digits in all.
+
+    Added because a real document got through. `Tel:011-23063746` -- an Under Secretary's direct
+    line in a Ministry of Power memorandum -- was sent to Sarvam untouched, while the UI said
+    "no phone numbers, emails or identifiers were found". The mobile pattern only matches
+    numbers starting 6-9, and government correspondence is full of landlines.
+
+    The digit-count test is what keeps this off the corpus. `0.20` per unit, `0-180 days` and
+    `05.09.2022` all begin with a zero and none of them reach eleven digits.
+    """
+    digits = _digits(text)
+    # `+91-11-23063746` carries the country code where the trunk zero would be.
+    if digits.startswith("91") and len(digits) == 12:
+        digits = "0" + digits[2:]
+    # Trunk zero plus ten digits. The count is what keeps this off the corpus: `0.20` per
+    # unit, `0-180 days` and `05.09.2022` all begin with a zero and none reach eleven digits.
+    return len(digits) == 11 and digits[0] == "0" and digits[1] != "0"
+
+
 def _plausible_phone(text: str) -> bool:
     """Indian mobile numbers are ten digits starting 6-9. The leading-digit test is what stops a
     ten-digit tonnage or a year range being read as a phone number."""
@@ -120,6 +140,18 @@ RECOGNIZERS: tuple[Recognizer, ...] = (
         pattern=re.compile(r"\b(?:\d[ -]?){12,18}\d\b"),
         validate=_luhn,
         description="Payment card number (Luhn-checked)",
+    ),
+    Recognizer(
+        label="PHONE",
+        # Landlines. Tried before the mobile pattern because an STD code starting 0 would
+        # otherwise have its leading zero eaten by the mobile rule's optional `\b0`, leaving a
+        # partial match that masks most of the number and leaves the rest in the text.
+        # Two separator groups, because `011 2306 3746` and `011-23063746` are the same number
+        # written two ways and both turn up in government correspondence. The pattern is
+        # deliberately loose; `_plausible_landline` does the filtering, on digit count.
+        pattern=re.compile(r"(?:\+91[\s-]?)?0?\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,5}\b"),
+        validate=_plausible_landline,
+        description="Indian landline number",
     ),
     Recognizer(
         label="IFSC",

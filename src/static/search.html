@@ -165,6 +165,21 @@ button { cursor: pointer; background: none; border: 0; }
   font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--danger);
   border: 1px solid var(--danger); border-radius: 4px; padding: 1px 4px; vertical-align: 1px;
 }
+.masked-list { display: flex; flex-direction: column; gap: 5px; margin-top: 9px; }
+.masked-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12px; }
+.masked-kind {
+  font: 400 10px/1.4 "IBM Plex Mono", monospace; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--ink-faint); min-width: 4.5rem;
+}
+.masked-val {
+  font: 500 12px/1.5 "IBM Plex Mono", monospace; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 4px; padding: 1px 6px;
+}
+.masked-arrow { color: var(--ink-faint); }
+.masked-ph {
+  font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+}
 .cost { font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint); }
 
 /* ---- documents, in the rail and full-screen
@@ -1210,6 +1225,12 @@ function fillWrittenAnswer(bot, data) {
   }
   rows.push(["tokens", `${(data.input_tokens || 0).toLocaleString()} in, `
                      + `${(data.output_tokens || 0).toLocaleString()} out`]);
+  /* Inside the panel with everything else it belongs to, rather than floating under the
+     answer: the cost is part of what happened, not a footnote about it. */
+  if (data.cost_inr != null) {
+    rows.push(["cost", `\u20b9${Number(data.cost_inr).toFixed(3)}`]);
+  }
+  rows.push(["prompt caching", "not offered by Sarvam \u2014 every token billed again"]);
   det.body.append(kvRows(rows));
 
   if (maskedTotal) {
@@ -1217,32 +1238,43 @@ function fillWrittenAnswer(bot, data) {
     head.style.margin = "10px 0 6px";
     head.textContent = "Removed before anything was sent — these never left this deployment:";
     det.body.append(head);
-    const list = el("div", "steps");
+    /* The partials are the point. "1 phone number was masked" leaves a reader unable to tell
+       whether the system caught the number they care about; `011xxxxxx746` tells them which,
+       without reproducing it. These are built after redaction and never sent anywhere. */
+    const list = el("div", "masked-list");
     masked.forEach((m) => {
-      const chip = el("span", "step", `${m.count}× ${m.label.toLowerCase().replace(/_/g, " ")}`);
-      chip.title = (m.placeholders || []).join(", ");
-      list.append(chip);
+      const kind = m.label.toLowerCase().replace(/_/g, " ");
+      (m.previews && m.previews.length ? m.previews : [`${m.count} value(s)`])
+        .forEach((preview, i) => {
+          const row = el("div", "masked-row");
+          row.append(el("span", "masked-kind", kind));
+          row.append(el("code", "masked-val", preview));
+          const ph = (m.placeholders || [])[i];
+          if (ph) row.append(el("span", "masked-arrow", "\u2192"), el("code", "masked-ph", ph));
+          list.append(row);
+        });
     });
     det.body.append(list);
     const note = el("div", "cite");
     note.style.marginTop = "8px";
-    note.textContent = "The model saw a placeholder in each position, so anything it wrote "
-                     + "about them is about the placeholder, not the real value.";
+    note.textContent = "Shown masked here and nowhere else \u2014 the model received the "
+                     + "placeholder on the right, so anything it wrote about these is about the "
+                     + "placeholder, not the real value.";
     det.body.append(note);
   } else if (b) {
     const note = el("div", "cite");
     note.style.marginTop = "6px";
-    note.textContent = "No phone numbers, emails or identifiers were found in these passages, "
-                     + "so nothing needed masking.";
+    /* Deliberately narrower than it used to read. It said "no phone numbers, emails or
+       identifiers were found", which is a claim about the passages; all the system actually
+       knows is that none of *its own patterns* matched. A landline went through while that
+       sentence was on screen. */
+    note.textContent = "None of the patterns this checks for \u2014 phone, email, PAN, Aadhaar, "
+                     + "GSTIN, IFSC, card \u2014 matched these passages. Names are not detected.";
     det.body.append(note);
   }
 
   bot.append(det.root);
 
-  if (data.cost_inr != null) {
-    const cost = el("div", "cost", `about \u20b9${Number(data.cost_inr).toFixed(3)} for this answer`);
-    bot.append(cost);
-  }
 }
 
 function say2(node, text) {

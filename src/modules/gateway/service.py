@@ -43,6 +43,30 @@ logger = logging.getLogger(__name__)
 _TIER_ORDER = {Classification.PUBLIC.value: 0, Classification.RESTRICTED.value: 1}
 
 
+def preview(value: str, keep_start: int = 3, keep_end: int = 3) -> str:
+    """A partial of a redacted value, for the reader -- `011xxxxx746`, `raj...@cpcb.nic.in`.
+
+    Shown so someone can tell *which* value was removed without the whole of it being
+    reproduced. It is built after redaction and returned alongside the answer; it is never part
+    of anything sent to a model.
+
+    An email keeps its domain, because the domain is usually the useful part (`@cpcb.nic.in`
+    tells you this was a government address) and the local part is the identifying half. A
+    short value is masked entirely rather than partially: keeping three characters either side
+    of a six-character string reveals all of it.
+    """
+    if "@" in value:
+        local, _, domain = value.partition("@")
+        head = local[:keep_start] if len(local) > keep_start + 1 else ""
+        return f"{head}{'x' * max(3, len(local) - len(head))}@{domain}"
+
+    body = value.strip()
+    if len(body) <= keep_start + keep_end + 1:
+        return "x" * len(body)
+    middle = len(body) - keep_start - keep_end
+    return f"{body[:keep_start]}{'x' * middle}{body[-keep_end:]}"
+
+
 class BoundaryRefusal(RuntimeError):
     """The request may not cross. Distinct from a model outage: nothing was attempted."""
 
@@ -101,7 +125,12 @@ class DataBoundaryGateway:
             redacted.append(out)
 
         masked = [
-            MaskedValue(label=label, count=len(values), placeholders=order.get(label, []))
+            MaskedValue(
+                label=label,
+                count=len(values),
+                placeholders=order.get(label, []),
+                previews=[preview(v) for v in values],
+            )
             for label, values in assigned.items()
         ]
         masked.sort(key=lambda m: (-m.count, m.label))

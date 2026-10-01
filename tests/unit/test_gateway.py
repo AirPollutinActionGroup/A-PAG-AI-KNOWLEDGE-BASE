@@ -318,3 +318,89 @@ def test_a_real_aadhaar_shape_with_a_valid_check_digit_is_caught():
 
     found = find_all(valid[0])
     assert found and found[0].label == "AADHAAR"
+
+
+# ==============================================================================
+# Landlines — the one that got through
+# ==============================================================================
+
+@pytest.mark.parametrize("number", [
+    "Tel:011-23063746",      # exactly as it appears in the Ministry of Power memorandum
+    "Tel: 011 2306 3746",
+    "+91-11-23063746",
+    "0120-2345678",
+    "080 2345 6789",
+    "044 2345 6789",
+])
+def test_a_landline_is_detected(number):
+    """A real miss, found by reading a live answer rather than by a test.
+
+    `Tel:011-23063746` — an Under Secretary's direct line in a Ministry of Power memorandum —
+    was sent to Sarvam untouched while the panel said no phone numbers were found. The mobile
+    pattern only matches numbers starting 6-9, and government correspondence is full of
+    landlines with STD codes.
+    """
+    found = find_all(number)
+    assert found and found[0].label == "PHONE", f"{number!r} -> {found}"
+
+
+@pytest.mark.parametrize("text", [
+    "environmental compensation of Rs. 0.20, 0.30, or 0.40 per unit",
+    "non-compliant operation 0-180 days",
+    "MoEF&CC Notification dated 05.09.2022",
+    "bids awarded in 233 units (1,02,040 MW)",
+    "537 units (2,04,160 MW) identified",
+    "average time is around 36-40 months",
+    "No 10/1/2024-St.Th. (C. No. 273912)",
+    "current annual installation capacity is around 16-20 GW per annum (33-39 units)",
+])
+def test_the_landline_rule_does_not_eat_the_corpus(text):
+    """All of these are real sentences from the FGD documents, and several start with a zero.
+    A control that masks emission figures and compensation rates gets switched off, and then it
+    protects nothing."""
+    assert find_all(text) == [], f"{text!r} matched {find_all(text)}"
+
+
+# ==============================================================================
+# The preview — shown to the reader, never sent
+# ==============================================================================
+
+def test_a_preview_identifies_the_value_without_reproducing_it():
+    from src.modules.gateway.service import preview
+
+    assert preview("011-23063746") == "011xxxxxx746"
+    assert "23063" not in preview("011-23063746")
+
+
+def test_an_email_preview_keeps_the_domain():
+    """The domain is the useful half for a reader — `@cpcb.nic.in` says this was a government
+    address — and the local part is the identifying one."""
+    from src.modules.gateway.service import preview
+
+    out = preview("rajesh.kumar@cpcb.nic.in")
+    assert out.endswith("@cpcb.nic.in")
+    assert "kumar" not in out
+
+
+def test_a_short_value_is_masked_entirely():
+    """Keeping three characters either side of a six-character string reveals all of it."""
+    from src.modules.gateway.service import preview
+
+    assert preview("abcdef") == "xxxxxx"
+
+
+def test_previews_never_reach_the_model():
+    """The whole point: the reader sees a partial, the model sees a placeholder, and the real
+    value stays in this deployment."""
+    gw, spy = gateway()
+
+    _t, _i, _o, record = gw.send(
+        "sys", ["Reach the officer on Tel:011-23063746."], ["PUBLIC"], build_user=compose,
+    )
+
+    assert "23063746" not in spy.user
+    assert "<PHONE_1>" in spy.user
+    previews = [p for m in record.masked for p in m.previews]
+    assert previews == ["011xxxxxx746"]
+    for p in previews:
+        assert p not in spy.user, "a preview must not appear in what was sent"

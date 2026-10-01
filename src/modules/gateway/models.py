@@ -10,10 +10,20 @@ from pydantic import BaseModel, Field
 
 
 class MaskedValue(BaseModel):
-    """One kind of sensitive value that was found, and how often."""
+    """One kind of sensitive value that was found, and how often.
+
+    `previews` is the part to be careful about. It shows the reader enough to recognise what was
+    removed -- `011xxxxx746` -- without reproducing it. That partial **never leaves this
+    deployment**: it is built after the redaction, travels back to the caller alongside the
+    answer, and is not in anything sent to the model. Without it the panel can say "1 phone
+    number was masked" and the reader has no way to tell whether the system found the number
+    they care about or something else entirely.
+    """
 
     label: str
     count: int
+    # Partially masked originals, for the reader only. Never sent anywhere.
+    previews: list[str] = Field(default_factory=list)
     # The placeholders that replaced it, e.g. ["<PHONE_1>", "<PHONE_2>"]. Shown so a reader who
     # sees `<PHONE_1>` in the answer can tell it stands for something real that was removed on
     # the way out, rather than for something the model invented.
