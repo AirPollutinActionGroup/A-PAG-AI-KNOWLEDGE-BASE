@@ -123,6 +123,26 @@ def build_samples(questions, limit, passages):
     return samples, skipped, masked_total
 
 
+def preflight(judge_model: str) -> str | None:
+    """One cheap call before spending minutes building answers.
+
+    RAGAS runs its metrics concurrently and swallows per-job failures, so an exhausted account
+    surfaces as `nan` after the whole run rather than as an error at the start. Asking once,
+    first, turns a three-minute silence into a sentence.
+    """
+    try:
+        from openai import OpenAI
+
+        OpenAI().chat.completions.create(
+            model=judge_model,
+            messages=[{"role": "user", "content": "reply with OK"}],
+            max_completion_tokens=16,
+        )
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {str(e)[:300]}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--set", default="eval_set.json")
@@ -130,9 +150,15 @@ def main() -> int:
                     help="Questions to judge. Each costs a Sarvam answer plus several judge "
                          "calls, so start small.")
     ap.add_argument("--passages", type=int, default=8)
-    ap.add_argument("--judge", default=os.environ.get("RAGAS_JUDGE_MODEL", "gpt-5-mini"))
+    ap.add_argument("--judge", default=settings.RAGAS_JUDGE_MODEL)
     ap.add_argument("--out", default="ragas_report.json")
     args = ap.parse_args()
+
+    # Read through Settings like every other secret here, then exported, because the OpenAI
+    # client looks for it in the environment. Keeping .env as the single place a key is written
+    # down matters more than the client's preference about where it reads it from.
+    if settings.OPENAI_API_KEY and not os.environ.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
 
     if not os.environ.get("OPENAI_API_KEY"):
         print("OPENAI_API_KEY is not set. The judge is OpenAI rather than Sarvam on purpose: "
@@ -141,6 +167,15 @@ def main() -> int:
         return 2
     if not settings.SARVAM_API_KEY:
         print("SARVAM_API_KEY is not set, so there are no answers to judge.")
+        return 2
+
+    problem = preflight(args.judge)
+    if problem:
+        print(f"The judge ({args.judge}) is not usable:\n  {problem}\n")
+        if "credit" in problem.lower() or "quota" in problem.lower():
+            print("The key authenticates but the account has no balance. Add credits at\n"
+                  "  https://platform.openai.com/settings/organization/billing\n"
+                  "Nothing else needs changing — rerun this command afterwards.")
         return 2
 
     with open(args.set, encoding="utf-8") as fh:
@@ -183,6 +218,18 @@ def main() -> int:
 
     print("\n" + "=" * 70)
     print(result)
+
+    # nan means every call for that metric failed, which is an outage rather than a score of
+    # zero. Said plainly, because "faithfulness: nan" reads like a result.
+    import math
+
+    raw = dict(result) if hasattr(result, "keys") else {}
+    dead = [k for k, v in raw.items()
+            if isinstance(v, float) and math.isnan(v)]
+    if dead:
+        print(f"\n{len(dead)} metric(s) could not be computed at all: {', '.join(dead)}")
+        print("Every judge call for them failed — this is an outage, not a score of zero.")
+        return 1
 
     scores = {k: v for k, v in dict(result).items()} if hasattr(result, "keys") else {}
     with open(args.out, "w", encoding="utf-8") as fh:

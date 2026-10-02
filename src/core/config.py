@@ -170,6 +170,16 @@ class Settings(BaseSettings):
     # deployment choice.
     GATEWAY_REDACT: bool = True
 
+    # Evaluation only. The judge for `run_ragas.py`, which grades answer quality offline.
+    #
+    # Deliberately a different provider from the one under test: using Sarvam to grade Sarvam's
+    # answers measures self-consistency, not truthfulness. It is **not** a second route for the
+    # application -- nothing in `src/` reads these except the harness, and the harness applies
+    # the same classification filter and redaction the gateway does before any passage reaches
+    # OpenAI.
+    OPENAI_API_KEY: str = ""
+    RAGAS_JUDGE_MODEL: str = "gpt-5-mini"
+
     # Embedding.
     # EMBEDDING_DIMENSIONS must match the migrated vector(N) column. It is not a tuning knob:
     # changing it requires a migration and a full re-embed of the corpus, so FastEmbedProvider
