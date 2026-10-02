@@ -68,13 +68,26 @@ class RetrievalService:
 
     # ------------------------------------------------------------------ arms
 
-    def _visible(self, user_id, viewer_is_admin):
-        return (
+    def _visible(self, user_id, viewer_is_admin, document_ids=None):
+        """Permission predicates, plus an optional scope to particular documents.
+
+        The scope sits here, beside the permission clause and inside every arm, for the same
+        reason the permission clause does: a passage removed after ranking has already taken a
+        top-k slot, so filtering afterwards returns fewer results than asked for and the caller
+        cannot tell whether the document was thin or the filter was narrow.
+
+        It is never a substitute for the permission clause and is always applied with it — a
+        caller naming a document id they may not see still gets nothing.
+        """
+        predicates = [
             DocumentORM.deleted_at.is_(None),
             visible_documents_clause(DocumentORM, user_id, viewer_is_admin=viewer_is_admin),
-        )
+        ]
+        if document_ids:
+            predicates.append(DocumentORM.document_id.in_(list(document_ids)))
+        return tuple(predicates)
 
-    def _semantic_cte(self, vector, pool, user_id, viewer_is_admin):
+    def _semantic_cte(self, vector, pool, user_id, viewer_is_admin, document_ids=None):
         distance = ChunkORM.embedding.cosine_distance(vector)
         return (
             select(
@@ -86,13 +99,16 @@ class RetrievalService:
                 (1 - distance).label("similarity"),
             )
             .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
-            .where(ChunkORM.embedding.is_not(None), *self._visible(user_id, viewer_is_admin))
+            .where(
+                ChunkORM.embedding.is_not(None),
+                *self._visible(user_id, viewer_is_admin, document_ids),
+            )
             .order_by(distance)
             .limit(pool)
             .cte("semantic_arm")
         )
 
-    def _lexical_cte(self, query, pool, user_id, viewer_is_admin):
+    def _lexical_cte(self, query, pool, user_id, viewer_is_admin, document_ids=None):
         """BM25 over chunk bodies, via pg_search's `@@@` operator and `paradedb.score()`.
 
         This replaced a `tsvector`/`ts_rank` arm, and the reason was recall rather than ranking.
@@ -139,7 +155,7 @@ class RetrievalService:
             .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
             .where(
                 matches,
-                *self._visible(user_id, viewer_is_admin),
+                *self._visible(user_id, viewer_is_admin, document_ids),
             )
             .order_by(score.desc())
             .limit(pool)
@@ -206,6 +222,7 @@ class RetrievalService:
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
         rerank: bool | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> tuple[list[RetrievedChunk], TokenUsage]:
         """Returns the `limit` passages best matching `query` that this user may see.
 
@@ -222,9 +239,12 @@ class RetrievalService:
         needs_vector = mode in (SearchMode.HYBRID, SearchMode.SEMANTIC)
         vector = self._provider.embed_query(query) if needs_vector else None
 
-        sem = self._semantic_cte(vector, pool, user_id, is_admin) if needs_vector else None
+        sem = (
+            self._semantic_cte(vector, pool, user_id, is_admin, document_ids)
+            if needs_vector else None
+        )
         lex = (
-            self._lexical_cte(query, pool, user_id, is_admin)
+            self._lexical_cte(query, pool, user_id, is_admin, document_ids)
             if mode in (SearchMode.HYBRID, SearchMode.LEXICAL)
             else None
         )

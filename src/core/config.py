@@ -217,7 +217,18 @@ class Settings(BaseSettings):
     # Below this, a line is more likely a signature, a stamp or a scan artifact than a word.
     # Dropping it leaves a gap; keeping it puts an invented word into a passage that will be
     # cited, and nothing downstream can tell a guessed word from a read one.
-    OCR_MIN_CONFIDENCE: float = 0.5
+    #
+    # Raised from 0.5 after reading a live citation. Three lines of noise survived into the
+    # Ministry of Power memorandum's first page and were shown to a reader:
+    #
+    #     0.65  'I r ns  sn    d  res t dy'
+    #     0.67  'o.in o n nn nn n i n nc'
+    #     0.74  'Ppoit i  i i     i  nes'
+    #
+    # while every genuine line on that page scored 0.97 or better. The margin is wide enough
+    # that 0.80 removes all three and costs nothing real -- but it is corpus-specific, so
+    # re-measure on a scan of different quality rather than assuming it carries over.
+    OCR_MIN_CONFIDENCE: float = 0.80
     # A ceiling on how long one document can hold a worker: at ~4s a page, 500 pages is ~33
     # minutes. Pages past the cap are recorded as unread rather than quietly dropped.
     OCR_MAX_PAGES: int = 500

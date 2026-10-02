@@ -369,6 +369,15 @@ details.detail > summary:hover { color: var(--ink); }
 
 /* ---- composer */
 .composer-wrap { border-top: 1px solid var(--line); background: var(--surface); }
+.scope-bar {
+  max-width: 47rem; margin: 0 auto 7px; display: flex; align-items: center; gap: 8px;
+  padding: 6px 11px; border: 1px solid var(--yellow-deep); border-radius: 8px;
+  background: var(--surface-2); font-size: 12.5px;
+}
+.scope-label { color: var(--ink-faint); font: 400 11px/1.4 "IBM Plex Mono", monospace; }
+.scope-name { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-clear { color: var(--ink-faint); font-size: 17px; line-height: 1; padding: 0 3px; }
+.scope-clear:hover { color: var(--ink); }
 .composer { max-width: 47rem; margin: 0 auto; padding: 13px 20px 15px; }
 .field {
   display: flex; gap: 8px; align-items: flex-end;
@@ -479,6 +488,14 @@ details.detail > summary:hover { color: var(--ink); }
     </div>
 
     <div class="composer-wrap" id="composerWrap">
+      <!-- Shown only while a question is scoped to one document. Visible rather than implicit,
+           because "why is it ignoring the rest of the corpus" is a worse surprise than an
+           extra line of chrome. -->
+      <div class="scope-bar" id="scopeBar" hidden>
+        <span class="scope-label">Asking only about</span>
+        <span class="scope-name" id="scopeName"></span>
+        <button class="scope-clear" id="scopeClear" title="Search all documents again">&times;</button>
+      </div>
       <div class="composer">
         <div class="field">
           <button class="attach" id="attachBtn" title="Add a document">+</button>
@@ -860,6 +877,22 @@ async function doDelete(doc, button) {
   }
 }
 
+/* The document a question is restricted to, or null for the whole corpus.
+
+   Explicit rather than inferred from the wording. "Is there confidential data in this
+   document" is a question about one document, and guessing which one from a pronoun will
+   sometimes guess wrong and answer confidently from everything — which is what used to
+   happen. */
+let scopeDoc = null;
+
+function setScope(doc) {
+  scopeDoc = doc;
+  const bar = $("scopeBar");
+  if (!doc) { bar.hidden = true; return; }
+  $("scopeName").textContent = baseName(doc.filename);
+  bar.hidden = false;
+}
+
 function releaseBlob() {
   if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
 }
@@ -932,6 +965,18 @@ function renderDoc(doc) {
   /* Offered to the uploader and to administrators — the same rule the endpoint enforces. The
      server checks again regardless; hiding it here only avoids presenting an action that would
      be refused. */
+  /* The fix for "I'm asking about *this* document, why are you using others?" — made a button
+     rather than something to phrase correctly, because a pronoun the system has to resolve is
+     a pronoun it will sometimes resolve wrongly, and answer confidently anyway. */
+  const askThis = el("button", "mini", "Ask about this");
+  askThis.title = "Restrict questions to this document until you clear it.";
+  askThis.onclick = () => {
+    setScope(doc);
+    closeDoc();
+    $("q").focus();
+  };
+  actions.append(askThis);
+
   const mine = me && doc.owner_id && me.user_id === doc.owner_id;
   const admin = me && me.role === "ADMIN";
   if (mine || admin) {
@@ -1249,11 +1294,16 @@ function fillWrittenAnswer(bot, data) {
     /* Same contract as search: withhold rather than flag. The model was never called, so there
        is no answer to hedge — and a citation beside text that does not answer the question is
        how someone quotes the wrong thing in a submission. */
+    /* The scope is named when it is the reason. "Nothing in the corpus covers this" and
+       "nothing in *this document* covers this" lead a reader to do different things. */
     bot.append(notice(
       "I don't have anything on that.",
       data.excluded_restricted
         ? " Every passage that matched is restricted, so none of it could be sent to the model."
-        : " Nothing in the documents I can see is close enough to this question to answer it."
+        : data.scopedTo
+          ? ` Nothing in \u201c${data.scopedTo}\u201d answers this. Clear the filter above the `
+            + `box to search every document.`
+          : " Nothing in the documents I can see is close enough to this question to answer it."
     ));
     return;
   }
@@ -1492,12 +1542,14 @@ async function ask(question) {
          unreachable — fall back to the passages rather than showing nothing: retrieval still
          works, and saying so is more useful than an error. */
       say2(thinking, "Reading the documents and writing an answer…");
-      const url = `/api/v1/ask?q=${encodeURIComponent(question)}&passages=${$("k").value}`;
+      let url = `/api/v1/ask?q=${encodeURIComponent(question)}&passages=${$("k").value}`;
+      if (scopeDoc) url += `&document_id=${encodeURIComponent(idOf(scopeDoc))}`;
       const r = await fetch(url, { method: "POST", headers: authed() });
       if (r.status === 401) return sessionExpired(bot);
       if (r.ok) {
         data = await r.json();
         data.kind = "answer";
+        if (scopeDoc) data.scopedTo = baseName(scopeDoc.filename);
       } else {
         let why = `Answer unavailable (${r.status}).`;
         try { const j = await r.json(); if (j.detail) why = String(j.detail); } catch { /* not json */ }
@@ -1771,7 +1823,10 @@ const submit = () => {
 $("askBtn").onclick = submit;
 q.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } };
 
-$("newChat").onclick = newChat;
+$("scopeClear").onclick = () => { setScope(null); $("q").focus(); };
+/* A new conversation starts unscoped. Carrying a filter across a fresh chat is the kind of
+   invisible state that makes a system feel like it is ignoring you. */
+$("newChat").onclick = () => { setScope(null); newChat(); };
 $("burger").onclick = () => $("app").classList.toggle("open");
 const ACCEPTED = [".pdf", ".docx", ".xlsx", ".pptx"];
 

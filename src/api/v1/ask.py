@@ -11,6 +11,7 @@ that" as `/search`, and no text leaves the deployment.
 """
 
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -54,6 +55,11 @@ def get_answer_service() -> AnswerService:
 async def ask(
     q: str = Query(..., description="A natural-language question."),
     passages: int = Query(8, ge=1, le=20, description="How many passages to retrieve."),
+    document_id: list[uuid.UUID] | None = Query(
+        None,
+        description="Restrict the answer to these documents. Repeat for several. Omit to "
+                    "search everything the caller may see.",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     retrieval=Depends(get_retrieval_service),
@@ -73,6 +79,11 @@ async def ask(
             detail="EMPTY_QUERY: q is required.",
         )
 
+    # Scoping is explicit rather than inferred from the wording. "Is there confidential data
+    # in this document" is a question about one document, and a system that guesses which one
+    # from a pronoun will sometimes guess wrong and answer confidently from the whole corpus --
+    # which is exactly what happened before this existed. The caller names the document; the
+    # UI makes that a button rather than a thing to type.
     results, _usage = retrieval.search(
         db,
         question,
@@ -80,8 +91,15 @@ async def ask(
         is_admin=is_admin(current_user.role),
         limit=passages,
         mode=SearchMode.HYBRID,
+        document_ids=document_id or None,
     )
     grounded, _best = assess(results, question)
+
+    if document_id and not results:
+        # Distinct from "the corpus has nothing on this". The scope is the reason, and saying
+        # so is the difference between the reader widening the search and concluding the
+        # document does not cover it.
+        logger.info("Scoped question returned nothing: %r in %s", question[:60], document_id)
 
     # Retrieval already decided the caller may *see* these. Whether they may *leave the
     # network* is a separate question, and it belongs to the gateway rather than here: this
