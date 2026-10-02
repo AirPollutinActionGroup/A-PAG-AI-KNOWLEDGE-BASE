@@ -34,6 +34,7 @@ from src.db.models import DocumentChunk as ChunkORM
 from src.modules.auth.access import is_admin, visible_documents_clause
 from src.modules.document_pipeline.embedding.provider import EmbeddingProvider
 from src.modules.retrieval.fusion import RRF_K, candidate_pool
+from src.modules.retrieval.lexical_query import lexical_query
 from src.modules.retrieval.models import RetrievedChunk, TokenUsage
 from src.modules.retrieval.rerank import Reranker, RerankUnavailable, get_reranker
 
@@ -127,6 +128,14 @@ class RetrievalService:
         the similarity bar.
         """
         score = func.paradedb.score(ChunkORM.chunk_id)
+
+        # BM25 scores every term, so a question's dozen function words outweigh the one proper
+        # noun that identifies the answer. Measured: "What was the status of the bid for unit 2
+        # of the Yermarus Thermal Power Station" returned the wrong document, while the same
+        # question trimmed to "status bid unit 2 Yermarus Thermal Power Station" returned the
+        # right one first. The semantic arm still receives the question as asked -- an embedding
+        # reads word order and function words as meaning. See lexical_query.py.
+        query = lexical_query(query)
 
         # Both indexed fields are searched, not just the body: only 1,056 of 2,475 headed chunks
         # repeat their heading in the text, so for the other 1,419 the heading is signal the body
