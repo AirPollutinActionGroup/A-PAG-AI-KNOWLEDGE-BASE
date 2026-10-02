@@ -112,6 +112,15 @@ services:
       MINIO_SECURE: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
       ENVIRONMENT: staging
+      # Written answers. Interpolated with an empty default so the stack still starts without
+      # a key: /ask then returns 503 and the UI falls back to showing passages, which is the
+      # intended behaviour for a deployment without external inference rather than a crash.
+      SARVAM_API_KEY: ${SARVAM_API_KEY:-}
+      SARVAM_MODEL: ${SARVAM_MODEL:-sarvam-105b-conversations}
+      # Reranking is where most of the retrieval quality comes from (81% vs 76% first-result
+      # accuracy, measured) and it is also the only per-query CPU cost. Set RERANK_ENABLED=false
+      # in .env if this VM cannot afford ~2s a question.
+      RERANK_ENABLED: ${RERANK_ENABLED:-true}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -205,7 +214,7 @@ services:
     # measured in the unit that actually constrains the next stage. ~640MB resident for a stage
     # that does no inference — the trade-off is recorded in KNOWN_DEBTS.md #32, along with the
     # lighter alternative (loading the tokenizer alone) and why it was not taken.
-    mem_limit: 1200m
+    mem_limit: 1800m
     command: python worker_main.py
     environment:
       WORKER_STAGE: CHUNK
@@ -242,7 +251,7 @@ services:
     build: .
     container_name: apag-embedding-worker
     # Holds the ONNX model (~640MB resident) plus a batch of vectors.
-    mem_limit: 1200m
+    mem_limit: 1800m
     command: python worker_main.py
     environment:
       WORKER_STAGE: EMBED
@@ -285,7 +294,7 @@ services:
     # strictly better than the alternative: an OOM kill is not a PermanentProcessingError, so the
     # container dies, the lease lapses, the reaper re-queues, and the next worker dies on the same
     # document. See KNOWN_DEBTS.md #24.
-    mem_limit: 1200m
+    mem_limit: 1800m
     command: python worker_main.py
     environment:
       WORKER_STAGE: EXTRACT
@@ -302,6 +311,11 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_SECURE: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      # OCR for scanned PDFs. Thread count is not a tuning detail: left at the onnxruntime
+      # default these pages measured 20.5s each against 3.5s at 8 intra-op threads. Set it to
+      # the VM's core count, not this machine's — 8 threads on a 2-vCPU box is slower than 2.
+      OCR_ENABLED: ${OCR_ENABLED:-true}
+      OCR_THREADS: ${OCR_THREADS:-0}
       ENVIRONMENT: staging
       WORKER_POLL_INTERVAL_SECONDS: "1.0"
       SCAN_WORKER_LEASE_SECONDS: "60"
