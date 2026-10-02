@@ -18,12 +18,20 @@ import logging
 from abc import ABC, abstractmethod
 from collections import Counter
 
+from src.core.config import settings
 from src.modules.document_pipeline.extraction.models import (
     ExtractedContent,
     ExtractedTable,
     ExtractedUnit,
     ExtractionError,
     Heading,
+)
+from src.modules.document_pipeline.extraction.ocr import (
+    METHOD_NATIVE,
+    METHOD_OCR,
+    OcrEngine,
+    OcrUnavailable,
+    get_ocr_engine,
 )
 from src.modules.document_pipeline.formats import (
     DOCX_MIME,
@@ -57,7 +65,26 @@ def _table_has_content(rows: list[list[str]]) -> bool:
 
 
 class PdfTextExtractor(TextExtractor):
-    """PDF via pdfplumber — text layer, ruling-line tables, font-size heading heuristic."""
+    """PDF via pdfplumber — text layer, ruling-line tables, font-size heading heuristic, and an
+    OCR fallback for pages that have no text layer at all.
+
+    The fallback is decided **per page**, not per document. A government PDF is routinely a typed
+    covering letter with a scanned annexure stapled behind it, and a per-document switch reads
+    such a file one way and loses the other half either way. Per page, each is read however it
+    was produced.
+    """
+
+    def __init__(self, ocr: OcrEngine | None = None):
+        # An explicit engine is for tests. In production it is resolved lazily on the first page
+        # that needs it, so an extraction worker that never meets a scan never loads a model.
+        self._ocr = ocr
+
+    def _engine(self) -> OcrEngine | None:
+        # The setting is authoritative even over an injected engine. Otherwise OCR_ENABLED=false
+        # would mean "off, unless something handed us an engine", which is not a switch.
+        if not settings.OCR_ENABLED:
+            return None
+        return self._ocr if self._ocr is not None else get_ocr_engine()
 
     def extract(self, data: bytes) -> ExtractedContent:
         import pdfplumber
@@ -65,18 +92,44 @@ class PdfTextExtractor(TextExtractor):
         units: list[ExtractedUnit] = []
         tables: list[ExtractedTable] = []
         headings: list[Heading] = []
+        ocr_pages: list[int] = []
+        skipped_pages: list[int] = []
         # (text, font size, page index) for every line, collected across the whole document so
         # the body size is measured document-wide rather than per page — a page that is entirely
         # a heading would otherwise make that heading look like body text.
         lines: list[tuple[str, float, int]] = []
 
+        ocr_budget = settings.OCR_MAX_PAGES
         try:
             with pdfplumber.open(io.BytesIO(data)) as pdf:
                 for index, page in enumerate(pdf.pages, start=1):
+                    text = page.extract_text() or ""
+                    method = METHOD_NATIVE
+
+                    if self._needs_ocr(page, text):
+                        if ocr_budget <= 0:
+                            # Recorded, never silent. A document truncated without a trace looks
+                            # exactly like one that was short, and the gap is unfindable.
+                            skipped_pages.append(index)
+                            logger.warning(
+                                "OCR page budget (%d) exhausted; page %d left unread",
+                                settings.OCR_MAX_PAGES, index,
+                            )
+                        else:
+                            read = self._ocr_page(page, index)
+                            if read:
+                                text = read
+                                method = METHOD_OCR
+                                ocr_pages.append(index)
+                                ocr_budget -= 1
+
                     units.append(
-                        ExtractedUnit(index=index, label=f"Page {index}", text=page.extract_text() or "")
+                        ExtractedUnit(index=index, label=f"Page {index}", text=text, method=method)
                     )
 
+                    # Both of these read the text layer, so on an OCR'd page they find nothing —
+                    # a scan has no ruling-line geometry and no font sizes. Running them anyway
+                    # costs little and keeps one code path for hybrid documents.
                     for raw_table in page.extract_tables():
                         rows = [[_clean_cell(cell) for cell in row] for row in raw_table]
                         if _table_has_content(rows):
@@ -88,8 +141,58 @@ class PdfTextExtractor(TextExtractor):
         except Exception as e:
             raise ExtractionError(f"Could not read PDF content: {e}") from e
 
+        if ocr_pages:
+            logger.info(
+                "OCR read %d of %d page(s): %s%s",
+                len(ocr_pages), len(units),
+                ", ".join(str(p) for p in ocr_pages[:10]),
+                "…" if len(ocr_pages) > 10 else "",
+            )
+
         headings = self._infer_headings(lines)
-        return ExtractedContent(units=units, headings=headings, tables=tables)
+        return ExtractedContent(
+            units=units,
+            headings=headings,
+            tables=tables,
+            ocr_pages=ocr_pages,
+            ocr_skipped_pages=skipped_pages,
+        )
+
+    @staticmethod
+    def _needs_ocr(page, text: str) -> bool:
+        """A page worth photographing: almost no text, but something drawn on it.
+
+        Both halves matter. Without the text test an OCR pass would run over a typed corpus for
+        nothing; without the image test every genuinely blank separator page would cost four
+        seconds to confirm it is blank. A scan can be one full-page image or dozens of strips —
+        one document here puts 49 images on three pages — so the test is presence, not size.
+        """
+        if len(text.strip()) >= settings.OCR_MIN_NATIVE_CHARS:
+            return False
+        try:
+            return bool(page.images)
+        except Exception:
+            return False
+
+    def _ocr_page(self, page, index: int) -> str:
+        """Renders one page and reads it. Returns "" if OCR is off, unavailable, or found
+        nothing — in every one of those cases the page keeps its (empty) native text, and the
+        normalization quality gate decides what an empty document means. That judgement belongs
+        there, not here."""
+        engine = self._engine()
+        if engine is None:
+            return ""
+        try:
+            image = page.to_image(resolution=settings.OCR_RESOLUTION).original
+            lines = engine.read(image)
+        except OcrUnavailable as e:
+            logger.error("OCR failed on page %d: %s", index, e)
+            return ""
+        except Exception as e:
+            # Rendering can fail on a malformed page. One bad page must not lose the other 161.
+            logger.warning("Could not render page %d for OCR: %s", index, e)
+            return ""
+        return "\n".join(line.text for line in lines)
 
     @staticmethod
     def _page_lines(page, page_index: int) -> list[tuple[str, float, int]]:

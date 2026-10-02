@@ -83,6 +83,10 @@ class Document(BaseModel):
     description: str | None = None
     mime_type: str = "application/pdf"
     page_count: int | None = None
+    # NATIVE / OCR / MIXED, set by the extraction stage. None until a document has been
+    # extracted, and None on everything ingested before OCR existed — that is "not known"
+    # rather than "read natively", which nobody measured for those.
+    extraction_method: str | None = None
     upload_batch_id: uuid.UUID | None = None
     size: int
     checksum: str | None = None

@@ -821,6 +821,9 @@ function renderDoc(doc) {
     meta.append(span);
   };
   bit("state", doc.status);
+  if (doc.extraction_method && doc.extraction_method !== "NATIVE") {
+    bit("read by", doc.extraction_method === "OCR" ? "OCR" : "OCR + text layer");
+  }
   if (doc.page_count) bit(unitWord(doc.mime_type), doc.page_count);
   if (doc.size) bit("size", fmtSize(doc.size));
   if (doc.classification) bit("access", doc.classification);
@@ -830,6 +833,16 @@ function renderDoc(doc) {
 
   /* Anything that is not LIVE cannot answer a question, and the reason belongs on the document
      rather than in a status code the reader has to interpret. */
+  /* A passage read from pixels is worth flagging before someone quotes it in a submission.
+     OCR measures 0.99 confidence on this corpus and still drops word boundaries. */
+  if (doc.extraction_method === "OCR" || doc.extraction_method === "MIXED") {
+    wrap.append(notice(
+      doc.extraction_method === "OCR" ? "Read by OCR" : "Partly read by OCR",
+      " This file had no text layer — it is a scan — so the words were read from the " +
+      "page image. That is accurate but not perfect: check wording against the original before " +
+      "quoting it."));
+  }
+
   if (doc.status !== "LIVE") {
     wrap.append(notice(dotFor(doc.status)[1],
       " " + (FAILED[doc.status] ||

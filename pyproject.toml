@@ -11,11 +11,20 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "python-multipart>=0.0.9",
     "pypdf>=4.1.0",
-    # Phase 4 text extraction. Deliberately non-ML: these read what each format already states
-    # (Office formats carry their own structure in XML; typed PDFs carry a real text layer), so
-    # there is nothing for layout inference to recover. Docling was evaluated and rejected for
-    # now — it resolves to 78 packages including torch/transformers/opencv for capabilities this
-    # corpus doesn't need (OCR, multi-column inference). See KNOWN_DEBTS.md for the swap trigger.
+    # Phase 4 text extraction. Deliberately non-ML for typed documents: Office formats carry
+    # their own structure in XML and a typed PDF carries a real text layer, so there is nothing
+    # for layout inference to recover.
+    #
+    # That held until the corpus disagreed. Three of A-PAG's first 39 documents are scans with
+    # no text layer at all, so `rapidocr` below reads those pages from pixels. Docling and
+    # unstructured were re-evaluated at that point and still rejected: they recover *layout*,
+    # which earns its weight on scanned tables, and measured on these scans (pages sampled
+    # across the 162-page set, counting detected lines that share a horizontal band) there are
+    # no tables — they are prose notifications. Their cost is ~500MB of models plus
+    # torch/transformers, in an image that already carries a 640MB embedding model. LlamaParse
+    # is a cloud API, which would send every document out of the deployment at ingestion.
+    # See KNOWN_DEBTS.md for the trigger to revisit — scanned tables would be it, and Docling
+    # takes RapidOCR as its own OCR backend, so this is a layer under that, not a dead end.
     "pdfplumber>=0.11.0",
     "python-docx>=1.1.0",
     "python-pptx>=1.0.0",
@@ -42,6 +51,11 @@ dependencies = [
     "pydantic[email]>=2.6.0",
     "fastembed>=0.4.0",
     "pgvector>=0.3.0",
+    # OCR for scanned PDF pages. Runs on onnxruntime, which fastembed already puts in this
+    # image, so this adds models and OpenCV rather than a second inference runtime — and no
+    # PyTorch, consistent with every other model choice here. Rasterisation needs nothing new:
+    # pdfplumber already depends on pypdfium2 and `page.to_image()` uses it.
+    "rapidocr>=3.4,<4",
 ]
 
 [tool.pytest.ini_options]

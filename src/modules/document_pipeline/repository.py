@@ -86,6 +86,7 @@ def _to_dto(orm: DocumentORM) -> DocumentDTO:
         description=orm.description,
         mime_type=orm.mime_type,
         page_count=orm.page_count,
+        extraction_method=orm.extraction_method,
         upload_batch_id=orm.upload_batch_id,
         size=orm.file_size,
         checksum=orm.sha256,
@@ -124,6 +125,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             description=doc.description,
             mime_type=doc.mime_type,
             page_count=doc.page_count,
+            extraction_method=doc.extraction_method,
             upload_batch_id=doc.upload_batch_id,
             file_size=doc.size,
             sha256=doc.checksum,
@@ -172,6 +174,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             orm.title = doc.title
             orm.description = doc.description
             orm.page_count = doc.page_count
+            orm.extraction_method = doc.extraction_method
             orm.upload_batch_id = doc.upload_batch_id
             self.db.commit()
             self.db.refresh(orm)
