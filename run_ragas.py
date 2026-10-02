@@ -123,7 +123,70 @@ def build_samples(questions, limit, passages):
     return samples, skipped, masked_total
 
 
-def preflight(judge_model: str) -> str | None:
+# The judge is whoever you can pay. Three things matter in picking one, in this order:
+#
+#   1. It must not be the model under test. Sarvam grading Sarvam measures self-consistency,
+#      not truthfulness, and a model is reliably generous about its own output.
+#   2. Passages reach it, so it is a destination the boundary has to account for — which is
+#      why every passage is redacted before any of these see it.
+#   3. It needs to follow a rubric closely. Faithfulness asks a model to decompose an answer
+#      into claims and check each against the passages; a weak model does that badly and the
+#      score becomes noise rather than a measurement.
+#
+# Ollama is listed because "free" matters when an account has no balance, with the caveat that
+# a small local model is the weakest judge here and its scores are worth less.
+JUDGES = {
+    "openai": {
+        "env": "OPENAI_API_KEY",
+        "package": "langchain-openai",
+        "default": "gpt-5-mini",
+        "note": "paid; add credits at platform.openai.com/settings/organization/billing",
+    },
+    "google": {
+        "env": "GOOGLE_API_KEY",
+        "package": "langchain-google-genai",
+        "default": "gemini-2.5-flash",
+        "note": "has a free tier, which is the cheapest way out of an empty OpenAI balance",
+    },
+    "anthropic": {
+        "env": "ANTHROPIC_API_KEY",
+        "package": "langchain-anthropic",
+        "default": "claude-sonnet-5",
+        "note": "paid",
+    },
+    "ollama": {
+        "env": None,
+        "package": "langchain-ollama",
+        "default": "llama3.1",
+        "note": "free and local, so nothing leaves at all -- but the weakest judge here, and "
+                "a weak judge turns faithfulness into noise",
+    },
+}
+
+
+def build_judge(provider: str, model: str):
+    """Returns a LangChain chat model for the chosen provider, or raises with what to install."""
+    spec = JUDGES[provider]
+    try:
+        if provider == "openai":
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(model=model)
+        if provider == "google":
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            return ChatGoogleGenerativeAI(model=model)
+        if provider == "anthropic":
+            from langchain_anthropic import ChatAnthropic
+            return ChatAnthropic(model=model)
+        from langchain_ollama import ChatOllama
+        return ChatOllama(model=model)
+    except ImportError as e:
+        raise SystemExit(
+            f"{provider} needs `{spec['package']}`:\n"
+            f"    uv pip install {spec['package']}"
+        ) from e
+
+
+def preflight(judge) -> str | None:
     """One cheap call before spending minutes building answers.
 
     RAGAS runs its metrics concurrently and swallows per-job failures, so an exhausted account
@@ -131,13 +194,7 @@ def preflight(judge_model: str) -> str | None:
     first, turns a three-minute silence into a sentence.
     """
     try:
-        from openai import OpenAI
-
-        OpenAI().chat.completions.create(
-            model=judge_model,
-            messages=[{"role": "user", "content": "reply with OK"}],
-            max_completion_tokens=16,
-        )
+        judge.invoke("reply with OK")
         return None
     except Exception as e:
         return f"{type(e).__name__}: {str(e)[:300]}"
@@ -150,7 +207,11 @@ def main() -> int:
                     help="Questions to judge. Each costs a Sarvam answer plus several judge "
                          "calls, so start small.")
     ap.add_argument("--passages", type=int, default=8)
-    ap.add_argument("--judge", default=settings.RAGAS_JUDGE_MODEL)
+    ap.add_argument("--provider", default="openai", choices=sorted(JUDGES),
+                    help="Who grades. Never the model under test — a model is reliably "
+                         "generous about its own output.")
+    ap.add_argument("--judge", default=None,
+                    help="Model id for that provider. Defaults to a sensible one.")
     ap.add_argument("--out", default="ragas_report.json")
     args = ap.parse_args()
 
@@ -169,13 +230,25 @@ def main() -> int:
         print("SARVAM_API_KEY is not set, so there are no answers to judge.")
         return 2
 
-    problem = preflight(args.judge)
+    spec = JUDGES[args.provider]
+    model_id = args.judge or (settings.RAGAS_JUDGE_MODEL if args.provider == "openai"
+                              else spec["default"])
+    judge_model = build_judge(args.provider, model_id)
+
+    problem = preflight(judge_model)
     if problem:
-        print(f"The judge ({args.judge}) is not usable:\n  {problem}\n")
-        if "credit" in problem.lower() or "quota" in problem.lower():
-            print("The key authenticates but the account has no balance. Add credits at\n"
-                  "  https://platform.openai.com/settings/organization/billing\n"
-                  "Nothing else needs changing — rerun this command afterwards.")
+        print(f"The judge ({args.provider}/{model_id}) is not usable:\n  {problem}\n")
+        low = problem.lower()
+        if any(w in low for w in ("credit", "quota", "balance")):
+            print("The key authenticates but the account has no balance. Either add credits,\n"
+                  "or grade with someone else — the harness does not care who judges:\n")
+            for name, alt in JUDGES.items():
+                if name == args.provider:
+                    continue
+                key = f"set {alt['env']}" if alt["env"] else "no key needed"
+                print(f"    --provider {name:10s} {key:26s} {alt['note']}")
+            print("\nOr skip the judge entirely: run_quality_suite.py needs none and already\n"
+                  "covers refusal, citations, masking, isolation and consistency.")
         return 2
 
     with open(args.set, encoding="utf-8") as fh:
