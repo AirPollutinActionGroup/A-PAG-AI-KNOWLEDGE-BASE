@@ -1307,6 +1307,17 @@ function renderTurn(question, data) {
   return bot;
 }
 
+/* Questions *about* the corpus rather than *from* it: "which document has a signature",
+   "how many files are there", "when was this uploaded". Retrieval searches passage text, so
+   these cannot work however the threshold is tuned — the answer is a property of a document,
+   not a sentence inside one. Worth naming separately, because "nothing is close enough" sends
+   someone looking for a document that is sitting right there. */
+const _ABOUT_CORPUS = /\b(which|what|how many|list|show me)\b[^?]*\b(document|file|pdf|report|upload)s?\b/i;
+
+function looksLikeCorpusQuestion(q) {
+  return _ABOUT_CORPUS.test(q || "");
+}
+
 function fillWrittenAnswer(bot, data) {
   bot.replaceChildren();
 
@@ -1323,7 +1334,12 @@ function fillWrittenAnswer(bot, data) {
         : data.scopedTo
           ? ` Nothing in \u201c${data.scopedTo}\u201d answers this. Clear the filter above the `
             + `box to search every document.`
-          : " Nothing in the documents I can see is close enough to this question to answer it."
+          : looksLikeCorpusQuestion(data.question)
+            ? " That looks like a question about the documents rather than about what is "
+              + "inside them. This searches the text of every passage, so it can answer "
+              + "\u201cwhat are the FGD timelines\u201d but not \u201cwhich file is signed\u201d. "
+              + "Try asking for the content you are after, or open Documents to browse."
+            : " Nothing in the documents I can see is close enough to this question to answer it."
     ));
     return;
   }
