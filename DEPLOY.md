@@ -23,7 +23,35 @@ Measured on a 10-core development machine with the full stack running:
 | postgres, minio, scan, normalize | ~300 MB |
 | **peak concurrent** | **≈ 3.1–4.2 GB** |
 
-**Minimum: 8 GB RAM, 4 vCPU.** The original 3.8 GB / 2 vCPU VM does not fit this — three
+**8 GB RAM is the floor, whatever the user count.** The models load once per process, not per
+person, so two testers and fifty staff need the same memory. A 4 GB VM sits exactly on the line
+above and will OOM-kill a worker.
+
+vCPU is what scales with use, and only loosely — two people rarely ask at the same moment.
+
+| | vCPU | RAM | per month | questions take |
+|---|---|---|---|---|
+| **Testing, 2 people** | **`B2s_v2`** 2 | 8 GB | ~₹2,200 | ~4s with the tuning below |
+| Rollout, ~50 people | `B4ls_v2` 4 | 8 GB | ~₹3,200 | ~2.5s |
+
+On a **2-vCPU box set `RERANK_CANDIDATES=25`** in `.env`. Reranking is the only CPU cost in the
+request path and it is linear in candidates, so halving them halves the wait — about 4s instead
+of 8 — while keeping most of the accuracy reranking buys. Set it back to 50 on 4 vCPU.
+
+Expect the **first bulk ingest to be slow** on 2 vCPU: OCR runs at roughly 12s a page, so a
+162-page scanned PDF takes about half an hour. It runs in the background and the system stays
+usable — start it and leave it.
+
+Testing only: **deallocate when nobody is using it.** Azure bills compute by the hour, so eight
+hours a day on weekdays is nearer ₹500/month than ₹2,200. The disk keeps charging (~₹300 for
+64 GB) and the data is untouched.
+
+```bash
+az vm deallocate --resource-group <group> --name <vm>   # stops the compute charge
+az vm start --resource-group <group> --name <vm>        # back in about a minute
+```
+
+**The original sizing below assumed a rollout.** The original 3.8 GB / 2 vCPU VM does not fit this — three
 workers alone are capped at 1,200 MB each — and on 2 vCPU reranking rises from ~2.2s to roughly
 6–10s per question while OCR rises from 3.5s to about 12s per page.
 
@@ -100,6 +128,9 @@ SARVAM_API_KEY=
 SARVAM_MODEL=sarvam-105b-conversations
 
 RERANK_ENABLED=true
+# On a 2-vCPU VM. Reranking is linear in candidates, so 25 halves the wait at a small cost in
+# accuracy. Raise to 50 on 4 vCPU or more.
+RERANK_CANDIDATES=25
 OCR_ENABLED=true
 OCR_THREADS=0
 EOF
