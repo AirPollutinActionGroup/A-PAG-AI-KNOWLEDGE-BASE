@@ -47,8 +47,15 @@ pytest tests/unit -v                          # unit tests only (in-memory repo,
 pytest tests/integration -v                   # integration tests (throwaway Postgres via testcontainers; SKIPS if Docker is down — never silently falls back to DATABASE_URL, since these tests DELETE whole tables)
 pytest tests/unit/test_ingestion_pipeline.py::TestName::test_case -v   # single test
 
-# Lint
-ruff check src/ tests/ main.py worker_main.py backfill_jobs.py
+# Lint — this exact file list is what CI runs; a wider one passing locally is not the same check
+ruff check src/ tests/ main.py worker_main.py
+
+# Evaluation. The first two need no judge and cost nothing but a Sarvam call.
+python run_eval.py --compare            # retrieval: hit@1 / hit@5 / MRR, four configurations
+python run_quality_suite.py             # refusal, citations, masking, isolation, consistency, fidelity
+python run_quality_suite.py --suite masking      # one suite
+python build_eval_set.py --count 100 --out eval_set.json --with-model   # regenerate the questions
+python run_ragas.py --count 25          # answer faithfulness; needs a judge with credit
 ```
 
 Interactive endpoints once running: Swagger at `/docs`, health at `/health`, Studio UI at `/`
@@ -396,6 +403,41 @@ logs at ERROR: it improves results that are already useful, so losing it should 
 ordering and not the answer. `RERANK_ENABLED=false` switches it off entirely; the test suite
 sets that by default (`tests/conftest.py`) so unrelated tests do not download an 80MB model.
 
+**Scoping.** `search(..., document_ids=[...])` restricts a question to particular documents,
+and `/ask` exposes it as `document_id`. Added because "is there confidential data in this
+document" was answered from three different documents — each question reaches retrieval alone,
+so "this document" has no referent. The UI makes it a button ("Ask about this") rather than
+pronoun resolution, because a pronoun the system has to resolve is one it will sometimes resolve
+wrongly and then answer confidently from the whole corpus.
+
+The scope sits in the `WHERE` clause beside the permission predicate in the **semantic** arm,
+for the same reason the permission clause does. The **lexical** arm is different: the scope has
+to go *inside* the pg_search query as a `must => paradedb.term('document_id', ...)` clause, which
+is why migration `0019` puts `document_id` in the BM25 index. An ordinary SQL predicate next to
+`@@@` breaks the custom scan for some queries and not others — "who signed this memorandum" was
+fine and "who signed the FGD extension memorandum" raised `bitmap cursor source was never
+initialized`. Not about which table carries the predicate, and `enable_bitmapscan = off` does not
+avoid it.
+
+A scoped question also bypasses the grounding gate when it returns passages: the caller has
+already asserted relevance by naming the document, and "this document does not mention that" is
+a better answer than "I don't know" to "what does THIS document say".
+
+**Document titles are searchable.** `document_chunks.document_title` is denormalised from the
+parent document (migration `0018`) and indexed in BM25, because a bm25 index covers one table.
+Without it you could not ask for a document by name: "summarise the MoP OM dated 20 November"
+found nothing while that document sat in the corpus, since a filename appears nowhere in the
+chunk text. The directory path is stripped first — matching on it would make every file under
+`Thermal Power Plants/References/` a hit for every other.
+
+**Follow-up questions** (`generation/followup.py`) are handled by query expansion, not
+conversation state. "What about Category B?" carries almost none of the words that would find
+the passage it is about, so the previous question's words are prepended **for the search only**.
+Deliberately narrow — a referring opener or a short question leaning on a dangling pronoun —
+because expanding everything would drag the previous subject into a genuinely new question. When
+it fires, the expanded query is shown in the UI: a search that quietly looked for something else
+is worse than one that found nothing.
+
 **Grounding.** Vector search always returns something: there is no such thing as no nearest
 neighbour. Without a check, a question about cake comes back with the nearest policy passage, a
 page citation and every appearance of confidence. `assess()` gates on raw **cosine similarity**,
@@ -655,6 +697,62 @@ characters).
   named presets in `GET /documents/test-preset/{preset_name}` for the Studio UI — when adding a new
   validation check, add a matching fixture + preset rather than only unit-testing it in isolation.
 
+## Evaluation: what is measured, and what is not
+
+Three harnesses, in descending order of how often they should run.
+
+**`run_eval.py` — retrieval.** Scores `eval_set.json`: 100 questions generated from real
+passages, each recording the document it came from, so "correct" means retrieval put that
+document in front of the model. Needs no judgement, which is what makes it a number you can use
+to compare two commits. Measured:
+
+| configuration | hit@1 | hit@5 | MRR | median |
+|---|---|---|---|---|
+| hybrid + rerank (shipped) | **81.0%** | **95.0%** | 0.875 | 2.22s |
+| hybrid, no rerank | 76.0% | 90.0% | 0.826 | 0.08s |
+| semantic only | 72.0% | 89.0% | 0.796 | 0.07s |
+| lexical only (BM25) | 65.0% | 83.0% | 0.728 | 0.01s |
+
+Read bottom-up, every layer earns its place. Reranking is worth 5 points of hit@1 and costs
+~2.1s, which is a trade-off someone can now decide rather than one that was asserted. All four
+failures out of 100 are **table lookups** — a figure in a spreadsheet cell has almost no
+surrounding words for either arm to match, and that is the clearest open weakness.
+
+**`run_quality_suite.py` — behaviour, no judge.** Five suites plus fidelity; 41 checks pass.
+The refusal result is the one that changes how to think about safety here:
+
+| kind of unanswerable question | similarity | what caught it |
+|---|---|---|
+| off-topic | 0.42–0.54 | the **gate** — no model call, no cost |
+| adjacent | 0.57–0.61 | the **model** said it was not covered |
+| fabricated | 0.57–0.70 | the **model** declined to invent |
+
+The similarity gate only catches the easy cases. "MoEF&CC notification S.O. 9999 (E) dated
+01.01.2030" scores **0.695** — higher than many genuine questions — because it is written in
+exactly this corpus's vocabulary. Everything plausible reaches the model and `SYSTEM_PROMPT` is
+what prevents a confident answer about a notification that does not exist. Both layers are
+load-bearing and only one is deterministic, which is the argument for measuring faithfulness.
+
+**`generation/fidelity.py` — answer accuracy, no judge.** In this corpus the facts *are* the
+figures, so every number in an answer is checked against the passages it was built from.
+Measured over 30 answers: **100% numeric fidelity (73/73)**, 90% citation coverage. Normalising
+`31st December 2024` to `31 December 2024`, `1,02,040` to `102040` and `Rs. 0.20` to `0.20` is
+what keeps this measuring truth rather than formatting — a check that reports hallucination
+where there is none gets switched off. It cannot see a claim that is wrong without being
+numerically wrong, and says so in its own docstring.
+
+**`run_ragas.py` — faithfulness, needs a judge.** The general version of the above. `--provider`
+selects openai/google/anthropic/ollama; the judge is never Sarvam, because a model grading its
+own answers measures self-consistency. **It sends passages to a second external destination, so
+it applies the gateway's own rules rather than trusting them**: PUBLIC documents only, filtered
+again in the harness, and every passage redacted before it leaves. A four-question trial
+redacted 9 emails and 1 phone number. `pip install .[eval]` — ragas pulls LangChain and the
+OpenAI client, and the runtime deliberately has neither.
+
+`eval_set.json` is a **draft**. `expected_answer` is blank on purpose: filling it from the same
+passage the question came from would be marking our own homework. The most valuable review is
+colleagues adding the questions they actually ask, which a generator cannot produce.
+
 ## Key trade-offs to know before changing things
 
 These are documented, deliberate decisions — see `ARCHITECTURE.md` and `KNOWN_DEBTS.md` for full
@@ -681,7 +779,22 @@ rationale before "fixing" them:
 - Auth is **JWT + bcrypt against local Postgres**, not SSO — deliberate for the current
   50-employee, no-existing-SSO phase. See `ARCHITECTURE.md` §6a.
 - Registration is **open** (`POST /auth/register` has no invite/admin gate) — deliberate only
-  while the API is internal-only. See `KNOWN_DEBTS.md` #0.
+  while the API is internal-only. See `KNOWN_DEBTS.md` #0. **`UserRegister` carries no `role`
+  field, and must not gain one.** It had one, with a USER default, which made registration a
+  privilege-escalation endpoint: posting `{"role": "ADMIN"}` returned 201 and an administrator,
+  and ADMIN bypasses the RESTRICTED filter in `visible_documents_clause`. A default only applies
+  when the caller stays silent, and an attacker does not. Verified against the running service
+  before and after. `tests/unit/test_registration_role.py` is what stops it coming back.
+- **Classification is required at upload**, with no default anywhere — the API form field, the
+  `UploadRequest` DTO, `bulk_ingest.py --classification` and the UI selector. It defaulted to
+  PUBLIC, which was survivable while nothing left the deployment and stopped being so when the
+  gateway started reading that field to decide what may be sent to an external model: a
+  confidential document uploaded without ticking the box was *eligible to go to Sarvam*, on a
+  value nobody chose.
+- **Delete is reversible by default.** `DELETE /documents/{id}` removes a document from search
+  and the listing while keeping its bytes and audit trail; `?permanent=true` erases and is
+  **ADMIN only**. Owner-or-admin applies to both. Every delete used to be a purge, which is the
+  wrong default when someone may have cited the document in a submission last week.
 - Text extraction is **non-ML** (`pdfplumber`/`python-docx`/`python-pptx`/`openpyxl`), not Docling
   — deliberate given this corpus is typed documents whose structure the file already states, not
   scanned/complex-layout PDFs Docling's layout inference exists for. See `KNOWN_DEBTS.md` #13
