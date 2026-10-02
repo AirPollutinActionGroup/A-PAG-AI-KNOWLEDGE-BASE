@@ -306,6 +306,9 @@ class DocumentChunk(Base):
             "section_heading",
             # So a question can name the document instead of quoting from it.
             "document_title",
+            # Indexed so a scoped question can be filtered inside the pg_search query rather
+            # than beside it — see migration 0019 for why that distinction is load-bearing.
+            "document_id",
             postgresql_using="bm25",
             postgresql_with={"key_field": "'chunk_id'"},
         ),

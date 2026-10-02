@@ -136,16 +136,48 @@ class RetrievalService:
         # `paradedb.match()` rather than interpolating the query into pg_search's own syntax: it
         # takes the raw user string and tokenizes it, so a question containing a colon, a quote
         # or the word "OR" cannot be reinterpreted as query operators.
-        matches = text(
-            "document_chunks.chunk_id @@@ paradedb.boolean(should => ARRAY["
+        should = (
             "  paradedb.match('text', :lexical_q),"
             "  paradedb.match('section_heading', :lexical_q),"
             # Lets a question name the document it is about. Without this, "summarise the MoP OM
             # dated 20 November" found nothing while that document sat in the corpus, because a
             # filename appears nowhere in the chunk text it indexes. See migration 0018.
             "  paradedb.match('document_title', :lexical_q)"
-            "])"
-        ).bindparams(lexical_q=query)
+        )
+
+        if document_ids:
+            # The scope goes **inside** the pg_search query, not beside it in the WHERE clause.
+            #
+            # `@@@` runs as a custom scan, and an ordinary SQL predicate alongside it breaks
+            # that scan for some queries and not others -- "who signed this memorandum" was
+            # fine, "who signed the FGD extension memorandum" raised
+            # `bitmap cursor source was never initialized`. It is not about which table carries
+            # the predicate, and disabling bitmap scans does not avoid it. Filtering inside the
+            # query is the supported way, and it needs document_id in the index: migration 0019.
+            terms = ", ".join(
+                # CAST(...) rather than `::uuid`: SQLAlchemy's text() parameter parser reads
+                # the second colon of `:scope_0::uuid` as the start of another bind parameter
+                # and then cannot find `scope_0` at all.
+                f"paradedb.term('document_id', CAST(:scope_{i} AS uuid))"
+                for i in range(len(document_ids))
+            )
+            clause = text(
+                "document_chunks.chunk_id @@@ paradedb.boolean("
+                f"  must => ARRAY[paradedb.boolean(should => ARRAY[{terms}])],"
+                f"  should => ARRAY[{should}]"
+                ")"
+            ).bindparams(
+                lexical_q=query,
+                **{f"scope_{i}": str(d) for i, d in enumerate(document_ids)},
+            )
+        else:
+            clause = text(
+                "document_chunks.chunk_id @@@ paradedb.boolean(should => ARRAY["
+                f"{should}"
+                "])"
+            ).bindparams(lexical_q=query)
+
+        matches = clause
 
         return (
             select(
@@ -155,7 +187,10 @@ class RetrievalService:
             .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
             .where(
                 matches,
-                *self._visible(user_id, viewer_is_admin, document_ids),
+                # Deliberately without `document_ids`: the scope is already inside `matches`,
+                # and repeating it as a SQL predicate is the exact combination that breaks the
+                # pg_search custom scan.
+                *self._visible(user_id, viewer_is_admin),
             )
             .order_by(score.desc())
             .limit(pool)

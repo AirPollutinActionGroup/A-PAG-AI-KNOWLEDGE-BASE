@@ -14,6 +14,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from src.api.v1.retrieval import get_retrieval_service
@@ -84,16 +85,42 @@ async def ask(
     # from a pronoun will sometimes guess wrong and answer confidently from the whole corpus --
     # which is exactly what happened before this existed. The caller names the document; the
     # UI makes that a button rather than a thing to type.
-    results, _usage = retrieval.search(
-        db,
-        question,
-        user_id=current_user.user_id,
-        is_admin=is_admin(current_user.role),
-        limit=passages,
-        mode=SearchMode.HYBRID,
-        document_ids=document_id or None,
-    )
+    try:
+        results, _usage = retrieval.search(
+            db,
+            question,
+            user_id=current_user.user_id,
+            is_admin=is_admin(current_user.role),
+            limit=passages,
+            mode=SearchMode.HYBRID,
+            document_ids=document_id or None,
+        )
+    except SQLAlchemyError as e:
+        # Retrieval reaches a BM25 index that is maintained as rows change, and a query issued
+        # while that index is being rebuilt can fail inside pg_search ("bitmap cursor source
+        # was never initialized"). Seen once, during a bulk UPDATE over every chunk row, and
+        # not reproducible afterwards.
+        #
+        # Caught rather than left to become a 500 because the distinction matters to whoever is
+        # reading: a stack trace says "this is broken", while this says "ask again" — which is
+        # the correct advice for a transient index state, and asking again is free.
+        logger.exception("Retrieval failed for %r", question[:80])
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SEARCH_UNAVAILABLE: The search index was busy. Please ask again.",
+        ) from e
+
     grounded, _best = assess(results, question)
+
+    # A scoped question supplies its own grounding. The gate exists because vector search always
+    # returns *something*, so a question about cake comes back with the nearest policy passage
+    # wearing a citation. But when the caller has pointed at a specific document and asked what
+    # it says, they have already asserted the relevance the gate is there to check — and the
+    # useful answer is "this document does not mention that", which the model can give from the
+    # passages. "I don't know" in response to "what does THIS document say" reads as a failure
+    # to look.
+    if document_id and results:
+        grounded = True
 
     if document_id and not results:
         # Distinct from "the corpus has nothing on this". The scope is the reason, and saying
