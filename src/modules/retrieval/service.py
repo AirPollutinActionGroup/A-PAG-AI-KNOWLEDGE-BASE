@@ -22,6 +22,7 @@ are asymmetric, and using the passage form for a query degrades retrieval with n
 
 import enum
 import logging
+import re
 import uuid
 
 from sqlalchemy import Float, cast, func, literal, select, text
@@ -33,6 +34,7 @@ from src.db.models import DocumentChunk as ChunkORM
 from src.modules.auth.access import is_admin, visible_documents_clause
 from src.modules.document_pipeline.embedding.provider import EmbeddingProvider
 from src.modules.retrieval.fusion import RRF_K, candidate_pool
+from src.modules.retrieval.lexical_query import lexical_query
 from src.modules.retrieval.models import RetrievedChunk, TokenUsage
 from src.modules.retrieval.rerank import Reranker, RerankUnavailable, get_reranker
 
@@ -67,13 +69,26 @@ class RetrievalService:
 
     # ------------------------------------------------------------------ arms
 
-    def _visible(self, user_id, viewer_is_admin):
-        return (
+    def _visible(self, user_id, viewer_is_admin, document_ids=None):
+        """Permission predicates, plus an optional scope to particular documents.
+
+        The scope sits here, beside the permission clause and inside every arm, for the same
+        reason the permission clause does: a passage removed after ranking has already taken a
+        top-k slot, so filtering afterwards returns fewer results than asked for and the caller
+        cannot tell whether the document was thin or the filter was narrow.
+
+        It is never a substitute for the permission clause and is always applied with it — a
+        caller naming a document id they may not see still gets nothing.
+        """
+        predicates = [
             DocumentORM.deleted_at.is_(None),
             visible_documents_clause(DocumentORM, user_id, viewer_is_admin=viewer_is_admin),
-        )
+        ]
+        if document_ids:
+            predicates.append(DocumentORM.document_id.in_(list(document_ids)))
+        return tuple(predicates)
 
-    def _semantic_cte(self, vector, pool, user_id, viewer_is_admin):
+    def _semantic_cte(self, vector, pool, user_id, viewer_is_admin, document_ids=None):
         distance = ChunkORM.embedding.cosine_distance(vector)
         return (
             select(
@@ -85,13 +100,16 @@ class RetrievalService:
                 (1 - distance).label("similarity"),
             )
             .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
-            .where(ChunkORM.embedding.is_not(None), *self._visible(user_id, viewer_is_admin))
+            .where(
+                ChunkORM.embedding.is_not(None),
+                *self._visible(user_id, viewer_is_admin, document_ids),
+            )
             .order_by(distance)
             .limit(pool)
             .cte("semantic_arm")
         )
 
-    def _lexical_cte(self, query, pool, user_id, viewer_is_admin):
+    def _lexical_cte(self, query, pool, user_id, viewer_is_admin, document_ids=None):
         """BM25 over chunk bodies, via pg_search's `@@@` operator and `paradedb.score()`.
 
         This replaced a `tsvector`/`ts_rank` arm, and the reason was recall rather than ranking.
@@ -111,6 +129,14 @@ class RetrievalService:
         """
         score = func.paradedb.score(ChunkORM.chunk_id)
 
+        # BM25 scores every term, so a question's dozen function words outweigh the one proper
+        # noun that identifies the answer. Measured: "What was the status of the bid for unit 2
+        # of the Yermarus Thermal Power Station" returned the wrong document, while the same
+        # question trimmed to "status bid unit 2 Yermarus Thermal Power Station" returned the
+        # right one first. The semantic arm still receives the question as asked -- an embedding
+        # reads word order and function words as meaning. See lexical_query.py.
+        query = lexical_query(query)
+
         # Both indexed fields are searched, not just the body: only 1,056 of 2,475 headed chunks
         # repeat their heading in the text, so for the other 1,419 the heading is signal the body
         # does not carry. `@@@` applied to one column searches that column alone, which silently
@@ -119,12 +145,48 @@ class RetrievalService:
         # `paradedb.match()` rather than interpolating the query into pg_search's own syntax: it
         # takes the raw user string and tokenizes it, so a question containing a colon, a quote
         # or the word "OR" cannot be reinterpreted as query operators.
-        matches = text(
-            "document_chunks.chunk_id @@@ paradedb.boolean(should => ARRAY["
+        should = (
             "  paradedb.match('text', :lexical_q),"
-            "  paradedb.match('section_heading', :lexical_q)"
-            "])"
-        ).bindparams(lexical_q=query)
+            "  paradedb.match('section_heading', :lexical_q),"
+            # Lets a question name the document it is about. Without this, "summarise the MoP OM
+            # dated 20 November" found nothing while that document sat in the corpus, because a
+            # filename appears nowhere in the chunk text it indexes. See migration 0018.
+            "  paradedb.match('document_title', :lexical_q)"
+        )
+
+        if document_ids:
+            # The scope goes **inside** the pg_search query, not beside it in the WHERE clause.
+            #
+            # `@@@` runs as a custom scan, and an ordinary SQL predicate alongside it breaks
+            # that scan for some queries and not others -- "who signed this memorandum" was
+            # fine, "who signed the FGD extension memorandum" raised
+            # `bitmap cursor source was never initialized`. It is not about which table carries
+            # the predicate, and disabling bitmap scans does not avoid it. Filtering inside the
+            # query is the supported way, and it needs document_id in the index: migration 0019.
+            terms = ", ".join(
+                # CAST(...) rather than `::uuid`: SQLAlchemy's text() parameter parser reads
+                # the second colon of `:scope_0::uuid` as the start of another bind parameter
+                # and then cannot find `scope_0` at all.
+                f"paradedb.term('document_id', CAST(:scope_{i} AS uuid))"
+                for i in range(len(document_ids))
+            )
+            clause = text(
+                "document_chunks.chunk_id @@@ paradedb.boolean("
+                f"  must => ARRAY[paradedb.boolean(should => ARRAY[{terms}])],"
+                f"  should => ARRAY[{should}]"
+                ")"
+            ).bindparams(
+                lexical_q=query,
+                **{f"scope_{i}": str(d) for i, d in enumerate(document_ids)},
+            )
+        else:
+            clause = text(
+                "document_chunks.chunk_id @@@ paradedb.boolean(should => ARRAY["
+                f"{should}"
+                "])"
+            ).bindparams(lexical_q=query)
+
+        matches = clause
 
         return (
             select(
@@ -134,6 +196,9 @@ class RetrievalService:
             .join(DocumentORM, DocumentORM.document_id == ChunkORM.document_id)
             .where(
                 matches,
+                # Deliberately without `document_ids`: the scope is already inside `matches`,
+                # and repeating it as a SQL predicate is the exact combination that breaks the
+                # pg_search custom scan.
                 *self._visible(user_id, viewer_is_admin),
             )
             .order_by(score.desc())
@@ -201,6 +266,7 @@ class RetrievalService:
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
         rerank: bool | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> tuple[list[RetrievedChunk], TokenUsage]:
         """Returns the `limit` passages best matching `query` that this user may see.
 
@@ -217,9 +283,12 @@ class RetrievalService:
         needs_vector = mode in (SearchMode.HYBRID, SearchMode.SEMANTIC)
         vector = self._provider.embed_query(query) if needs_vector else None
 
-        sem = self._semantic_cte(vector, pool, user_id, is_admin) if needs_vector else None
+        sem = (
+            self._semantic_cte(vector, pool, user_id, is_admin, document_ids)
+            if needs_vector else None
+        )
         lex = (
-            self._lexical_cte(query, pool, user_id, is_admin)
+            self._lexical_cte(query, pool, user_id, is_admin, document_ids)
             if mode in (SearchMode.HYBRID, SearchMode.LEXICAL)
             else None
         )
@@ -342,7 +411,40 @@ class RetrievalService:
         return results, usage
 
 
-def assess(results: list[RetrievedChunk]) -> tuple[bool, float | None]:
+# Words too common to carry meaning in a question. A short list on purpose: this is not the
+# stopword handling retrieval needs — BM25 does that — it only decides which of the asker's words
+# a passage must literally contain for the lexical override below to apply.
+_UNINFORMATIVE = frozenset({
+    "the", "a", "an", "of", "for", "and", "or", "in", "on", "to", "is", "are", "was", "were",
+    "what", "which", "who", "whom", "when", "where", "why", "how", "does", "do", "did", "can",
+    "could", "should", "would", "that", "this", "these", "those", "with", "from", "by", "at",
+    "as", "be", "been", "being", "it", "its", "any", "all", "best", "about", "there", "their",
+    "you", "your", "our", "we", "they", "them", "has", "have", "had", "will", "may", "must",
+})
+
+
+def informative_terms(query: str) -> list[str]:
+    """The words of a question that would have to appear verbatim for a literal match to mean
+    anything. Short words are dropped with the stopwords: a two-letter token matches everywhere."""
+    return [
+        t for t in re.findall(r"[\w-]+", query.lower())
+        if len(t) > 2 and t not in _UNINFORMATIVE
+    ]
+
+
+def _has_literal_match(query: str, results: list[RetrievedChunk]) -> bool:
+    """True when some returned passage contains *every* informative word of the question."""
+    terms = informative_terms(query)
+    if not terms:
+        return False
+    return any(
+        all(term in chunk.text.lower() for term in terms)
+        for chunk in results
+        if chunk.lexical_rank is not None
+    )
+
+
+def assess(results: list[RetrievedChunk], query: str = "") -> tuple[bool, float | None]:
     """Did this query actually find anything, or just return its least-bad guess?
 
     Vector search always returns something — there is no such thing as no nearest neighbour —
@@ -351,11 +453,21 @@ def assess(results: list[RetrievedChunk]) -> tuple[bool, float | None]:
     measure available; the RRF score is built from ranks and cannot distinguish "best in the
     corpus" from "best of a bad lot".
 
-    An exact lexical match counts as grounded regardless of similarity: if the words are
-    literally in the document, the corpus does contain them, whatever the embedding thinks.
+    **The lexical override requires the words to actually be there.** It exists for rare
+    identifiers — "GRAPSTAGETHREE", a statute number — where similarity is low and the string is
+    plainly in the document. It originally accepted *any* lexical hit, which was sound while the
+    lexical arm was a conjunction requiring every term to match. BM25 scores partial matches, so
+    under it nearly every question returns lexical hits and the gate stopped firing: "what is the
+    best chocolate cake recipe" came back grounded at 0.434 similarity against a corpus of
+    power-plant filings. The override now checks what it always meant to — that some returned
+    passage literally contains every informative word of the question.
+
+    `query` defaults to empty so the override simply does not apply when a caller has no query to
+    check against, which is the safe direction.
     """
     best = max((r.similarity for r in results if r.similarity is not None), default=None)
-    if any(r.lexical_rank is not None for r in results):
+
+    if query and _has_literal_match(query, results):
         return True, best
     if best is None:
         return False, None

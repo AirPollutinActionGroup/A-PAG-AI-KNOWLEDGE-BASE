@@ -206,3 +206,42 @@ def test_a_model_that_cannot_load_is_reported_once_then_skipped(monkeypatch):
     assert attempts["n"] == 1, "the failure should be cached, not retried per call"
 
     rr.reset_reranker()
+
+
+# ==============================================================================
+# Scoping a question to particular documents
+# ==============================================================================
+
+def test_the_scope_is_a_predicate_not_a_post_filter():
+    """It has to sit in the WHERE clause with the permission predicate, before ORDER BY/LIMIT.
+
+    Filtering after ranking would let passages from other documents consume top-k slots, so a
+    question scoped to one document would come back with fewer results than asked for — and the
+    reader could not tell whether the document was thin or the filter was narrow. That is the
+    same bug the permission clause is in SQL to avoid.
+    """
+    import inspect
+
+    from src.modules.retrieval.service import RetrievalService
+
+    source = inspect.getsource(RetrievalService._visible)
+    assert "document_ids" in source
+    assert "DocumentORM.document_id.in_" in source
+
+    for arm in (RetrievalService._semantic_cte, RetrievalService._lexical_cte):
+        arm_source = inspect.getsource(arm)
+        assert "document_ids" in arm_source, f"{arm.__name__} ignores the scope"
+
+
+def test_the_scope_never_replaces_the_permission_check():
+    """Naming a document id you may not see must still return nothing. The scope narrows what
+    a permitted search covers; it is not a way to reach past the permission clause."""
+    import inspect
+
+    from src.modules.retrieval.service import RetrievalService
+
+    source = inspect.getsource(RetrievalService._visible)
+    permission_at = source.index("visible_documents_clause")
+    scope_at = source.index("DocumentORM.document_id.in_")
+    assert permission_at < scope_at, "the permission clause must be unconditional"
+    assert "if document_ids" in source, "the scope is the only conditional part"

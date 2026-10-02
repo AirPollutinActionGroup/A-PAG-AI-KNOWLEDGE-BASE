@@ -95,6 +95,91 @@ class Settings(BaseSettings):
     # re-measuring on a model change, not carrying over.
     SEARCH_MIN_SIMILARITY: float = 0.55
 
+    # ---- Answer generation (Sarvam) -------------------------------------------------------
+    # The one place text leaves the deployment. Sarvam was chosen over OpenAI/Anthropic because
+    # it is an Indian provider with data staying in India, which is the nearest thing to the
+    # sovereignty the rest of this system has by construction.
+    #
+    # Sarvam-M and Sarvam-30B were both deprecated within a year of release, so treat the model
+    # name as something that will change again and not as a constant.
+    SARVAM_API_KEY: str = ""
+    # Sarvam exposes two models and they behave completely differently, despite the shared
+    # name. `sarvam-105b` is a **reasoning** model: against a real eight-passage context it
+    # spent 6,229 completion tokens and 75 seconds writing 17,000 characters of chain-of-thought
+    # to produce a 932-character answer — and at 4 passages it exhausted an 8,192-token budget
+    # and returned nothing at all. `sarvam-105b-conversations` does no reasoning:
+    #
+    #   sarvam-105b                  8 passages   75.4s   6,229 tokens   Rs 0.584
+    #   sarvam-105b-conversations    8 passages    1.6s     251 tokens   Rs 0.147
+    #
+    # 47x faster and 4x cheaper for an answer of the same quality, both correctly cited.
+    # Reasoning buys nothing here: the task is extraction from supplied passages, and the model
+    # was deliberating over text it had already been given.
+    SARVAM_MODEL: str = "sarvam-105b-conversations"
+    # Generous relative to the 1.6s the conversations model takes, because the failure this
+    # guards against is a hung connection, not a slow answer — and the reasoning model, if
+    # anyone configures it, needs well over 60.
+    SARVAM_TIMEOUT_SECONDS: float = 120.0
+
+    # Low, not zero: the task is extraction and summary over supplied text, where invention is
+    # the failure mode and sampling variety buys nothing.
+    GENERATION_TEMPERATURE: float = 0.2
+
+    # sarvam-105b is a **reasoning model**: it writes a chain of thought into
+    # `reasoning_content` and only then writes the answer into `content`. Both are billed as
+    # completion tokens, and the reasoning is far the larger of the two.
+    #
+    # Measured on one short question, identical answer both times:
+    #   default effort      2,682 completion tokens  ->  "[1] 36 months."
+    #   reasoning_effort=low   419 completion tokens  ->  "[1] 36 months"
+    #
+    # 6.4x the cost for the same sentence. This task is extraction from supplied passages, not
+    # a problem that rewards deliberation, so "low" is the default. Sarvam accepts only 'low',
+    # 'medium' or 'high' — reasoning cannot be turned off, and `thinking: false` is ignored.
+    GENERATION_REASONING_EFFORT: str = "low"
+
+    # Must cover the reasoning *and* the answer, because the reasoning is spent first. At 300
+    # the model used the entire budget thinking and returned `content: null` with
+    # finish_reason "length" — an empty answer with a full token bill. 2048 leaves headroom at
+    # low effort; raise it together with GENERATION_REASONING_EFFORT, never separately.
+    GENERATION_MAX_TOKENS: int = 2048
+
+    # How many retrieved passages are sent. More context is not free — it costs money per token,
+    # dilutes the model's attention, and past a point lowers answer quality rather than raising
+    # it. Ten passages at ~200 tokens each is roughly 2,000 tokens of context.
+    GENERATION_MAX_PASSAGES: int = 8
+
+    # Whether RESTRICTED documents may be sent to the API. The retrieval layer has already
+    # decided the *caller* may see them; this is the separate question of whether they may leave
+    # the network.
+    #
+    # **False, because the architecture requires it.** Agent 0101 §3 states that external
+    # inference is for non-restricted content only and that the gateway "refuses to send
+    # restricted material at all"; §5 adds that a request takes the highest tier present across
+    # every passage, with no averaging — seven public passages and one restricted one is a
+    # restricted request. This defaulted to true in its first draft, which contradicted the
+    # security keystone of the design. Data residency in India is not the same guarantee as
+    # never leaving the building.
+    GENERATION_INCLUDE_RESTRICTED: bool = False
+
+    # Whether the gateway scans and masks sensitive values before anything is sent.
+    #
+    # On by default and intended to stay on: the point of a boundary is that it cannot be
+    # bypassed, and a control that ships off is a control nobody has tested. The switch exists
+    # for diagnosing a recogniser that is firing wrongly on a specific corpus, not as a
+    # deployment choice.
+    GATEWAY_REDACT: bool = True
+
+    # Evaluation only. The judge for `run_ragas.py`, which grades answer quality offline.
+    #
+    # Deliberately a different provider from the one under test: using Sarvam to grade Sarvam's
+    # answers measures self-consistency, not truthfulness. It is **not** a second route for the
+    # application -- nothing in `src/` reads these except the harness, and the harness applies
+    # the same classification filter and redaction the gateway does before any passage reaches
+    # OpenAI.
+    OPENAI_API_KEY: str = ""
+    RAGAS_JUDGE_MODEL: str = "gpt-5-mini"
+
     # Embedding.
     # EMBEDDING_DIMENSIONS must match the migrated vector(N) column. It is not a tuning knob:
     # changing it requires a migration and a full re-embed of the corpus, so FastEmbedProvider
@@ -107,6 +192,23 @@ class Settings(BaseSettings):
     # nothing, so such a document would sit in the index invisible with no signal it is missing.
     # Skipping records the gap instead. Set False when a multilingual model is configured.
     EMBEDDING_SKIP_NON_ENGLISH: bool = True
+
+    # How much of a document must be running prose before its detected language is believed.
+    #
+    # Language detection needs sentences. Given a grid it answers anyway, and confidently: a
+    # 130,000-character emissions spreadsheet — `em  country  units  X2000  X2001 ...` — was
+    # detected as **Croatian** and skipped, taking 460 chunks out of the index with no signal
+    # beyond a status nobody was looking at.
+    #
+    # Measured on this corpus, the separation is wide: that file scores 0.054, while real
+    # documents score 0.53-0.72. Deliberately *not* a rule about spreadsheets — another .xlsx
+    # here scores 0.723 and is detected correctly, so excluding the format would have been both
+    # wrong and a coincidence that happened to work.
+    #
+    # Below this, the detection is treated as unknown rather than as non-English, and the
+    # document is embedded. The downside is bounded: a genuinely Devanagari *table* would be
+    # embedded as noise. The upside is that a column of English plant names stays searchable.
+    EMBEDDING_MIN_PROSE_RATIO: float = 0.15
 
     # OCR — the fallback for a PDF page that has no text layer, because it is a photograph of a
     # page rather than a typed document. Off-by-default was considered and rejected: a scan that
@@ -125,7 +227,18 @@ class Settings(BaseSettings):
     # Below this, a line is more likely a signature, a stamp or a scan artifact than a word.
     # Dropping it leaves a gap; keeping it puts an invented word into a passage that will be
     # cited, and nothing downstream can tell a guessed word from a read one.
-    OCR_MIN_CONFIDENCE: float = 0.5
+    #
+    # Raised from 0.5 after reading a live citation. Three lines of noise survived into the
+    # Ministry of Power memorandum's first page and were shown to a reader:
+    #
+    #     0.65  'I r ns  sn    d  res t dy'
+    #     0.67  'o.in o n nn nn n i n nc'
+    #     0.74  'Ppoit i  i i     i  nes'
+    #
+    # while every genuine line on that page scored 0.97 or better. The margin is wide enough
+    # that 0.80 removes all three and costs nothing real -- but it is corpus-specific, so
+    # re-measure on a scan of different quality rather than assuming it carries over.
+    OCR_MIN_CONFIDENCE: float = 0.80
     # A ceiling on how long one document can hold a worker: at ~4s a page, 500 pages is ~33
     # minutes. Pages past the cap are recorded as unread rather than quietly dropped.
     OCR_MAX_PAGES: int = 500

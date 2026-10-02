@@ -93,6 +93,7 @@ def test_upload_returns_202_before_scan_completes(postgres_engine, tmp_path):
         response = client.post(
             "/api/v1/documents/upload",
             files=[("files", ("async_test.pdf", pdf_bytes, "application/pdf"))],
+            data={"classification": "PUBLIC"},
         )
         elapsed = time.perf_counter() - start_time
 

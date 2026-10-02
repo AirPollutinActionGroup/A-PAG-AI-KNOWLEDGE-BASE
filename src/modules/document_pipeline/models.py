@@ -13,7 +13,12 @@ from src.db.enums import Classification, DocumentStatus
 class UploadRequest(BaseModel):
     """Payload metadata for document upload."""
 
-    classification: Classification = Classification.PUBLIC
+    # No default, deliberately. It defaulted to PUBLIC, which was survivable while nothing left
+    # the deployment — but the Data Boundary Gateway decides what may be sent to an external
+    # model by reading exactly this field, so a forgotten classification meant a confidential
+    # document was *eligible to be sent to Sarvam*. The gateway was doing its job correctly on
+    # a value nobody had actually chosen.
+    classification: Classification
     supersedes_doc_id: uuid.UUID | None = None
     keep_previous_version: bool = True
     owner_id: uuid.UUID | None = None

@@ -1,0 +1,10 @@
+{
+  "judge": "gpt-5-mini",
+  "answered": 3,
+  "ungrounded": 0,
+  "redacted": {
+    "EMAIL": 9,
+    "PHONE": 1
+  },
+  "scores": {}
+}

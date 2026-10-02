@@ -113,6 +113,16 @@ button { cursor: pointer; background: none; border: 0; }
 .rail-btn:hover { border-color: var(--yellow-deep); }
 .rail-btn .ic { font-size: 15px; line-height: 1; }
 
+.rail-sel {
+  display: flex; flex-direction: column; gap: 4px; padding: 2px 2px 0;
+  font: 400 11px/1.4 "IBM Plex Mono", monospace; color: var(--ink-faint);
+}
+.rail-sel select {
+  width: 100%; padding: 6px 8px; font-size: 12.5px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--paper); color: var(--ink);
+}
+.rail-sel select:focus { border-color: var(--yellow-deep); outline: 0; }
+
 .chats { flex: 1; overflow-y: auto; padding: 6px 8px 12px; min-height: 0; }
 .chats h2 {
   font: 500 10.5px/1 "IBM Plex Mono", monospace; letter-spacing: .1em;
@@ -141,6 +151,36 @@ button { cursor: pointer; background: none; border: 0; }
 .rail-foot .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mini { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 11.5px; }
 .mini:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+/* ---- a written answer, and what the boundary did to produce it */
+.answer { font-size: 15.5px; line-height: 1.65; white-space: pre-wrap; margin-bottom: 14px; }
+/* Citation markers and boundary placeholders are both "this stands for something else", so
+   they read as one family -- but the placeholder is a warning and the marker is a link, so
+   only one of them carries the accent. */
+.answer .mk {
+  font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--ink);
+  background: var(--yellow); border-radius: 4px; padding: 2px 4px; vertical-align: 1px;
+}
+.answer .masked {
+  font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 4px; padding: 1px 4px; vertical-align: 1px;
+}
+.masked-list { display: flex; flex-direction: column; gap: 5px; margin-top: 9px; }
+.masked-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12px; }
+.masked-kind {
+  font: 400 10px/1.4 "IBM Plex Mono", monospace; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--ink-faint); min-width: 4.5rem;
+}
+.masked-val {
+  font: 500 12px/1.5 "IBM Plex Mono", monospace; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 4px; padding: 1px 6px;
+}
+.masked-arrow { color: var(--ink-faint); }
+.masked-ph {
+  font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+}
+.cost { font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint); }
 
 /* ---- documents, in the rail and full-screen
    The rail list is the index; the panel is the document. Both reuse the conversation's own
@@ -185,6 +225,10 @@ button { cursor: pointer; background: none; border: 0; }
 .docview { max-width: 54rem; margin: 0 auto; padding: 22px 20px 48px; }
 .dv-head { display: flex; align-items: flex-start; gap: 12px; }
 .dv-titles { flex: 1; min-width: 0; }
+.dv-actions { display: flex; gap: 6px; flex: none; }
+.mini.danger { color: var(--danger); border-color: var(--line); }
+.mini.danger:hover { border-color: var(--danger); }
+.mini.danger.armed { background: var(--danger-bg); border-color: var(--danger); font-weight: 500; }
 .dv-head h1 {
   flex: 1; margin: 0; font: 600 19px/1.3 "Archivo", sans-serif;
   letter-spacing: -.01em; overflow-wrap: anywhere;
@@ -325,6 +369,15 @@ details.detail > summary:hover { color: var(--ink); }
 
 /* ---- composer */
 .composer-wrap { border-top: 1px solid var(--line); background: var(--surface); }
+.scope-bar {
+  max-width: 47rem; margin: 0 auto 7px; display: flex; align-items: center; gap: 8px;
+  padding: 6px 11px; border: 1px solid var(--yellow-deep); border-radius: 8px;
+  background: var(--surface-2); font-size: 12.5px;
+}
+.scope-label { color: var(--ink-faint); font: 400 11px/1.4 "IBM Plex Mono", monospace; }
+.scope-name { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-clear { color: var(--ink-faint); font-size: 17px; line-height: 1; padding: 0 3px; }
+.scope-clear:hover { color: var(--ink); }
 .composer { max-width: 47rem; margin: 0 auto; padding: 13px 20px 15px; }
 .field {
   display: flex; gap: 8px; align-items: flex-end;
@@ -342,6 +395,8 @@ details.detail > summary:hover { color: var(--ink); }
   display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
   margin-top: 8px; font: 400 11.5px/1.4 "IBM Plex Mono", monospace; color: var(--ink-faint);
 }
+.tog { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.tog input { accent-color: var(--yellow-deep); margin: 0; }
 .hint select { border: 1px solid var(--line); border-radius: 6px; padding: 2px 5px; background: var(--paper); color: var(--ink); }
 .grow { flex: 1; }
 
@@ -393,6 +448,16 @@ details.detail > summary:hover { color: var(--ink); }
       <button class="rail-btn" id="newChat"><span class="ic">+</span> New chat</button>
       <button class="rail-btn" id="uploadBtn"><span class="ic">&#8593;</span> Add documents</button>
       <button class="rail-btn" id="folderBtn"><span class="ic">&#128193;</span> Add a folder</button>
+      <!-- Deliberately beside the upload buttons and never pre-decided for the uploader. The
+           boundary gateway reads this to decide whether a document may be sent to an external
+           model, so a value nobody chose is the one thing this control must not produce. -->
+      <label class="rail-sel" for="uploadTier">
+        <span>Uploads are</span>
+        <select id="uploadTier">
+          <option value="PUBLIC" selected>Public &mdash; anyone here</option>
+          <option value="RESTRICTED">Restricted &mdash; only me</option>
+        </select>
+      </label>
     </div>
     <div class="chats">
       <div id="docsSec"></div>
@@ -423,6 +488,14 @@ details.detail > summary:hover { color: var(--ink); }
     </div>
 
     <div class="composer-wrap" id="composerWrap">
+      <!-- Shown only while a question is scoped to one document. Visible rather than implicit,
+           because "why is it ignoring the rest of the corpus" is a worse surprise than an
+           extra line of chrome. -->
+      <div class="scope-bar" id="scopeBar" hidden>
+        <span class="scope-label">Asking only about</span>
+        <span class="scope-name" id="scopeName"></span>
+        <button class="scope-clear" id="scopeClear" title="Search all documents again">&times;</button>
+      </div>
       <div class="composer">
         <div class="field">
           <button class="attach" id="attachBtn" title="Add a document">+</button>
@@ -432,6 +505,7 @@ details.detail > summary:hover { color: var(--ink); }
         <div class="hint">
           <span>Enter to send &middot; Shift+Enter for a new line</span>
           <span class="grow"></span>
+          <label class="tog"><input type="checkbox" id="answerMode" checked> write an answer</label>
           <label for="mode">match
             <select id="mode">
               <option value="hybrid" selected>hybrid</option>
@@ -746,6 +820,79 @@ function refreshDocs() {
   if (docsOpen) loadDocs();
 }
 
+/* The upload tier, read at send time rather than captured earlier, so changing the selector
+   between picking files and the request going out does what the person expects. */
+const tier = () => ($("uploadTier") && $("uploadTier").value) || "PUBLIC";
+
+/* Two clicks, no modal. A dialog for this is heavier than the action deserves, and the
+   second click carries the consequence in its own label — which is the part people read. */
+function confirmDelete(doc, button) {
+  if (button.dataset.armed !== "1") {
+    button.dataset.armed = "1";
+    button.textContent = "Really delete?";
+    button.classList.add("armed");
+    setTimeout(() => {
+      if (button.dataset.armed === "1") {
+        button.dataset.armed = "";
+        button.textContent = "Delete";
+        button.classList.remove("armed");
+      }
+    }, 4000);
+    return;
+  }
+  doDelete(doc, button);
+}
+
+async function doDelete(doc, button) {
+  button.disabled = true;
+  button.textContent = "Deleting\u2026";
+  try {
+    const r = await fetch(`/api/v1/documents/${idOf(doc)}`, {
+      method: "DELETE", headers: authed(),
+    });
+    if (r.status === 401) return sessionExpired();
+    if (!r.ok) {
+      let why = `Delete failed (${r.status}).`;
+      try { const j = await r.json(); if (j.detail) why = String(j.detail); } catch { /* not json */ }
+      button.disabled = false;
+      button.textContent = "Delete";
+      button.classList.remove("armed");
+      $("docview").prepend(notice("Could not delete", " " + why, true));
+      return;
+    }
+    /* Gone from search immediately, bytes retained. Saying both is the point: "deleted" alone
+       would leave someone unsure whether a document they cited last week still exists. */
+    docs = docs.filter((d) => idOf(d) !== idOf(doc));
+    docTotal = Math.max(0, docTotal - 1);
+    closeDocView();
+    paintDocs();
+    $("thread").prepend(notice(
+      "Removed from the knowledge base",
+      ` \u201c${baseName(doc.filename)}\u201d will no longer appear in search or answers. `
+      + `The file itself is kept \u2014 ask an administrator if it needs to be erased entirely.`));
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = "Delete";
+    $("docview").prepend(notice("Could not delete", " " + e.message, true));
+  }
+}
+
+/* The document a question is restricted to, or null for the whole corpus.
+
+   Explicit rather than inferred from the wording. "Is there confidential data in this
+   document" is a question about one document, and guessing which one from a pronoun will
+   sometimes guess wrong and answer confidently from everything — which is what used to
+   happen. */
+let scopeDoc = null;
+
+function setScope(doc) {
+  scopeDoc = doc;
+  const bar = $("scopeBar");
+  if (!doc) { bar.hidden = true; return; }
+  $("scopeName").textContent = baseName(doc.filename);
+  bar.hidden = false;
+}
+
 function releaseBlob() {
   if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
 }
@@ -811,7 +958,35 @@ function renderDoc(doc) {
   if (folder) titles.append(el("p", "dv-path", folder));
   const back = el("button", "mini", "← Back to chat");
   back.onclick = closeDoc;
-  head.append(titles, back);
+
+  const actions = el("div", "dv-actions");
+  actions.append(back);
+
+  /* Offered to the uploader and to administrators — the same rule the endpoint enforces. The
+     server checks again regardless; hiding it here only avoids presenting an action that would
+     be refused. */
+  /* The fix for "I'm asking about *this* document, why are you using others?" — made a button
+     rather than something to phrase correctly, because a pronoun the system has to resolve is
+     a pronoun it will sometimes resolve wrongly, and answer confidently anyway. */
+  const askThis = el("button", "mini", "Ask about this");
+  askThis.title = "Restrict questions to this document until you clear it.";
+  askThis.onclick = () => {
+    setScope(doc);
+    closeDoc();
+    $("q").focus();
+  };
+  actions.append(askThis);
+
+  const mine = me && doc.owner_id && me.user_id === doc.owner_id;
+  const admin = me && me.role === "ADMIN";
+  if (mine || admin) {
+    const del = el("button", "mini danger", "Delete");
+    del.title = "Remove this document from the knowledge base. Recoverable — the file is kept.";
+    del.onclick = () => confirmDelete(doc, del);
+    actions.append(del);
+  }
+
+  head.append(titles, actions);
   wrap.append(head);
 
   const meta = el("div", "dv-meta");
@@ -967,10 +1142,23 @@ async function showOriginal(doc, panel) {
 
 // ------------------------------------------------------------------ auth
 const showLogin = () => { $("login").hidden = false; $("app").hidden = true; };
+/* Needed to decide whether to offer Delete. Fetched rather than inferred from the token,
+   because the token is a bearer credential and the UI should not be parsing claims out of it
+   to make authorisation decisions — the server re-checks anyway, so this only governs whether
+   a button that would be refused is shown at all. */
+let me = null;
+
+async function loadMe() {
+  try {
+    const r = await fetch("/api/v1/auth/me", { headers: authed() });
+    if (r.ok) me = await r.json();
+  } catch { /* the button simply stays hidden */ }
+}
+
 const showApp = (email) => {
   $("login").hidden = true; $("app").hidden = false;
   $("whoami").textContent = email || store.get("apag.email") || "";
-  paintChats(); paintDocs(); loadDocs(); $("q").focus();
+  paintChats(); paintDocs(); loadDocs(); loadMe(); $("q").focus();
 };
 
 $("loginForm").onsubmit = async (e) => {
@@ -1079,6 +1267,23 @@ function kvRows(pairs) {
 }
 
 // ------------------------------------------------------------------ rendering a turn
+/* Brings the *question* to the top of the view rather than scrolling to the bottom of the
+   page. Scrolling to the bottom puts the end of the citation list on screen and the answer
+   above the fold, so the reader lands on the apparatus instead of the result. Keeping the
+   question in view also preserves the thing the answer is an answer to. */
+function scrollToTurn(turn) {
+  if (!turn) return;
+  const scroller = $("scroll");
+  requestAnimationFrame(() => {
+    const top = turn.offsetTop - 12;
+    if (typeof scroller.scrollTo === "function") {
+      scroller.scrollTo({ top, behavior: "smooth" });
+    } else {
+      scroller.scrollTop = top;
+    }
+  });
+}
+
 function renderTurn(question, data) {
   const turn = el("section", "turn");
   const user = el("div", "msg-user");
@@ -1088,6 +1293,9 @@ function renderTurn(question, data) {
   const bot = el("div", "msg-bot");
   turn.append(bot);
   $("thread").append(turn);
+  // Held on the bot element so the answer handler can bring this turn into view once it has
+  // something to show, without having to find it again.
+  bot._turn = turn;
 
   if (data) {
     fillAnswer(bot, data);
@@ -1099,7 +1307,185 @@ function renderTurn(question, data) {
   return bot;
 }
 
+/* Questions *about* the corpus rather than *from* it: "which document has a signature",
+   "how many files are there", "when was this uploaded". Retrieval searches passage text, so
+   these cannot work however the threshold is tuned — the answer is a property of a document,
+   not a sentence inside one. Worth naming separately, because "nothing is close enough" sends
+   someone looking for a document that is sitting right there. */
+const _ABOUT_CORPUS = /\b(which|what|how many|list|show me)\b[^?]*\b(document|file|pdf|report|upload)s?\b/i;
+
+function looksLikeCorpusQuestion(q) {
+  return _ABOUT_CORPUS.test(q || "");
+}
+
+function fillWrittenAnswer(bot, data) {
+  bot.replaceChildren();
+
+  if (!data.grounded) {
+    /* Same contract as search: withhold rather than flag. The model was never called, so there
+       is no answer to hedge — and a citation beside text that does not answer the question is
+       how someone quotes the wrong thing in a submission. */
+    /* The scope is named when it is the reason. "Nothing in the corpus covers this" and
+       "nothing in *this document* covers this" lead a reader to do different things. */
+    bot.append(notice(
+      "I don't have anything on that.",
+      data.excluded_restricted
+        ? " Every passage that matched is restricted, so none of it could be sent to the model."
+        : data.scopedTo
+          ? ` Nothing in \u201c${data.scopedTo}\u201d answers this. Clear the filter above the `
+            + `box to search every document.`
+          : looksLikeCorpusQuestion(data.question)
+            ? " That looks like a question about the documents rather than about what is "
+              + "inside them. This searches the text of every passage, so it can answer "
+              + "\u201cwhat are the FGD timelines\u201d but not \u201cwhich file is signed\u201d. "
+              + "Try asking for the content you are after, or open Documents to browse."
+            : " Nothing in the documents I can see is close enough to this question to answer it."
+    ));
+    return;
+  }
+
+  bot.append(answerText(data.answer));
+
+  const cites = data.citations || [];
+  if (cites.length) {
+    const src = disclosure("Sources", `${cites.length} cited`);
+    cites.forEach((c) => {
+      const card = el("article", "hit");
+      const top = el("div", "hit-top");
+      top.append(el("span", "rank", String(c.marker)), el("span", "src", baseName(c.filename)));
+      if (c.page_number != null) top.append(el("span", "cite", "p." + c.page_number));
+      card.append(top);
+      card.append(c.section_heading
+        ? el("div", "hit-head", c.section_heading)
+        : el("div", "hit-head none", "no section recorded"));
+      card.append(el("div", "hit-body", c.text));
+      src.body.append(card);
+    });
+    bot.append(src.root);
+  }
+
+  /* The worst error this system can make: a claim wearing a citation that points at nothing.
+     Surfaced rather than logged, because the reader is the one who would otherwise trust it. */
+  if (data.invalid_markers && data.invalid_markers.length) {
+    bot.append(notice(
+      "Some citations were removed",
+      ` The model referred to ${data.invalid_markers.length} passage(s) it was not given `
+      + `(${data.invalid_markers.join(", ")}). Those markers were stripped — treat any claim `
+      + `they were attached to as unsupported.`, true));
+  }
+
+  const b = data.boundary;
+  const masked = b && b.masked ? b.masked : [];
+  const maskedTotal = masked.reduce((n, m) => n + m.count, 0);
+
+  /* What crossed the boundary, and what did not. Shown on the answer rather than only in a
+     log, because the person reading it is the one who needs to know it was built from
+     redacted evidence. */
+  const pill = maskedTotal
+    ? `${maskedTotal} value${maskedTotal === 1 ? "" : "s"} masked`
+    : (b ? "nothing withheld" : "");
+  const det = disclosure("What happened", pill, maskedTotal > 0);
+
+  const rows = [];
+  if (b) {
+    rows.push(["sent to", b.model || "—"]);
+    rows.push(["request tier", b.tier]);
+    rows.push(["passages sent", `${b.passages_sent} of ${b.passages_considered}`]);
+    if (b.passages_withheld_restricted) {
+      rows.push(["withheld as restricted", `${b.passages_withheld_restricted} passage(s)`, true]);
+    }
+  }
+  rows.push(["tokens", `${(data.input_tokens || 0).toLocaleString()} in, `
+                     + `${(data.output_tokens || 0).toLocaleString()} out`]);
+  /* Inside the panel with everything else it belongs to, rather than floating under the
+     answer: the cost is part of what happened, not a footnote about it. */
+  if (data.cost_inr != null) {
+    rows.push(["cost", `\u20b9${Number(data.cost_inr).toFixed(3)}`]);
+  }
+  /* Shown when the search differed from the question, which happens for a short follow-up.
+     A search that quietly looked for something other than what was typed is worse than one
+     that found nothing. */
+  if (data.searched_for) rows.push(["searched for", data.searched_for, true]);
+  rows.push(["prompt caching", "not offered by Sarvam \u2014 every token billed again"]);
+  det.body.append(kvRows(rows));
+
+  if (maskedTotal) {
+    const head = el("div", "cite");
+    head.style.margin = "10px 0 6px";
+    head.textContent = "Removed before anything was sent — these never left this deployment:";
+    det.body.append(head);
+    /* The partials are the point. "1 phone number was masked" leaves a reader unable to tell
+       whether the system caught the number they care about; `011xxxxxx746` tells them which,
+       without reproducing it. These are built after redaction and never sent anywhere. */
+    const list = el("div", "masked-list");
+    masked.forEach((m) => {
+      const kind = m.label.toLowerCase().replace(/_/g, " ");
+      (m.previews && m.previews.length ? m.previews : [`${m.count} value(s)`])
+        .forEach((preview, i) => {
+          const row = el("div", "masked-row");
+          row.append(el("span", "masked-kind", kind));
+          row.append(el("code", "masked-val", preview));
+          const ph = (m.placeholders || [])[i];
+          if (ph) row.append(el("span", "masked-arrow", "\u2192"), el("code", "masked-ph", ph));
+          list.append(row);
+        });
+    });
+    det.body.append(list);
+    const note = el("div", "cite");
+    note.style.marginTop = "8px";
+    note.textContent = "Shown masked here and nowhere else \u2014 the model received the "
+                     + "placeholder on the right, so anything it wrote about these is about the "
+                     + "placeholder, not the real value.";
+    det.body.append(note);
+  } else if (b) {
+    const note = el("div", "cite");
+    note.style.marginTop = "6px";
+    /* Deliberately narrower than it used to read. It said "no phone numbers, emails or
+       identifiers were found", which is a claim about the passages; all the system actually
+       knows is that none of *its own patterns* matched. A landline went through while that
+       sentence was on screen. */
+    note.textContent = "None of the patterns this checks for \u2014 phone, email, PAN, Aadhaar, "
+                     + "GSTIN, IFSC, card \u2014 matched these passages. Names are not detected.";
+    det.body.append(note);
+  }
+
+  bot.append(det.root);
+
+}
+
+function say2(node, text) {
+  node.replaceChildren(el("span", "dot"), el("span", null, text));
+}
+
+/* Splits an answer into text, citation markers [3], and boundary placeholders <PHONE_1>.
+
+   The placeholders are the point. The model wrote them because that is literally what it was
+   given — the real value never left this deployment — and rendering them as ordinary text
+   would leave a reader guessing whether `<PHONE_1>` was a redaction or something the model
+   invented. Marked up, it says plainly: a real value stood here and was withheld. */
+const _TOKEN = /(\[\d+\]|<[A-Z_]+_\d+>)/g;
+
+function answerText(text) {
+  const box = el("div", "answer");
+  for (const part of String(text).split(_TOKEN)) {
+    if (!part) continue;
+    if (/^\[\d+\]$/.test(part)) {
+      box.append(el("span", "mk", part.slice(1, -1)));
+    } else if (/^<[A-Z_]+_\d+>$/.test(part)) {
+      const kind = part.slice(1, -1).replace(/_\d+$/, "").toLowerCase().replace(/_/g, " ");
+      const tag = el("span", "masked", part);
+      tag.title = `A ${kind} stood here. It was removed before the question was sent, and `
+                + `never left this deployment.`;
+      box.append(tag);
+    } else {
+      box.append(document.createTextNode(part));
+    }
+  }
+  return box;
+}
+
 function fillAnswer(bot, data) {
+  if (data && data.kind === "answer") return fillWrittenAnswer(bot, data);
   bot.replaceChildren();
 
   if (data.error) { bot.append(notice("Something went wrong", data.error, true)); return; }
@@ -1124,6 +1510,12 @@ function fillAnswer(bot, data) {
     return;
   }
 
+  if (data.answerFailed) {
+    bot.append(notice(
+      "Couldn't write an answer",
+      " " + data.answerFailed + " The passages below are what retrieval found, unchanged."));
+  }
+
   const n = data.count;
   const sum = el("div", "summary");
   sum.append(document.createTextNode("Found "));
@@ -1131,7 +1523,7 @@ function fillAnswer(bot, data) {
   sum.append(document.createTextNode(" across the documents you can see."));
   bot.append(sum);
 
-  const src = disclosure("Sources", `${n} passage${n === 1 ? "" : "s"}`, true);
+  const src = disclosure("Sources", `${n} passage${n === 1 ? "" : "s"}`);
   data.results.forEach((h, i) => src.body.append(passage(h, i + 1)));
   bot.append(src.root);
 
@@ -1168,24 +1560,54 @@ async function ask(question) {
   const thinking = el("div", "thinking");
   thinking.append(el("span", "dot"), el("span", null, "Searching the documents…"));
   bot.append(thinking);
-  $("scroll").scrollTop = $("scroll").scrollHeight;
+  scrollToTurn(bot._turn);
 
   let data;
-  try {
+  const search = async () => {
     const url = `/api/v1/search?q=${encodeURIComponent(question)}`
       + `&limit=${$("k").value}&mode=${$("mode").value}`;
     const r = await fetch(url, { headers: authed() });
-    if (r.status === 401) return sessionExpired(bot);
+    if (r.status === 401) { sessionExpired(bot); return null; }
     if (!r.ok) {
       let detail = `Search failed (${r.status}).`;
       try { const j = await r.json(); if (j.detail) detail = String(j.detail); } catch { /* not json */ }
-      data = { error: detail };
+      return { error: detail };
+    }
+    return await r.json();
+  };
+
+  try {
+    if ($("answerMode").checked) {
+      /* Ask for a written answer first. If generation is unavailable — no API key, the model
+         unreachable — fall back to the passages rather than showing nothing: retrieval still
+         works, and saying so is more useful than an error. */
+      say2(thinking, "Reading the documents and writing an answer…");
+      let url = `/api/v1/ask?q=${encodeURIComponent(question)}&passages=${$("k").value}`;
+      if (scopeDoc) url += `&document_id=${encodeURIComponent(idOf(scopeDoc))}`;
+      const r = await fetch(url, { method: "POST", headers: authed() });
+      if (r.status === 401) return sessionExpired(bot);
+      if (r.ok) {
+        data = await r.json();
+        data.kind = "answer";
+        if (scopeDoc) data.scopedTo = baseName(scopeDoc.filename);
+      } else {
+        let why = `Answer unavailable (${r.status}).`;
+        try { const j = await r.json(); if (j.detail) why = String(j.detail); } catch { /* not json */ }
+        say2(thinking, "Falling back to passages…");
+        data = await search();
+        if (data) { data.kind = "passages"; data.answerFailed = why; }
+      }
     } else {
-      data = await r.json();
+      data = await search();
+      if (data) data.kind = "passages";
     }
   } catch { data = { error: "Could not reach the server." }; }
+  if (!data) return;
 
   fillAnswer(bot, data);
+  // The answer, not the end of the page. Scrolling to the bottom lands the reader on the last
+  // line of the "What happened" panel with the answer above the fold.
+  scrollToTurn(bot._turn);
   record.data = data;
   saveChats();
   $("scroll").scrollTop = $("scroll").scrollHeight;
@@ -1286,6 +1708,7 @@ async function uploadMany(files, droppedCount) {
 
     const form = new FormData();
     wave.forEach((f) => form.append("files", f));
+    form.append("classification", tier());
     try {
       const r = await fetch("/api/v1/documents/upload",
                             { method: "POST", body: form, headers: authed() });
@@ -1384,6 +1807,7 @@ async function upload(file) {
   try {
     const form = new FormData();
     form.append("files", file);
+    form.append("classification", tier());
     const r = await fetch("/api/v1/documents/upload", { method: "POST", body: form, headers: authed() });
     if (r.status === 401) return sessionExpired(card.box);
     if (!r.ok) {
@@ -1442,7 +1866,10 @@ const submit = () => {
 $("askBtn").onclick = submit;
 q.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } };
 
-$("newChat").onclick = newChat;
+$("scopeClear").onclick = () => { setScope(null); $("q").focus(); };
+/* A new conversation starts unscoped. Carrying a filter across a fresh chat is the kind of
+   invisible state that makes a system feel like it is ignoring you. */
+$("newChat").onclick = () => { setScope(null); newChat(); };
 $("burger").onclick = () => $("app").classList.toggle("open");
 const ACCEPTED = [".pdf", ".docx", ".xlsx", ".pptx"];
 
