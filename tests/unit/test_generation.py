@@ -260,3 +260,59 @@ def test_token_usage_and_cost_are_reported():
     assert result.output_tokens == 60
     assert result.cost_inr == pytest.approx((1200 / 1e6) * 29.28 + (60 / 1e6) * 73.2)
     assert result.cost_inr < 0.1, "a question should cost well under a rupee"
+
+
+# ==============================================================================
+# Follow-up questions
+# ==============================================================================
+
+def test_a_short_followup_is_expanded_for_the_search():
+    """"What about Category B?" carries almost none of the words that would find the passage it
+    is about. The subject lives in the question before it."""
+    from src.modules.generation.followup import expand
+
+    query, expanded = expand("what about Category B?", "what are the FGD timelines")
+
+    assert expanded is True
+    assert "FGD timelines" in query and "Category B" in query
+
+
+def test_a_self_contained_question_is_left_alone():
+    """Expanding everything would drag the previous subject into a genuinely new question: ask
+    about FGD, then about stubble burning, and the second search is half about FGD."""
+    from src.modules.generation.followup import expand
+
+    query, expanded = expand("what are the stubble burning rules", "what are the FGD timelines")
+
+    assert expanded is False
+    assert query == "what are the stubble burning rules"
+
+
+def test_the_first_question_in_a_conversation_is_never_expanded():
+    from src.modules.generation.followup import expand
+
+    assert expand("what about Category B?", None) == ("what about Category B?", False)
+    assert expand("what about Category B?", "") == ("what about Category B?", False)
+
+
+@pytest.mark.parametrize("question", [
+    "and the penalties?",
+    "does it apply to Category C?",
+    "why?",
+    "what about them",
+])
+def test_referring_questions_are_recognised(question):
+    from src.modules.generation.followup import looks_like_followup
+
+    assert looks_like_followup(question) is True
+
+
+@pytest.mark.parametrize("question", [
+    "what environmental compensation applies for non-compliance with emission norms",
+    "summarise the NEERI report on FGD installation at thermal power plants",
+    "which plants are in Category A under the MoEF&CC notification",
+])
+def test_substantial_questions_are_not_treated_as_followups(question):
+    from src.modules.generation.followup import looks_like_followup
+
+    assert looks_like_followup(question) is False

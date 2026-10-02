@@ -22,6 +22,7 @@ from src.db.engine import get_db
 from src.db.models import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.gateway.service import DataBoundaryGateway
+from src.modules.generation.followup import expand
 from src.modules.generation.models import GeneratedAnswer
 from src.modules.generation.provider import GenerationError, SarvamProvider
 from src.modules.generation.service import AnswerService
@@ -56,6 +57,11 @@ def get_answer_service() -> AnswerService:
 async def ask(
     q: str = Query(..., description="A natural-language question."),
     passages: int = Query(8, ge=1, le=20, description="How many passages to retrieve."),
+    previous: str | None = Query(
+        None,
+        description="The previous question in this conversation. Used only to make a short "
+                    "follow-up searchable; never shown to the model as the question.",
+    ),
     document_id: list[uuid.UUID] | None = Query(
         None,
         description="Restrict the answer to these documents. Repeat for several. Omit to "
@@ -85,10 +91,15 @@ async def ask(
     # from a pronoun will sometimes guess wrong and answer confidently from the whole corpus --
     # which is exactly what happened before this existed. The caller names the document; the
     # UI makes that a button rather than a thing to type.
+    # "What about Category B?" has almost none of the words that would find the passage it
+    # is about. The previous question supplies them — for the search only. The model still
+    # receives the question as asked.
+    search_query, expanded = expand(question, previous)
+
     try:
         results, _usage = retrieval.search(
             db,
-            question,
+            search_query,
             user_id=current_user.user_id,
             is_admin=is_admin(current_user.role),
             limit=passages,
@@ -135,7 +146,10 @@ async def ask(
     tiers = _tiers_for(db, results)
 
     try:
-        return answers.answer(question, results, grounded=grounded, tiers=tiers)
+        answer = answers.answer(question, results, grounded=grounded, tiers=tiers)
+        if expanded:
+            answer.searched_for = search_query
+        return answer
     except GenerationError as e:
         # A model outage must not look like an empty corpus. Retrieval worked; say so.
         logger.error("Generation failed for %r: %s", question[:80], e)

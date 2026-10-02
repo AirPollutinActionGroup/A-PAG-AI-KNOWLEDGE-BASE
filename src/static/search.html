@@ -1267,6 +1267,23 @@ function kvRows(pairs) {
 }
 
 // ------------------------------------------------------------------ rendering a turn
+/* Brings the *question* to the top of the view rather than scrolling to the bottom of the
+   page. Scrolling to the bottom puts the end of the citation list on screen and the answer
+   above the fold, so the reader lands on the apparatus instead of the result. Keeping the
+   question in view also preserves the thing the answer is an answer to. */
+function scrollToTurn(turn) {
+  if (!turn) return;
+  const scroller = $("scroll");
+  requestAnimationFrame(() => {
+    const top = turn.offsetTop - 12;
+    if (typeof scroller.scrollTo === "function") {
+      scroller.scrollTo({ top, behavior: "smooth" });
+    } else {
+      scroller.scrollTop = top;
+    }
+  });
+}
+
 function renderTurn(question, data) {
   const turn = el("section", "turn");
   const user = el("div", "msg-user");
@@ -1276,6 +1293,9 @@ function renderTurn(question, data) {
   const bot = el("div", "msg-bot");
   turn.append(bot);
   $("thread").append(turn);
+  // Held on the bot element so the answer handler can bring this turn into view once it has
+  // something to show, without having to find it again.
+  bot._turn = turn;
 
   if (data) {
     fillAnswer(bot, data);
@@ -1312,7 +1332,7 @@ function fillWrittenAnswer(bot, data) {
 
   const cites = data.citations || [];
   if (cites.length) {
-    const src = disclosure("Sources", `${cites.length} cited`, true);
+    const src = disclosure("Sources", `${cites.length} cited`);
     cites.forEach((c) => {
       const card = el("article", "hit");
       const top = el("div", "hit-top");
@@ -1366,6 +1386,10 @@ function fillWrittenAnswer(bot, data) {
   if (data.cost_inr != null) {
     rows.push(["cost", `\u20b9${Number(data.cost_inr).toFixed(3)}`]);
   }
+  /* Shown when the search differed from the question, which happens for a short follow-up.
+     A search that quietly looked for something other than what was typed is worse than one
+     that found nothing. */
+  if (data.searched_for) rows.push(["searched for", data.searched_for, true]);
   rows.push(["prompt caching", "not offered by Sarvam \u2014 every token billed again"]);
   det.body.append(kvRows(rows));
 
@@ -1483,7 +1507,7 @@ function fillAnswer(bot, data) {
   sum.append(document.createTextNode(" across the documents you can see."));
   bot.append(sum);
 
-  const src = disclosure("Sources", `${n} passage${n === 1 ? "" : "s"}`, true);
+  const src = disclosure("Sources", `${n} passage${n === 1 ? "" : "s"}`);
   data.results.forEach((h, i) => src.body.append(passage(h, i + 1)));
   bot.append(src.root);
 
@@ -1520,7 +1544,7 @@ async function ask(question) {
   const thinking = el("div", "thinking");
   thinking.append(el("span", "dot"), el("span", null, "Searching the documents…"));
   bot.append(thinking);
-  $("scroll").scrollTop = $("scroll").scrollHeight;
+  scrollToTurn(bot._turn);
 
   let data;
   const search = async () => {
@@ -1565,6 +1589,9 @@ async function ask(question) {
   if (!data) return;
 
   fillAnswer(bot, data);
+  // The answer, not the end of the page. Scrolling to the bottom lands the reader on the last
+  // line of the "What happened" panel with the answer above the fold.
+  scrollToTurn(bot._turn);
   record.data = data;
   saveChats();
   $("scroll").scrollTop = $("scroll").scrollHeight;

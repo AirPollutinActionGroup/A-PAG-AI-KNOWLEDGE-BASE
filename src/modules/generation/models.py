@@ -48,6 +48,13 @@ class GeneratedAnswer(BaseModel):
     # looks like the corpus being thin.
     excluded_restricted: int = 0
 
+    # The question actually searched for, when it differed from the one asked. A short
+    # follow-up — "what about Category B?" — carries almost none of the words that would find
+    # the passage it is about, so the previous question's words are prepended for the search.
+    # Surfaced because a search that quietly looked for something else is worse than one that
+    # found nothing.
+    searched_for: str | None = None
+
     model: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
