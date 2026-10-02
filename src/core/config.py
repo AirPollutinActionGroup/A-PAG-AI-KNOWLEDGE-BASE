@@ -130,6 +130,34 @@ class Settings(BaseSettings):
     # minutes. Pages past the cap are recorded as unread rather than quietly dropped.
     OCR_MAX_PAGES: int = 500
 
+    # Reranking — read the candidates properly, then keep the best few.
+    #
+    # Hybrid retrieval is a recall device: both arms score a passage without ever looking at the
+    # query and the passage together. A cross-encoder does, which is why it finds what fusion
+    # ranked 16th — measured on this corpus, on three sample questions out of three the passage
+    # that most directly answered the question sat *outside* the top 8 that hybrid alone would
+    # have returned.
+    RERANK_ENABLED: bool = True
+    # Measured on an idle machine, 8 real questions, 50 candidates each:
+    #   ms-marco-MiniLM-L-6-v2   1.28s median (1.07-2.13)   80MB
+    #   jina-reranker-v1-turbo   1.62s median (1.47-3.09)  150MB
+    # MiniLM-L-6 is both faster and half the size, so it is the default. Measure again before
+    # changing it, and measure on an *idle* machine: a first pass taken while an OCR job held
+    # eight cores reported 10.2s for this same model and ranked the two in the opposite order.
+    RERANK_MODEL: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    # How many the hybrid arms fetch before reranking. The architecture says ~50, and this is
+    # the latency dial: cross-encoder cost is linear in candidates, so halving this roughly
+    # halves the 1.28s. Retrieval itself is 0.12s, so essentially all of a query's time is
+    # here. Lowering it trades recall for speed — on this corpus the passage that best answered
+    # a question sat at fused rank 9, 16 and 23, so a pool below ~25 would start losing the
+    # answers this exists to find.
+    RERANK_CANDIDATES: int = 50
+    # Passages are truncated to this many characters before scoring. A cross-encoder's cost
+    # scales with tokens, and a 2,000-character table contributes its relevance in the first
+    # few hundred — the tail is rows, not subject matter. This bounds the worst case rather
+    # than letting one long chunk set the latency of the whole query.
+    RERANK_MAX_CHARS: int = 900
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _pin_postgres_driver(cls, value: str) -> str:

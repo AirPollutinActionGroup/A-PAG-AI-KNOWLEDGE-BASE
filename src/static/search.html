@@ -1049,6 +1049,16 @@ function passage(hit, rank) {
     return b;
   };
   arms.append(badge("meaning", hit.semantic_rank), badge("words", hit.lexical_rank));
+
+  /* Where the passage sat before the reranker read it against the question. Shown only when it
+     moved up past the cut, because that is the case worth seeing: without reranking this
+     passage would not have been returned at all. */
+  if (hit.fusion_rank != null && hit.fusion_rank > rank) {
+    const moved = el("span", "arm on", `moved up from #${hit.fusion_rank}`);
+    moved.title = "Hybrid search ranked this passage #" + hit.fusion_rank + ". The reranker read "
+                + "it against your question and moved it to #" + rank + ".";
+    arms.append(moved);
+  }
   top.append(arms);
   card.append(top);
 
