@@ -1,135 +1,15 @@
 {
-  "total": 41,
+  "total": 68,
   "failures": 0,
   "suites": [
     {
-      "name": "refusal",
-      "total": 10,
+      "name": "fidelity",
+      "total": 68,
       "failures": 0,
-      "rows": [
-        {
-          "kind": "off-topic",
-          "question": "what is the best recipe for chocolate cake",
-          "refused": true,
-          "hedged": false,
-          "best_similarity": 0.4292245933182418
-        },
-        {
-          "kind": "off-topic",
-          "question": "how do I reset my email password",
-          "refused": true,
-          "hedged": false,
-          "best_similarity": 0.4227602481842041
-        },
-        {
-          "kind": "off-topic",
-          "question": "what is the capital of Brazil",
-          "refused": true,
-          "hedged": false,
-          "best_similarity": 0.5355461122583869
-        },
-        {
-          "kind": "adjacent",
-          "question": "what are the vehicle scrappage policy incentives in Delhi",
-          "refused": false,
-          "hedged": true,
-          "best_similarity": 0.5710722378215863
-        },
-        {
-          "kind": "adjacent",
-          "question": "what are the groundwater extraction limits for industrial units",
-          "refused": false,
-          "hedged": true,
-          "best_similarity": 0.6051199546241852
-        },
-        {
-          "kind": "adjacent",
-          "question": "what is the penalty for illegal sand mining",
-          "refused": false,
-          "hedged": true,
-          "best_similarity": 0.5780018912554925
-        },
-        {
-          "kind": "fabricated",
-          "question": "what does MoEF&CC notification S.O. 9999 (E) dated 01.01.2030 require",
-          "refused": false,
-          "hedged": true,
-          "best_similarity": 0.6952336819400314
-        },
-        {
-          "kind": "fabricated",
-          "question": "what are the Category D thermal power plant timelines",
-          "refused": false,
-          "hedged": true,
-          "best_similarity": 0.670719067497199
-        },
-        {
-          "kind": "fabricated",
-          "question": "how much did the Mangalore Super Thermal Power Station pay in compensation",
-          "refused": false,
-          "hedged": true,
-          "best_similarity": 0.5986889600753784
-        },
-        {
-          "kind": "fabricated",
-          "question": "what did the 2027 Supreme Court FGD judgment decide",
-          "refused": false,
-          "hedged": true,
-          "best_similarity": 0.5683010816574097
-        }
-      ]
-    },
-    {
-      "name": "citations",
-      "total": 6,
-      "failures": 0,
-      "rows": [
-        {
-          "question": "what are the FGD installation timelines for Category A plants",
-          "citations": 7,
-          "invalid_markers": []
-        },
-        {
-          "question": "what environmental compensation applies for non-compliance",
-          "citations": 7,
-          "invalid_markers": []
-        },
-        {
-          "question": "which plants are in Category A",
-          "citations": 4,
-          "invalid_markers": []
-        },
-        {
-          "question": "what is the status of FGD installation across thermal power plants",
-          "citations": 4,
-          "invalid_markers": []
-        },
-        {
-          "question": "what are the SO2 emission norms",
-          "citations": 4,
-          "invalid_markers": []
-        },
-        {
-          "question": "who monitors compliance with the emission norms",
-          "citations": 6,
-          "invalid_markers": []
-        }
-      ]
-    },
-    {
-      "name": "masking",
-      "total": 17,
-      "failures": 0
-    },
-    {
-      "name": "isolation",
-      "total": 4,
-      "failures": 0
-    },
-    {
-      "name": "consistency",
-      "total": 4,
-      "failures": 0
+      "numeric_fidelity": 1.0,
+      "citation_coverage": 0.9,
+      "answered": 30,
+      "unsupported": []
     }
   ]
 }

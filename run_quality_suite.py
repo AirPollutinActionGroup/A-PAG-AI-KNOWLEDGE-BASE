@@ -276,6 +276,71 @@ def suite_isolation():
     return {"name": "isolation", "total": total, "failures": failures}
 
 
+def suite_fidelity(retrieval, answers, count):
+    """Checks each answer against the passages it was built from, without a judge.
+
+    This is the answer-quality number. RAGAS faithfulness is the general version and needs a
+    second model; this is the part of it that can be checked by looking, which in a policy
+    corpus is most of what matters -- the facts here are deadlines, rupee rates, megawatt
+    figures and notification numbers, and an answer that invents one is wrong in the way that
+    would embarrass someone quoting it.
+    """
+    from src.modules.generation.fidelity import check
+
+    print(f"\nFIDELITY — do the figures in each answer appear in its passages? ({count} questions)")
+    print("-" * 74)
+
+    with open("eval_set.json", encoding="utf-8") as fh:
+        questions = [q["question"] for q in json.load(fh)["questions"] if q.get("question")]
+
+    viewer = uuid.uuid4()
+    nums_ok = nums_total = cited = sentences = quotes_ok = quotes_total = 0
+    answered, offenders = 0, []
+
+    with SessionLocal() as db:
+        for q in questions[:count]:
+            result, hits, _ = ask(retrieval, answers, db, q, viewer)
+            if result is None or not result.answer:
+                continue
+            answered += 1
+            used = hits[: settings.GENERATION_MAX_PASSAGES]
+            r = check(result.answer, [h.text for h in used])
+
+            nums_ok += r.numbers_supported
+            nums_total += r.numbers_checked
+            cited += r.sentences_cited
+            sentences += r.sentences
+            quotes_ok += r.quotes_verbatim
+            quotes_total += r.quotes_checked
+
+            if r.unsupported_numbers:
+                offenders.append((q, r.unsupported_numbers, result.answer))
+
+    numeric = nums_ok / nums_total if nums_total else 0.0
+    coverage = cited / sentences if sentences else 0.0
+    print(f"  numeric fidelity   {numeric:6.1%}   {nums_ok}/{nums_total} figures found in the passages")
+    print(f"  citation coverage  {coverage:6.1%}   {cited}/{sentences} sentences carry a marker")
+    if quotes_total:
+        print(f"  quote fidelity     {quotes_ok / quotes_total:6.1%}   {quotes_ok}/{quotes_total} verbatim")
+    else:
+        print("  quote fidelity        n/a   no quoted spans to check")
+    print(f"  answered           {answered}/{min(count, len(questions))}")
+
+    # Every unsupported figure is either a real fabrication or a limit of the check (a number
+    # the model computed, or one written a way the normaliser missed). Both are worth reading,
+    # which is why they are printed rather than only counted.
+    if offenders:
+        print(f"\n  figures not found in the passages ({len(offenders)} answer(s)):")
+        for q, bad, _ans in offenders[:6]:
+            print(f"    {bad}  <- {q[:52]}")
+
+    failures = nums_total - nums_ok
+    return {"name": "fidelity", "total": nums_total, "failures": failures,
+            "numeric_fidelity": numeric, "citation_coverage": coverage,
+            "answered": answered,
+            "unsupported": [{"question": q, "numbers": b} for q, b, _ in offenders]}
+
+
 def suite_consistency(retrieval):
     print("\nCONSISTENCY — the same question must return the same documents")
     print("-" * 74)
@@ -298,17 +363,20 @@ def suite_consistency(retrieval):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--suite", choices=["refusal", "citations", "masking",
-                                        "isolation", "consistency"], default=None)
+                                        "isolation", "consistency", "fidelity"], default=None)
+    ap.add_argument("--fidelity-count", type=int, default=20,
+                    help="How many answers to check for numeric fidelity. Each costs one "
+                         "Sarvam call.")
     ap.add_argument("--out", default="quality_report.json")
     args = ap.parse_args()
 
-    needs_model = args.suite in (None, "refusal", "citations")
+    needs_model = args.suite in (None, "refusal", "citations", "fidelity")
     if needs_model and not settings.SARVAM_API_KEY:
         print("SARVAM_API_KEY is not set; the refusal and citation suites need it.")
         return 2
 
     retrieval, answers = (services() if args.suite in (None, "refusal", "citations",
-                                                       "consistency")
+                                                       "consistency", "fidelity")
                           else (None, None))
 
     results = []
@@ -322,6 +390,8 @@ def main() -> int:
         results.append(suite_isolation())
     if args.suite in (None, "consistency"):
         results.append(suite_consistency(retrieval))
+    if args.suite in (None, "fidelity"):
+        results.append(suite_fidelity(retrieval, answers, args.fidelity_count))
 
     print("\n" + "=" * 74)
     total = sum(r["total"] for r in results)
