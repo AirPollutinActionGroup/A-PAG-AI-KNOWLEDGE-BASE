@@ -13,12 +13,16 @@ which is the failure that gets a check switched off.
 
 from src.modules.generation.fidelity import check
 
+# Parenthesised because an implicit concatenation sitting bare in a list is one missing comma
+# away from being several items instead of one, and ruff rejects it for that reason.
 CONTEXT = [
-    "Category A plants must comply by 31 December 2024, Category B by 31 December 2025 and "
-    "Category C by 31 December 2026. Environmental compensation is Rs. 0.20 per unit for "
-    "0-180 days, 0.30 for 181-365 days and 0.40 beyond. Bids have been awarded in 233 units "
-    "(1,02,040 MW) of a total 537 units (2,04,160 MW). The Ministry requested an extension in "
-    "timelines by 36 months beyond the stipulated dates.",
+    (
+        "Category A plants must comply by 31 December 2024, Category B by 31 December 2025 "
+        "and Category C by 31 December 2026. Environmental compensation is Rs. 0.20 per unit "
+        "for 0-180 days, 0.30 for 181-365 days and 0.40 beyond. Bids have been awarded in 233 "
+        "units (1,02,040 MW) of a total 537 units (2,04,160 MW). The Ministry requested an "
+        "extension in timelines by 36 months beyond the stipulated dates."
+    ),
 ]
 
 
