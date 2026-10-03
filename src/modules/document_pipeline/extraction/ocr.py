@@ -189,10 +189,3 @@ def get_ocr_engine() -> OcrEngine | None:
         _engine = engine
         return _engine
 
-
-def reset_ocr_engine() -> None:
-    """Drops the cached engine. For tests, which substitute their own."""
-    global _engine, _engine_failed
-    with _engine_lock:
-        _engine = None
-        _engine_failed = False

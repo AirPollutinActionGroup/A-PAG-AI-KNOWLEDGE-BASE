@@ -642,16 +642,25 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Fix**: the route now depends on `get_current_user` like every other. The Studio UI already had
   an `authHeaders()` helper and simply was not using it for this one call.
 
-### 35. The `0015` tsvector is now dead weight
-- **Status**: Open, and the immediate follow-up to `0016`.
-- **Context**: the lexical arm moved from `ts_rank` to BM25. `document_chunks.search_vector`, its
-  GIN index and the trigger that maintains it are all still there and nothing reads them.
-- **Why it was kept**: so the switch stays revertible until BM25 has run against real questions
-  for a while. The measurement that justified the switch was recall on 16 sample queries, which
-  is evidence but not an evaluation set.
-- **What it costs meanwhile**: the trigger recomputes a tsvector on every chunk insert and
-  update, and the GIN index is maintained for nothing. Invisible at 2,860 chunks; not free during
-  a bulk archive ingest.
-- **Trigger to address**: once BM25 has served real A-PAG queries without a reason to go back —
-  or immediately before the bulk ingest, whichever comes first. One migration dropping the index,
-  the trigger, the function and the column.
+### 35. The `0015` tsvector is now dead weight — **resolved** by `0020`
+- **Status**: Closed. Migration `0020_drop_chunk_tsvector` drops the index, the trigger, the
+  function and the column.
+- **Context**: the lexical arm moved from `ts_rank` to BM25 in `0016`.
+  `document_chunks.search_vector`, its GIN index and the trigger that maintained it were all
+  still there and nothing read them.
+- **Why it was kept**: so the switch stayed revertible until BM25 had run against real questions.
+  The measurement that justified the switch was recall on 16 sample queries — evidence, but not
+  an evaluation set.
+- **Why it was dropped now**: it has an evaluation set since. BM25 is the lexical arm in all four
+  configurations of `run_eval.py --compare`, scored over 100 questions rather than 16, and
+  nothing in that result argues for going back. The stated trigger was "once BM25 has served real
+  queries without a reason to go back, or immediately before the bulk ingest, whichever comes
+  first" — the bulk ingest onto the deployment box is next, and the cost was never the disk: the
+  trigger recomputed a tsvector on every chunk INSERT and UPDATE of `text` for a column no query
+  reads. Invisible at 4,459 chunks, not invisible across an archive.
+- **The downgrade restores it in full** — column, function, trigger, index and backfill — rather
+  than only dropping. A one-way removal would have quietly ended the revertibility the column was
+  kept for at the moment it was removed. Verified by running `upgrade → downgrade → upgrade`
+  against the real corpus: the downgrade repopulated all 4,459 rows.
+- **Not to be confused with** `documents.search_vector`, which is a different column built by
+  `0006` over title/filename/description and still backs `GET /documents?q=`.
