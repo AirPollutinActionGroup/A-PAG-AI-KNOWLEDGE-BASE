@@ -217,6 +217,13 @@ class Settings(BaseSettings):
     # embedded as noise. The upside is that a column of English plant names stays searchable.
     EMBEDDING_MIN_PROSE_RATIO: float = 0.15
 
+    # Threads onnxruntime may use for one inference call, for the embedding model and the
+    # reranker. 0 leaves it to the library, which sizes its pool from *physical* cores. A 2-vCPU
+    # Azure VM is two hyperthreads of one core, so the default there is one thread: during a bulk
+    # ingest the embedding worker sat at ~100% CPU while the VM was ~45% idle, with nothing in any
+    # log to say so. The same lesson as OCR_THREADS. Set it to the vCPU count on a small VM.
+    INFERENCE_THREADS: int = 0
+
     # OCR — the fallback for a PDF page that has no text layer, because it is a photograph of a
     # page rather than a typed document. Off-by-default was considered and rejected: a scan that
     # silently becomes an unreadable document is the failure this exists to fix, and a setting

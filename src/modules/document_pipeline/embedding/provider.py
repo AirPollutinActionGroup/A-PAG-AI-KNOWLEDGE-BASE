@@ -87,7 +87,7 @@ class FastEmbedProvider(EmbeddingProvider):
         from fastembed import TextEmbedding
 
         logger.info("Loading embedding model: %s", self._model_name)
-        model = TextEmbedding(self._model_name)
+        model = TextEmbedding(self._model_name, threads=settings.INFERENCE_THREADS or None)
 
         # Fail loudly at load rather than at insert. A model whose output width disagrees with the
         # migrated column produces a constraint error per chunk, deep inside a worker, with a
