@@ -35,8 +35,10 @@ vCPU is what scales with use, and only loosely — two people rarely ask at the 
 | Rollout, ~50 people | `B4ls_v2` 4 | 8 GB | ~₹3,200 | ~2.5s |
 
 On a **2-vCPU box set `RERANK_CANDIDATES=25`** in `.env`. Reranking is the only CPU cost in the
-request path and it is linear in candidates, so halving them halves the wait — about 4s instead
-of 8 — while keeping most of the accuracy reranking buys. Set it back to 50 on 4 vCPU.
+request path and it is linear in candidates. Measured on the 100-question evaluation set, twice
+each, interleaved: 25 candidates scores 82.0% hit@1 / 95.0% hit@5 against 83.0% / 97.0% at 50,
+and is about 1.8x faster. Leave it at 50 on 4 vCPU. (Before this was wired through
+`docker-compose.prod.yml` the setting reached no container, so it did nothing.)
 
 Expect the **first bulk ingest to be slow** on 2 vCPU: OCR runs at roughly 12s a page, so a
 162-page scanned PDF takes about half an hour. It runs in the background and the system stays
