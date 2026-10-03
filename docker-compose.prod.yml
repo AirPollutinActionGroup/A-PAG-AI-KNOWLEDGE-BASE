@@ -117,10 +117,15 @@ services:
       # intended behaviour for a deployment without external inference rather than a crash.
       SARVAM_API_KEY: ${SARVAM_API_KEY:-}
       SARVAM_MODEL: ${SARVAM_MODEL:-sarvam-105b-conversations}
-      # Reranking is where most of the retrieval quality comes from (81% vs 76% first-result
-      # accuracy, measured) and it is also the only per-query CPU cost. Set RERANK_ENABLED=false
-      # in .env if this VM cannot afford ~2s a question.
+      # Reranking is where most of the retrieval quality comes from (83% vs 80% first-result
+      # accuracy, 97% vs 91% in the top five, measured) and it is also the only per-query CPU
+      # cost. Set RERANK_ENABLED=false in .env if this VM cannot afford ~2s a question.
       RERANK_ENABLED: ${RERANK_ENABLED:-true}
+      # Passed through explicitly because this service lists its environment rather than reading
+      # .env wholesale: a RERANK_CANDIDATES line in .env reached nothing until this was added, so
+      # DEPLOY.md's advice to lower it on a 2-vCPU VM silently did not apply. 25 costs one point
+      # of first-result accuracy and two in the top five for ~1.8x the speed (measured).
+      RERANK_CANDIDATES: ${RERANK_CANDIDATES:-50}
     depends_on:
       migrate:
         condition: service_completed_successfully
