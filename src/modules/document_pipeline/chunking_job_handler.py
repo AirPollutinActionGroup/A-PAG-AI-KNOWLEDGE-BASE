@@ -160,7 +160,12 @@ class ChunkingJobHandler:
             )
 
         try:
-            self._persist(document_id, result)
+            # Same rule as migration 0018's backfill: the document's own title, else the
+            # filename with its directory stripped. The path is an artefact of how a folder was
+            # ingested, and matching on it would make every file under
+            # "Thermal Power Plants/References/" a hit for every other.
+            title = (doc.title or "").strip() or doc.filename.rsplit("/", 1)[-1]
+            self._persist(document_id, result, document_title=title)
         except Exception as e:
             logger.exception("Failed to persist chunks for doc_id=%s", document_id)
             return ChunkingOutcome(
@@ -207,7 +212,9 @@ class ChunkingJobHandler:
         )
         self._db.commit()
 
-    def _persist(self, document_id: uuid.UUID, result: ChunkingResult) -> None:
+    def _persist(
+        self, document_id: uuid.UUID, result: ChunkingResult, document_title: str | None = None
+    ) -> None:
         """Replaces this document's chunks in one transaction.
 
         Deletes first because a retry that half-succeeded would otherwise collide with the unique
@@ -231,6 +238,10 @@ class ChunkingJobHandler:
                 section_heading=chunk.section_heading,
                 is_table=chunk.is_table,
                 char_count=chunk.char_count,
+                # Denormalised so the BM25 index can match a question that names the document
+                # rather than quoting from it — "summarise the MoP OM dated 20 November" found
+                # nothing before this, because a filename appears nowhere in a chunk's text.
+                document_title=document_title,
             )
             for chunk in result.chunks
         ])

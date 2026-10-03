@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from src.db.models import Job as JobORM
 from src.modules.document_pipeline.models import (
+    Classification,
     UploadRequest,
     UploadResponse,
 )
@@ -56,7 +57,10 @@ def upload_and_process_sync(
     """Synchronous helper for in-memory and unit tests: executes receive() and then immediately
     drives ScanJobHandler.process() to return the terminal UploadResponse.
     """
-    meta = request_meta or UploadRequest()
+    # Spelled out rather than relying on a DTO default, because UploadRequest deliberately has
+    # none: the gateway reads `classification` to decide what may leave the deployment, so a
+    # silent default is exactly the thing that was removed. Tests that care pass their own.
+    meta = request_meta or UploadRequest(classification=Classification.PUBLIC)
     initial_resp = upload_service.receive(filename=filename, data=data, request_meta=meta)
     terminal_resp = scan_handler.process(
         document_id=initial_resp.document_id,

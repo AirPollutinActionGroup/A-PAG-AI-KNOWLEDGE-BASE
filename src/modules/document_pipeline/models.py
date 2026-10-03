@@ -13,7 +13,12 @@ from src.db.enums import Classification, DocumentStatus
 class UploadRequest(BaseModel):
     """Payload metadata for document upload."""
 
-    classification: Classification = Classification.PUBLIC
+    # No default, deliberately. It defaulted to PUBLIC, which was survivable while nothing left
+    # the deployment — but the Data Boundary Gateway decides what may be sent to an external
+    # model by reading exactly this field, so a forgotten classification meant a confidential
+    # document was *eligible to be sent to Sarvam*. The gateway was doing its job correctly on
+    # a value nobody had actually chosen.
+    classification: Classification
     supersedes_doc_id: uuid.UUID | None = None
     keep_previous_version: bool = True
     owner_id: uuid.UUID | None = None
@@ -83,6 +88,10 @@ class Document(BaseModel):
     description: str | None = None
     mime_type: str = "application/pdf"
     page_count: int | None = None
+    # NATIVE / OCR / MIXED, set by the extraction stage. None until a document has been
+    # extracted, and None on everything ingested before OCR existed — that is "not known"
+    # rather than "read natively", which nobody measured for those.
+    extraction_method: str | None = None
     upload_batch_id: uuid.UUID | None = None
     size: int
     checksum: str | None = None

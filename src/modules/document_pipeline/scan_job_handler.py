@@ -104,7 +104,6 @@ class ScanJobHandler:
     ) -> UploadResponse:
         """Processes a quarantined document: validation -> threat scan -> promote/reject."""
         corr_id = correlation_id or uuid.uuid4()
-        meta = request_meta or UploadRequest()
 
         # 1. Fetch document from repository
         doc = self.repo.get_by_id(document_id)
@@ -254,15 +253,23 @@ class ScanJobHandler:
                     message=f"Duplicate document detected (matches canonical document ID: {existing_doc.id}).",
                 )
 
-            # Versioning: Check if this supersedes an older document
-            if meta.supersedes_doc_id:
-                prior_doc = self.repo.get_by_id(meta.supersedes_doc_id)
+            # Versioning: check if this supersedes an older document.
+            #
+            # Read straight off `request_meta` rather than via a defaulted UploadRequest. The
+            # default object made this look live when it is not: the SCAN worker is a separate
+            # process that only receives a document id, so `request_meta` is None on every
+            # production path and `supersedes_doc_id` was always None. The behaviour is
+            # unchanged — what changes is that it now says so. See KNOWN_DEBTS.
+            supersedes_id = request_meta.supersedes_doc_id if request_meta else None
+            keep_previous = request_meta.keep_previous_version if request_meta else True
+            if supersedes_id:
+                prior_doc = self.repo.get_by_id(supersedes_id)
                 if prior_doc:
                     doc.version = prior_doc.version + 1
                     doc.supersedes_id = prior_doc.id
 
                     # Update old version status based on keep_previous_version flag
-                    if meta.keep_previous_version:
+                    if keep_previous:
                         prior_doc.status = DocumentStatus.SUPERSEDED
                     else:
                         prior_doc.status = DocumentStatus.ARCHIVED

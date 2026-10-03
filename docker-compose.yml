@@ -62,6 +62,13 @@ services:
       MINIO_ACCESS_KEY: apag_admin
       MINIO_SECRET_KEY: apag_secure_password_2026
       MINIO_SECURE: "false"
+      # The only secret this service needs that is not a local-compose password. Passed through
+      # from .env rather than written here, because .env is gitignored and this file is not.
+      # Interpolated with a default so `docker compose up` still works with no key set -- the
+      # /ask endpoint then returns 503 and the UI falls back to passages, which is the intended
+      # behaviour for a deployment without external inference rather than a startup failure.
+      SARVAM_API_KEY: ${SARVAM_API_KEY:-}
+      SARVAM_MODEL: ${SARVAM_MODEL:-sarvam-105b-conversations}
     depends_on:
       postgres:
         condition: service_healthy

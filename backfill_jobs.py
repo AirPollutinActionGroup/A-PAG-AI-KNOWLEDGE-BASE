@@ -12,6 +12,15 @@ running this twice cannot double-queue work.
     python backfill_jobs.py --stage CHUNK  --status AWAITING_CLASSIFICATION --dry-run
     python backfill_jobs.py --stage CHUNK  --status AWAITING_CLASSIFICATION
     python backfill_jobs.py --stage EMBED  --status CHUNKED
+
+`--reset` additionally moves the selected documents back to the stage's entry status before
+queueing. That is the case where a *stage improved* rather than a document being stranded: the
+OCR fallback made three scanned PDFs readable that had come to rest at NORMALIZATION_FAILED, and
+without a reset the handler's idempotency guard correctly refuses to touch them. Expect to need
+it again whenever an extractor, a chunking rule or an embedding model changes.
+
+    python backfill_jobs.py --stage EXTRACT --status NORMALIZATION_FAILED --reset --dry-run
+    python backfill_jobs.py --stage EXTRACT --status NORMALIZATION_FAILED --reset
 """
 
 import argparse
@@ -41,7 +50,8 @@ STAGE_ENTRY_STATUS = {
 }
 
 
-def backfill(stage: JobStage, status: DocumentStatus, dry_run: bool, limit: int | None) -> int:
+def backfill(stage: JobStage, status: DocumentStatus, dry_run: bool, limit: int | None,
+             reset: bool = False) -> int:
     with SessionLocal() as db:
         # Documents in the target state with no live job for this stage. COMPLETED and FAILED
         # jobs are deliberately not counted as live: a document still sitting in the entry state
@@ -77,9 +87,22 @@ def backfill(stage: JobStage, status: DocumentStatus, dry_run: bool, limit: int 
         for doc in docs:
             logger.info("  %s  %s", doc.document_id, doc.filename)
 
+        if reset:
+            entry = STAGE_ENTRY_STATUS[stage]
+            logger.info("--reset: %d document(s) will be moved %s -> %s before queueing.",
+                        len(docs), status.value, entry.value)
+
         if dry_run:
             logger.info("Dry run — nothing was queued. Re-run without --dry-run to enqueue.")
             return 0
+
+        if reset:
+            entry = STAGE_ENTRY_STATUS[stage]
+            for doc in docs:
+                doc.status = entry.value
+                # Cleared deliberately: it described the previous failure, and leaving it on a
+                # document that is about to be re-read would outlive the thing it explained.
+                doc.rejection_reason = None
 
         for doc in docs:
             db.add(JobORM(
@@ -102,12 +125,17 @@ def main() -> None:
     )
     parser.add_argument("--dry-run", action="store_true", help="List documents without queueing.")
     parser.add_argument("--limit", type=int, help="Cap how many are queued in one run.")
+    parser.add_argument(
+        "--reset", action="store_true",
+        help="Move the documents back to the stage's entry status first. For re-running a "
+             "stage that has since improved.",
+    )
     args = parser.parse_args()
 
     stage = JobStage(args.stage)
     status = DocumentStatus(args.status) if args.status else STAGE_ENTRY_STATUS[stage]
 
-    if STAGE_ENTRY_STATUS[stage] != status:
+    if STAGE_ENTRY_STATUS[stage] != status and not args.reset:
         # Allowed, because re-running a stage over documents in another state is occasionally
         # what you want — but it is not the normal path, and the handler's guard will no-op most
         # of them, so say so rather than let it look like it worked.
@@ -117,7 +145,7 @@ def main() -> None:
             stage.value, STAGE_ENTRY_STATUS[stage].value, status.value,
         )
 
-    backfill(stage, status, args.dry_run, args.limit)
+    backfill(stage, status, args.dry_run, args.limit, reset=args.reset)
 
 
 if __name__ == "__main__":

@@ -77,12 +77,19 @@ class UploadService:
         self,
         filename: str,
         data: bytes,
-        request_meta: UploadRequest | None = None,
+        request_meta: UploadRequest,
         correlation_id: uuid.UUID | None = None,
         mime_type: str = "application/pdf",
     ) -> UploadResponse:
-        """Stage 1: Fast API path — writes bytes to quarantine, creates DB record + job, returns 202."""
-        meta = request_meta or UploadRequest()
+        """Stage 1: Fast API path — writes bytes to quarantine, creates DB record + job, returns 202.
+
+        `request_meta` is **required**, and `UploadRequest.classification` has no default. This
+        used to be `request_meta or UploadRequest()`, which quietly produced a PUBLIC document
+        whenever a caller supplied nothing. That was survivable while nothing left the
+        deployment; it stopped being survivable when the Data Boundary Gateway started reading
+        that same field to decide what may be sent to an external model.
+        """
+        meta = request_meta
         document_id = uuid.uuid4()
         corr_id = correlation_id or uuid.uuid4()
         quarantine_key = build_quarantine_key(document_id, mime_type)
