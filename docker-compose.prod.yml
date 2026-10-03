@@ -126,6 +126,7 @@ services:
       # DEPLOY.md's advice to lower it on a 2-vCPU VM silently did not apply. 25 costs one point
       # of first-result accuracy and two in the top five for ~1.8x the speed (measured).
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-50}
+      INFERENCE_THREADS: ${INFERENCE_THREADS:-0}
       # Shared demo login shown under the sign-in box. Empty (the default) hides it.
       DEMO_LOGIN_EMAIL: ${DEMO_LOGIN_EMAIL:-}
       DEMO_LOGIN_PASSWORD: ${DEMO_LOGIN_PASSWORD:-}
@@ -268,6 +269,7 @@ services:
     environment:
       WORKER_STAGE: EMBED
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      INFERENCE_THREADS: ${INFERENCE_THREADS:-0}
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432

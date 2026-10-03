@@ -78,7 +78,9 @@ class CrossEncoderReranker(Reranker):
             except ImportError as e:  # pragma: no cover - depends on the deployed image
                 raise RerankUnavailable("fastembed reranking is not available.") from e
             try:
-                self._model = TextCrossEncoder(model_name=self._name)
+                self._model = TextCrossEncoder(
+                    model_name=self._name, threads=settings.INFERENCE_THREADS or None
+                )
             except Exception as e:
                 raise RerankUnavailable(f"Could not load reranker {self._name!r}: {e}") from e
             logger.info("Reranker ready: %s", self._name)
