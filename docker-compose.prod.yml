@@ -258,11 +258,16 @@ services:
   embedding-worker:
     build: .
     container_name: apag-embedding-worker
-    # Holds the ONNX model (~640MB resident) plus a batch of vectors.
-    mem_limit: 1800m
+    # Holds the ONNX model plus a batch of activations. Measured on the 2-vCPU VM: loaded and idle
+    # it is already ~1.7GB, and embedding two batches of 32 full-length (512-token) passages took
+    # it to 2.28GB. At the previous 1800m limit Docker does not kill the container, it pushes it
+    # onto swap: ~1.1GB of the worker was swapped out and embedding crawled with no error anywhere.
+    # Raise EMBEDDING_MEM_LIMIT, or lower EMBEDDING_BATCH_SIZE, if that recurs.
+    mem_limit: ${EMBEDDING_MEM_LIMIT:-2500m}
     command: python worker_main.py
     environment:
       WORKER_STAGE: EMBED
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
