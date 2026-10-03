@@ -341,8 +341,11 @@ predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`. The shape is
   into pg_search's syntax, so a question containing a colon, a quote or the word "OR" cannot be
   reinterpreted as operators.
 
-  The `0015` tsvector column and trigger are **still present and now unread** — kept so the switch
-  stays revertible. Removing them is the immediate follow-up (`KNOWN_DEBTS.md` #35).
+  The `0015` tsvector column, its GIN index and its trigger are **gone**, dropped by `0020` once
+  the switch had an evaluation set behind it rather than 16 sample queries (`KNOWN_DEBTS.md`
+  #35). `0020`'s downgrade restores all of it, backfill included, so the revert the column was
+  kept for still works. `documents.search_vector` is a different column from `0006` and is still
+  live behind `GET /documents?q=`.
 
 They fail differently — an embedding blurs "Section 114" into whatever it is semantically near,
 while a word index is blind to paraphrase — which is why fusing beats either. Measured on this
@@ -706,17 +709,39 @@ passages, each recording the document it came from, so "correct" means retrieval
 document in front of the model. Needs no judgement, which is what makes it a number you can use
 to compare two commits. Measured:
 
-| configuration | hit@1 | hit@5 | MRR | median |
-|---|---|---|---|---|
-| hybrid + rerank (shipped) | **81.0%** | **95.0%** | 0.875 | 2.22s |
-| hybrid, no rerank | 76.0% | 90.0% | 0.826 | 0.08s |
-| semantic only | 72.0% | 89.0% | 0.796 | 0.07s |
-| lexical only (BM25) | 65.0% | 83.0% | 0.728 | 0.01s |
+| configuration | hit@1 | hit@5 | hit@10 | MRR | median |
+|---|---|---|---|---|---|
+| hybrid + rerank (shipped) | **83.0%** | **97.0%** | 97.0% | 0.894 | 6.05s |
+| hybrid, no rerank | 80.0% | 91.0% | 96.0% | 0.853 | 0.36s |
+| semantic only | 72.0% | 90.0% | 91.0% | 0.801 | 0.33s |
+| lexical only (BM25) | 66.0% | 89.0% | 94.0% | 0.751 | 0.03s |
 
-Read bottom-up, every layer earns its place. Reranking is worth 5 points of hit@1 and costs
-~2.1s, which is a trade-off someone can now decide rather than one that was asserted. All four
-failures out of 100 are **table lookups** — a figure in a spreadsheet cell has almost no
-surrounding words for either arm to match, and that is the clearest open weakness.
+Read bottom-up, every layer earns its place. Reranking is worth 3 points of hit@1 and 6 of
+hit@5, which is a trade-off someone can now decide rather than one that was asserted.
+
+Two things to read carefully rather than quote flat:
+
+**The median is latency on a development machine, and it moves.** An earlier run of the same
+four configurations on the same machine put the shipped median at 2.22s; this one puts it at
+6.05s, and the cause has not been established — the corpus grew from 2,860 to 4,459 chunks in
+between, but reranking scores a fixed `RERANK_CANDIDATES` rows and should not care. Treat the
+**ratios** between rows as the finding and the absolute seconds as a measurement of this box on
+this day. `DEPLOY.md` sets `RERANK_CANDIDATES=25` on a 2-vCPU VM for exactly this reason.
+
+**The remaining failures are no longer table lookups.** They were, when there were four of them
+and the lexical arm was being swamped by function words; trimming those (`lexical_query.py`)
+fixed that shape of failure. The 3 that miss out of 100 are now prose:
+
+| question | expected document |
+|---|---|
+| why FGD is considered unnecessary for certain plants | `TPP FGD_Comparative Note_May 2026.docx` |
+| whether Section 7 of the Electricity Act 2003 requires … | `_annex_266_AS212_IjMmVN (2).docx` |
+| percentage change in CFPP-SO2 emissions 2021→2023 | `s44407-026-00075-4.pdf` |
+
+Two are arguing a position rather than stating a fact, which is the harder retrieval problem:
+the passage that answers "why is X considered unnecessary" rarely contains those words. Do not
+carry the old "all failures are table lookups" claim forward — it was true of a previous
+measurement and is not true of this one.
 
 **`run_quality_suite.py` — behaviour, no judge.** Five suites plus fidelity; 41 checks pass.
 The refusal result is the one that changes how to think about safety here:
