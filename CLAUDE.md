@@ -245,9 +245,11 @@ reintroduces the bug. `TokenCounter` is a narrow Protocol satisfied structurally
 always there (2000 chars was chosen with a 512-token window in mind) and writing it as a character
 constant hid it rather than removing it.
 
-The cost: `ChunkingWorker` loads the embedding model purely to tokenize (~640MB), which is why
-that container has a `mem_limit`. See `KNOWN_DEBTS.md` #32 for the lighter option and why it was
-not taken.
+`ChunkingWorker` counts with the tokenizer alone (`embedding/tokenizer_only.py`) — 95MB measured
+against 500MB for the full model it used to build just to tokenize. It is exact, not an
+approximation: zero mismatches over every chunk in the corpus, and re-chunking all 69 normalized
+documents under both counters gave identical output (`KNOWN_DEBTS.md` #32). If the tokenizer files
+cannot be located it falls back to the full provider, then to the character budget, in that order.
 
 `document_chunks` is the one pipeline artifact that lives in Postgres instead of object storage.
 That's deliberate: chunks are queried, not merely stored — the embedding stage adds a vector
@@ -302,8 +304,12 @@ the only thing worth measuring — is invisible, and `encode_batch` pads to the 
 batch so every passage in a batch reports an identical length (that one shipped briefly, and was
 caught by a live response where five passages all claimed 689 tokens — `KNOWN_DEBTS.md` #29).
 
-This is what chunking now sizes against, so **no chunk exceeds the window**: verified 0 of 2,860
-after the fix, down from 83 of 2,816 when the budget was in characters (`KNOWN_DEBTS.md` #28).
+This is what chunking now sizes against, so chunks stay inside the window: 0 of 2,860 after the
+fix, down from 83 of 2,816 when the budget was in characters (`KNOWN_DEBTS.md` #28). On the
+current 4,459-chunk corpus **5 (0.11%) exceed it**, which this paragraph used to say could not
+happen: four are single table rows wider than the window, which the chunker emits whole by design
+rather than hard-wrap a row, and one is not a table and has not been investigated. Each is
+embedded from its first 512 tokens and counted in `truncated_count`.
 `EmbeddingService` still logs a WARNING and records `truncated_count` if one ever does, because
 the guarantee depends on the chunking stage having a tokenizer — a worker that falls back to
 `CharacterBudget` silently reintroduces the gap.

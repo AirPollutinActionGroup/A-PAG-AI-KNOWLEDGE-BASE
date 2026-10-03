@@ -44,28 +44,50 @@ class ChunkingService:
         silently reintroduces the truncation this budget exists to prevent — see
         KNOWN_DEBTS.md #28.
         """
+        from src.core.config import settings
+
+        # Tokenizer alone first: this stage measures text and never runs inference, so building
+        # the ONNX session cost ~400MB for nothing (KNOWN_DEBTS.md #32). Exact by construction.
+        # If the files cannot be located, fall back to the full provider rather than to
+        # characters: more memory is acceptable, a different count is not.
+        counter = None
         try:
-            from src.core.config import settings
-            from src.modules.document_pipeline.embedding.provider import (
-                FastEmbedProvider,
+            from src.modules.document_pipeline.embedding.tokenizer_only import (
+                TokenizerOnlyCounter,
             )
 
-            provider = FastEmbedProvider(
-                model_name=settings.EMBEDDING_MODEL,
-                dimensions=settings.EMBEDDING_DIMENSIONS,
-            )
-            budget = TokenBudget(provider)
-            logger.info(
-                "Chunking against the model's window: max=%d target=%d tokens (%s)",
-                budget.maximum, budget.target, settings.EMBEDDING_MODEL,
-            )
-            return cls(chunker=Chunker(budget=budget))
+            counter = TokenizerOnlyCounter(settings.EMBEDDING_MODEL)
+            how = "tokenizer only"
         except Exception as e:
             logger.warning(
-                "Could not load a tokenizer (%s). Falling back to the character budget, which "
-                "can overflow the model's window on dense passages.", e,
+                "Could not load the tokenizer without the model (%s); loading the full "
+                "embedding model to tokenize instead, which costs ~400MB more.", e,
             )
-            return cls()
+
+        if counter is None:
+            try:
+                from src.modules.document_pipeline.embedding.provider import (
+                    FastEmbedProvider,
+                )
+
+                counter = FastEmbedProvider(
+                    model_name=settings.EMBEDDING_MODEL,
+                    dimensions=settings.EMBEDDING_DIMENSIONS,
+                )
+                how = "full model"
+            except Exception as e:
+                logger.warning(
+                    "Could not load a tokenizer (%s). Falling back to the character budget, which "
+                    "can overflow the model's window on dense passages.", e,
+                )
+                return cls()
+
+        budget = TokenBudget(counter)
+        logger.info(
+            "Chunking against the model's window: max=%d target=%d tokens (%s, %s)",
+            budget.maximum, budget.target, settings.EMBEDDING_MODEL, how,
+        )
+        return cls(chunker=Chunker(budget=budget))
 
     def chunk(self, normalized: NormalizationResult) -> ChunkingResult:
         return ChunkingResult(
