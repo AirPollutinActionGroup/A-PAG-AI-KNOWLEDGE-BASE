@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8h workday
 
+    # A shared demo login, shown under the sign-in box by GET /auth/demo-login. Empty means off.
+    # Set it in a deployment's .env and never in the repository: the repository is public and
+    # this value is a password. It must name a USER account. The page that shows it is served to
+    # anyone who can reach the port without signing in, and the endpoint refuses to reveal the
+    # credentials of an ADMIN even if misconfigured.
+    DEMO_LOGIN_EMAIL: str = ""
+    DEMO_LOGIN_PASSWORD: str = ""
+
     # Upload limits
     # Bounds how much memory one extraction may demand, not how large a file may be. pdfplumber
     # holds page objects for the document it parses; a real 1,351-page PDF peaked at 3.6GB RSS.

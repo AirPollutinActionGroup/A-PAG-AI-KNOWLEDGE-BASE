@@ -78,6 +78,28 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
     )
 
 
+@router.get("/demo-login")
+async def demo_login(db: Session = Depends(get_db)):
+    """The shared demo credentials, when this deployment has configured them.
+
+    Exists so the sign-in page can show a login for people trying the system, without the
+    password living in the repository. Deliberately unauthenticated, since it is shown to someone
+    who has not signed in yet, which is why it will not hand out the credentials of an
+    administrator: that account can read every RESTRICTED document, and publishing its password
+    on an open page would defeat the access model. Misconfiguration fails closed (404).
+    """
+    email, password = settings.DEMO_LOGIN_EMAIL, settings.DEMO_LOGIN_PASSWORD
+    if not (email and password):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No demo login is configured.")
+
+    account = db.query(User).filter(User.email == email.lower()).first()
+    if account is not None and account.role == UserRole.ADMIN:
+        logger.error("DEMO_LOGIN_EMAIL names an ADMIN account; refusing to publish its password")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No demo login is configured.")
+
+    return {"email": email, "password": password}
+
+
 @router.get("/me", response_model=UserOut)
 async def read_current_user(current_user: User = Depends(get_current_user)):
     return current_user
