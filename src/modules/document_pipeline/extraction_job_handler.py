@@ -158,6 +158,25 @@ class ExtractionJobHandler:
                 transient=True,
             )
 
+        # End the read transaction before the expensive part.
+        #
+        # Extraction used to take milliseconds, so the session staying open across it cost
+        # nothing. With the OCR fallback a scanned document takes minutes — 162 pages at ~3.5s
+        # each — and for all of that the worker sits "idle in transaction": it blocks DDL (the
+        # migration adding `extraction_method` waited three minutes behind exactly this) and
+        # holds back the xmin horizon so autovacuum cannot reclaim dead rows anywhere in the
+        # database.
+        #
+        # Safe because the repository returns DTOs, not attached ORM rows: `doc` is plain data
+        # and nothing below re-reads through this session until the write at the end, which
+        # opens a fresh transaction. Any pending best-effort audit rows are flushed here, which
+        # is where they were going anyway.
+        if self._db is not None:
+            try:
+                self._db.commit()
+            except Exception:
+                logger.exception("Could not close the read transaction before extraction")
+
         try:
             result = self.extractor.extract(document_id, data, doc.mime_type)
         except ExtractionError as e:
@@ -182,6 +201,10 @@ class ExtractionJobHandler:
             )
 
         doc.status = DocumentStatus.EXTRACTED
+        # Recorded on the document as well as in the audit event, so "which documents needed
+        # OCR" is a query rather than a replay of history, and so a reader can be told before
+        # they quote a passage that it was read from a photograph.
+        doc.extraction_method = result.extraction_method
         self.repo.update_document(doc)
 
         self._audit(document_id, AuditEventType.EXTRACTION_COMPLETED, details={

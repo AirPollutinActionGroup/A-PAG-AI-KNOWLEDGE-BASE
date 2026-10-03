@@ -140,8 +140,8 @@ question, each with the citation recovered at extraction time:
 ```
 
 **Two searches run and their ranks are merged.** Vector search matches meaning but blurs exact
-identifiers — an embedding places "Section 114" near whatever it is semantically similar to. A
-full-text index matches those exactly and is in turn blind to paraphrase. They fail differently,
+identifiers — an embedding places "Section 114" near whatever it is semantically similar to.
+**BM25** (via `pg_search`) matches those exactly and is in turn blind to paraphrase. They fail differently,
 so fusing them covers more than either: on a 16-query sample the word search surfaced passages the
 vector search never returned on 6 of them. Asked for `cuDNN`, the vector arm's top hit was the
 book's *Index* page; the word arm found the actual content.

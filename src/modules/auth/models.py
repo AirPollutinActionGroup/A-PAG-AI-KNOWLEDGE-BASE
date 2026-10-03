@@ -17,12 +17,22 @@ _PASSWORD_COMPLEXITY = (
 
 
 class UserRegister(BaseModel):
-    """Payload for creating a new employee account."""
+    """Payload for creating a new employee account.
+
+    **There is deliberately no `role` field.** It used to be here with a USER default, which
+    made registration a privilege-escalation endpoint: registration is open, the field was
+    caller-supplied, and posting `{"role": "ADMIN"}` created an administrator. ADMIN sees every
+    RESTRICTED document in the corpus (`visible_documents_clause`), so anyone who could reach
+    the API could read everything in it. Verified against the running service before the fix.
+
+    A self-registered account is always a USER. Granting ADMIN is an administrative act and
+    belongs to an endpoint that requires an existing administrator — never to the payload of
+    the request creating the account.
+    """
 
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=8, max_length=128)
-    role: UserRole = UserRole.USER
 
     @field_validator("password")
     @classmethod

@@ -26,6 +26,7 @@ from src.core.config import settings
 from src.db.engine import get_db
 from src.db.enums import AuditEventType, UserRole
 from src.db.models import AuditLog as AuditORM
+from src.db.models import DocumentChunk as DocumentChunkORM
 from src.db.models import User
 from src.modules.audit.service import AuditService
 from src.modules.auth.access import can_view, is_admin
@@ -123,8 +124,10 @@ async def upload_documents(
         ..., description="One or more document binary streams (PDF, DOCX, XLSX, PPTX)"
     ),
     classification: Classification = Form(
-        Classification.PUBLIC,
-        description="2-Tier security classification (PUBLIC / RESTRICTED)",
+        ...,
+        description="Required. PUBLIC (org-wide) or RESTRICTED (owner + admins only). "
+                    "There is no default: an unclassified document would be treated as "
+                    "PUBLIC and become eligible to be sent to an external model.",
     ),
     description: str | None = Form(
         None,
@@ -401,12 +404,80 @@ async def download_document(
     )
 
 
+@router.get(
+    "/{document_id}/chunks",
+    summary="The passages a document was split into — what retrieval actually searches",
+)
+async def get_document_chunks(
+    document_id: uuid.UUID,
+    limit: int = 500,
+    offset: int = 0,
+    repo: DocumentRepository = Depends(get_document_repository),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns a document's chunks in reading order, with their citation metadata.
+
+    This is the only preview that works for every format. A browser can render a PDF and nothing
+    else — a .docx, .xlsx or .pptx is a zip it will offer to download — so for three of the four
+    supported formats the passages *are* the preview. They are also the more honest one: this is
+    what the search index holds, so a document that looks fine but extracted to nothing shows up
+    as an empty list rather than as a page that renders correctly and returns no answers.
+
+    Permission is checked on the parent document, not the chunk, because classification is a
+    document-level property — the same rule `visible_documents_clause()` applies in retrieval.
+    """
+    doc = repo.get_by_id(document_id)
+    if not doc or not _can_view(doc, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found.",
+        )
+
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
+
+    q = db.query(DocumentChunkORM).filter(DocumentChunkORM.document_id == document_id)
+    total = q.count()
+    rows = (
+        q.order_by(DocumentChunkORM.chunk_index)
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+    return {
+        "document_id": str(document_id),
+        "filename": doc.filename,
+        "status": doc.status.value,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "chunks": [
+            {
+                "chunk_id": str(c.chunk_id),
+                "chunk_index": c.chunk_index,
+                "page_number": c.page_number,
+                "section_heading": c.section_heading,
+                "is_table": c.is_table,
+                "char_count": c.char_count,
+                # Whether this passage is actually retrievable. A chunk without a vector is in
+                # the table but invisible to search, and saying so here is the difference
+                # between "we have no answer" and "we never indexed it".
+                "embedded": c.embedding is not None,
+                "text": c.text,
+            }
+            for c in rows
+        ],
+    }
+
+
 @router.delete(
     "/{document_id}",
-    summary="Permanently delete a document and erase its bytes (owner or ADMIN only)",
+    summary="Delete a document (owner or ADMIN). Reversible unless ?permanent=true",
 )
 async def delete_document(
     document_id: uuid.UUID,
+    permanent: bool = False,
     repo: DocumentRepository = Depends(get_document_repository),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -433,6 +504,40 @@ async def delete_document(
 
     if doc.purged_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document with ID {document_id} not found.")
+
+    # Erasing the bytes is a separate, stronger act than removing a document from the knowledge
+    # base, and only an administrator may do it. An uploader deleting their own upload gets the
+    # reversible kind: the document leaves search immediately, and the bytes survive long enough
+    # for the mistake to be noticed — someone may have cited it in a submission last week.
+    if permanent and current_user.role != UserRole.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="FORBIDDEN: Only an ADMIN may permanently erase a document's bytes. "
+                   "Delete without ?permanent to remove it from search reversibly.",
+        )
+
+    if not permanent:
+        try:
+            AuditService.log_event(
+                db=db,
+                document_id=document_id,
+                event_type=AuditEventType.DOCUMENT_DELETED,
+                details={
+                    "deleted_by": str(current_user.user_id),
+                    "permanent": False,
+                    "filename": doc.filename,
+                },
+                user_id=str(current_user.user_id),
+            )
+        except Exception:
+            logger.exception("AUDIT WRITE FAILED: doc_id=%s event=DOCUMENT_DELETED", document_id)
+
+        if not repo.soft_delete(document_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found.",
+            )
+        return {"document_id": document_id, "status": "DELETED", "permanent": False}
 
     # Audit before destroying anything — this is the only surviving record of what the
     # erased bytes were, so it must not depend on the delete succeeding.
@@ -530,8 +635,20 @@ async def search_documents(
     "/test-preset/{preset_name}",
     summary="Get binary fixture for testing presets",
 )
-async def get_test_preset(preset_name: str):
-    """Returns actual binary test PDF fixtures for the interactive studio."""
+async def get_test_preset(
+    preset_name: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Returns binary test PDF fixtures for the interactive studio.
+
+    Authenticated like every other route under `/documents/*`. It previously was not, which made
+    it the one exception to that rule and an unauthenticated file-server for fixtures named
+    `disguised_malware.pdf` and `threat_exploit_sample.pdf`. They are crafted to trip the
+    validator rather than to do harm, and `preset_name` is matched against a fixed map so there
+    is no path traversal — but an unauthenticated endpoint handing out files called malware is
+    not something to leave on a box with a public IP, and the documented claim that all of
+    `/documents/*` needs a bearer token was simply false while it stood.
+    """
     from pathlib import Path
 
     from fastapi.responses import Response

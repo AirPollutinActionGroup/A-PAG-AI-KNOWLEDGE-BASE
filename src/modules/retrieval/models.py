@@ -58,6 +58,21 @@ class RetrievedChunk(BaseModel):
     # happens to rank first. None when the semantic arm did not return this passage.
     similarity: float | None = None
 
+    # The cross-encoder's score for (query, this passage), and where fusion had placed it before
+    # reranking. Both are None when reranking is off or unavailable.
+    #
+    # `rerank_score` is an unbounded logit on the model's own scale: like `score`, it orders and
+    # does not measure. It is emphatically not a similarity, and the grounding gate does not read
+    # it — "this passage beats that one" and "the corpus contains an answer" are different
+    # questions, and only the second decides whether to say "I don't know".
+    #
+    # `fusion_rank` is kept because the movement is the interesting part. On this corpus the
+    # passage that best answered a question was routinely 9th, 16th or 24th by fusion — outside
+    # any top-8 — and showing "was #16" is how someone can see the reranker earning its latency
+    # rather than take it on trust.
+    rerank_score: float | None = None
+    fusion_rank: int | None = None
+
 
 class TokenUsage(BaseModel):
     """What this query cost the embedding model, and what a downstream LLM would be handed.

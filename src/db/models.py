@@ -89,6 +89,11 @@ class Document(Base):
     )
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # NATIVE, OCR or MIXED — how this document's text was obtained. Nullable because documents
+    # ingested before the OCR fallback existed have no recorded answer, and writing NATIVE
+    # across them would assert a fact nobody measured.
+    extraction_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     # Groups documents submitted together in one multi-file upload request
     upload_batch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
 
@@ -175,6 +180,10 @@ class Document(Base):
             "classification IS NULL OR classification IN ('PUBLIC', 'RESTRICTED')",
             name="chk_documents_classification",
         ),
+        CheckConstraint(
+            "extraction_method IS NULL OR extraction_method IN ('NATIVE', 'OCR', 'MIXED')",
+            name="chk_documents_extraction_method",
+        ),
         Index(
             "uq_documents_active_sha256",
             "sha256",
@@ -232,6 +241,11 @@ class DocumentChunk(Base):
 
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    # The parent document's title, denormalised so the BM25 index can match on it: a bm25 index
+    # covers one table, and without this you could not ask for a document by name. Stale if a
+    # document is ever renamed without re-chunking — see migration 0018.
+    document_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Nullable because a chunk exists before it is embedded — chunking and embedding are separate
     # stages precisely so a model change is a re-embed, not a re-chunk.
     #
@@ -280,6 +294,24 @@ class DocumentChunk(Base):
             postgresql_with={"m": 16, "ef_construction": 64},
         ),
         Index("idx_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
+        # BM25 (pg_search / ParadeDB), migration 0016. Declared here as well as in the migration
+        # so `alembic check` stays meaningful — it caught this index's absence from the model the
+        # moment it was created. `key_field` is how pg_search keys the scores it returns; both
+        # searchable fields are indexed because a chunk's heading is signal its body often does
+        # not repeat.
+        Index(
+            "idx_document_chunks_bm25",
+            "chunk_id",
+            "text",
+            "section_heading",
+            # So a question can name the document instead of quoting from it.
+            "document_title",
+            # Indexed so a scoped question can be filtered inside the pg_search query rather
+            # than beside it — see migration 0019 for why that distinction is load-bearing.
+            "document_id",
+            postgresql_using="bm25",
+            postgresql_with={"key_field": "'chunk_id'"},
+        ),
     )
 
 

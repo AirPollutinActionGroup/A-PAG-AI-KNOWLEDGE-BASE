@@ -39,9 +39,15 @@ def _get_postgres_url() -> tuple[str, any]:
         except ImportError:
             from testcontainers.postgres import PostgresContainer
 
-        # pgvector image, not plain postgres: the ORM declares a vector column, so create_all()
-        # fails against a server without the extension. Must match the compose files.
-        container = PostgresContainer("pgvector/pgvector:pg16")
+        # ParadeDB, not plain postgres or the pgvector image: this schema needs *both* the
+        # vector extension (migration 0014) and pg_search for BM25 (0016). ParadeDB ships both on
+        # the same Postgres 16.15 the pgvector image ran, so this is not a version change.
+        #
+        # A fresh container initialises its own data directory, so ParadeDB's entrypoint puts
+        # pg_search into shared_preload_libraries for us. docker-compose has to pass that as an
+        # explicit flag instead, because its volume was initialised by the older image and that
+        # init never re-runs.
+        container = PostgresContainer("paradedb/paradedb:0.25.10-pg16")
         container.start()
         db_url = container.get_connection_url()
         return db_url, container
@@ -76,7 +82,7 @@ def postgres_engine():
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     except Exception as e:
         pytest.skip(
-            f"Could not enable the pgvector extension ({e}). The server must be a pgvector "
+            f"Could not enable the pgvector extension ({e}). The server must be a ParadeDB "
             f"build — see docker-compose.yml."
         )
 

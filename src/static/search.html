@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>A-PAG Knowledge Base</title>
+<link rel="icon" href="/assets/apag-logo.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -65,13 +66,18 @@ button { cursor: pointer; background: none; border: 0; }
 #login { display: grid; place-items: center; min-height: 100dvh; padding: 24px; }
 .login-card { width: 100%; max-width: 21.5rem; }
 .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 26px; }
+/* The real A-PAG mark. It is drawn for a white field — black wordmark, yellow block behind the
+   A — so in dark mode it keeps its own white chip rather than being inverted or knocked out.
+   Recolouring someone's logo to suit a theme is a good way to ship a wrong one. */
 .mark {
-  display: grid; place-items: center; width: 34px; height: 34px; flex: none;
-  background: var(--yellow); color: #14130F; border-radius: 8px;
-  font: 700 14px/1 "Archivo", sans-serif;
+  width: 36px; height: 36px; flex: none; border-radius: 8px;
+  background: #FFFFFF; padding: 2px; object-fit: contain;
+  box-shadow: 0 0 0 1px var(--line);
 }
-.brand b { font: 600 16px/1.2 "Archivo", sans-serif; display: block; }
+.brand b { font: 600 16px/1.2 "Archivo", sans-serif; display: block; letter-spacing: -.01em; }
 .brand span { font-size: 12.5px; color: var(--ink-faint); }
+.brand-lg .mark { width: 46px; height: 46px; }
+.brand-lg b { font-size: 18px; }
 .login-card h1 { font: 600 21px/1.25 "Archivo", sans-serif; margin: 0 0 6px; }
 .login-card > p { margin: 0 0 20px; font-size: 13.5px; color: var(--ink-faint); }
 .login-card label { display: block; font-size: 12.5px; color: var(--ink-soft); margin: 13px 0 5px; }
@@ -107,6 +113,16 @@ button { cursor: pointer; background: none; border: 0; }
 .rail-btn:hover { border-color: var(--yellow-deep); }
 .rail-btn .ic { font-size: 15px; line-height: 1; }
 
+.rail-sel {
+  display: flex; flex-direction: column; gap: 4px; padding: 2px 2px 0;
+  font: 400 11px/1.4 "IBM Plex Mono", monospace; color: var(--ink-faint);
+}
+.rail-sel select {
+  width: 100%; padding: 6px 8px; font-size: 12.5px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--paper); color: var(--ink);
+}
+.rail-sel select:focus { border-color: var(--yellow-deep); outline: 0; }
+
 .chats { flex: 1; overflow-y: auto; padding: 6px 8px 12px; min-height: 0; }
 .chats h2 {
   font: 500 10.5px/1 "IBM Plex Mono", monospace; letter-spacing: .1em;
@@ -135,6 +151,119 @@ button { cursor: pointer; background: none; border: 0; }
 .rail-foot .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mini { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 11.5px; }
 .mini:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+/* ---- a written answer, and what the boundary did to produce it */
+.answer { font-size: 15.5px; line-height: 1.65; white-space: pre-wrap; margin-bottom: 14px; }
+/* Citation markers and boundary placeholders are both "this stands for something else", so
+   they read as one family -- but the placeholder is a warning and the marker is a link, so
+   only one of them carries the accent. */
+.answer .mk {
+  font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--ink);
+  background: var(--yellow); border-radius: 4px; padding: 2px 4px; vertical-align: 1px;
+}
+.answer .masked {
+  font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 4px; padding: 1px 4px; vertical-align: 1px;
+}
+.masked-list { display: flex; flex-direction: column; gap: 5px; margin-top: 9px; }
+.masked-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12px; }
+.masked-kind {
+  font: 400 10px/1.4 "IBM Plex Mono", monospace; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--ink-faint); min-width: 4.5rem;
+}
+.masked-val {
+  font: 500 12px/1.5 "IBM Plex Mono", monospace; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 4px; padding: 1px 6px;
+}
+.masked-arrow { color: var(--ink-faint); }
+.masked-ph {
+  font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+}
+.cost { font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint); }
+
+/* ---- documents, in the rail and full-screen
+   The rail list is the index; the panel is the document. Both reuse the conversation's own
+   shapes (.hit for a passage, .mini for a control) so a document does not arrive looking like a
+   different application. */
+.rail-sec {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 9px 9px 7px; border-radius: 7px; text-align: left;
+  font: 500 10.5px/1 "IBM Plex Mono", monospace; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.rail-sec:hover { background: var(--surface-2); color: var(--ink); }
+.rail-sec .caret { display: inline-block; transition: transform .15s; font-size: 13px; }
+.rail-sec[aria-expanded="true"] .caret { transform: rotate(90deg); }
+.rail-sec .count { margin-left: auto; letter-spacing: 0; }
+.doc-filter {
+  width: calc(100% - 12px); margin: 0 6px 6px; padding: 6px 9px; font-size: 12.5px;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--paper);
+  color: var(--ink); outline: 0;
+}
+.doc-filter:focus { border-color: var(--yellow-deep); }
+.doc-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 9px; border-radius: 7px; font-size: 12.5px; color: var(--ink-soft);
+  text-align: left; border-left: 2px solid transparent;
+}
+.doc-item:hover { background: var(--surface-2); color: var(--ink); }
+.doc-item.active {
+  background: var(--surface-2); color: var(--ink);
+  border-left-color: var(--yellow); font-weight: 500;
+}
+.doc-item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Four states, and the difference that matters is "will this answer a question". Colour never
+   carries it alone — every dot's parent row has a title saying the same thing in words. */
+.dot-st { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ink-faint); }
+.dot-st.live { background: var(--ok); }
+.dot-st.bad { background: var(--danger); }
+.dot-st.off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-faint); }
+.rail-note { font-size: 12px; color: var(--ink-faint); padding: 3px 9px 10px; }
+
+/* ---- the document panel */
+.docview { max-width: 54rem; margin: 0 auto; padding: 22px 20px 48px; }
+.dv-head { display: flex; align-items: flex-start; gap: 12px; }
+.dv-titles { flex: 1; min-width: 0; }
+.dv-actions { display: flex; gap: 6px; flex: none; }
+.mini.danger { color: var(--danger); border-color: var(--line); }
+.mini.danger:hover { border-color: var(--danger); }
+.mini.danger.armed { background: var(--danger-bg); border-color: var(--danger); font-weight: 500; }
+.dv-head h1 {
+  flex: 1; margin: 0; font: 600 19px/1.3 "Archivo", sans-serif;
+  letter-spacing: -.01em; overflow-wrap: anywhere;
+}
+.dv-path {
+  font: 400 11.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint);
+  margin: 4px 0 0; overflow-wrap: anywhere;
+}
+.dv-meta {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 12px 0 16px;
+  font: 400 11.5px/1.6 "IBM Plex Mono", monospace; color: var(--ink-faint);
+}
+.dv-meta b { color: var(--ink-soft); font-weight: 500; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+.tab {
+  padding: 8px 12px; font-size: 13px; color: var(--ink-faint);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab:hover { color: var(--ink); }
+.tab.on { color: var(--ink); border-bottom-color: var(--yellow); font-weight: 500; }
+.frame {
+  display: block; width: 100%; height: 74vh; min-height: 24rem;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+}
+.dl {
+  display: inline-block; margin-top: 12px; text-decoration: none;
+  border: 1px solid var(--line); border-radius: 7px; padding: 7px 12px;
+  font-size: 13px; color: var(--ink);
+}
+.dl:hover { border-color: var(--yellow-deep); }
+.tag {
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+  font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-faint);
+}
+.tag.warn { color: var(--danger); border-color: var(--danger); }
 
 /* ---- conversation column */
 .column { display: grid; grid-template-rows: 1fr auto; min-height: 0; }
@@ -240,6 +369,15 @@ details.detail > summary:hover { color: var(--ink); }
 
 /* ---- composer */
 .composer-wrap { border-top: 1px solid var(--line); background: var(--surface); }
+.scope-bar {
+  max-width: 47rem; margin: 0 auto 7px; display: flex; align-items: center; gap: 8px;
+  padding: 6px 11px; border: 1px solid var(--yellow-deep); border-radius: 8px;
+  background: var(--surface-2); font-size: 12.5px;
+}
+.scope-label { color: var(--ink-faint); font: 400 11px/1.4 "IBM Plex Mono", monospace; }
+.scope-name { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-clear { color: var(--ink-faint); font-size: 17px; line-height: 1; padding: 0 3px; }
+.scope-clear:hover { color: var(--ink); }
 .composer { max-width: 47rem; margin: 0 auto; padding: 13px 20px 15px; }
 .field {
   display: flex; gap: 8px; align-items: flex-end;
@@ -257,6 +395,8 @@ details.detail > summary:hover { color: var(--ink); }
   display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
   margin-top: 8px; font: 400 11.5px/1.4 "IBM Plex Mono", monospace; color: var(--ink-faint);
 }
+.tog { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.tog input { accent-color: var(--yellow-deep); margin: 0; }
 .hint select { border: 1px solid var(--line); border-radius: 6px; padding: 2px 5px; background: var(--paper); color: var(--ink); }
 .grow { flex: 1; }
 
@@ -280,8 +420,9 @@ details.detail > summary:hover { color: var(--ink); }
 <!-- =============================================== sign in: its own full view -->
 <section id="login">
   <form class="login-card" id="loginForm">
-    <div class="brand">
-      <span class="mark">A</span>
+    <div class="brand brand-lg">
+      <img class="mark" src="/assets/apag-logo.jpg"
+           alt="A-PAG, Air Pollution Action Group" width="36" height="36">
       <span><b>A&#8209;PAG</b><span>Knowledge Base</span></span>
     </div>
     <h1>Sign in</h1>
@@ -300,13 +441,28 @@ details.detail > summary:hover { color: var(--ink); }
   <aside class="rail">
     <div class="rail-top">
       <div class="brand">
-        <span class="mark">A</span>
+        <img class="mark" src="/assets/apag-logo.jpg"
+             alt="A-PAG, Air Pollution Action Group" width="36" height="36">
         <span><b>A&#8209;PAG</b><span>Knowledge Base</span></span>
       </div>
       <button class="rail-btn" id="newChat"><span class="ic">+</span> New chat</button>
-      <button class="rail-btn" id="uploadBtn"><span class="ic">&#8593;</span> Add a document</button>
+      <button class="rail-btn" id="uploadBtn"><span class="ic">&#8593;</span> Add documents</button>
+      <button class="rail-btn" id="folderBtn"><span class="ic">&#128193;</span> Add a folder</button>
+      <!-- Deliberately beside the upload buttons and never pre-decided for the uploader. The
+           boundary gateway reads this to decide whether a document may be sent to an external
+           model, so a value nobody chose is the one thing this control must not produce. -->
+      <label class="rail-sel" for="uploadTier">
+        <span>Uploads are</span>
+        <select id="uploadTier">
+          <option value="PUBLIC" selected>Public &mdash; anyone here</option>
+          <option value="RESTRICTED">Restricted &mdash; only me</option>
+        </select>
+      </label>
     </div>
-    <div class="chats" id="chats"></div>
+    <div class="chats">
+      <div id="docsSec"></div>
+      <div id="chats"></div>
+    </div>
     <div class="rail-foot">
       <span class="who" id="whoami"></span>
       <button class="mini" id="themeBtn">Theme</button>
@@ -328,9 +484,18 @@ details.detail > summary:hover { color: var(--ink); }
         <div class="seeds" id="seeds"></div>
       </section>
       <div class="thread" id="thread"></div>
+      <section class="docview" id="docview" hidden></section>
     </div>
 
-    <div class="composer-wrap">
+    <div class="composer-wrap" id="composerWrap">
+      <!-- Shown only while a question is scoped to one document. Visible rather than implicit,
+           because "why is it ignoring the rest of the corpus" is a worse surprise than an
+           extra line of chrome. -->
+      <div class="scope-bar" id="scopeBar" hidden>
+        <span class="scope-label">Asking only about</span>
+        <span class="scope-name" id="scopeName"></span>
+        <button class="scope-clear" id="scopeClear" title="Search all documents again">&times;</button>
+      </div>
       <div class="composer">
         <div class="field">
           <button class="attach" id="attachBtn" title="Add a document">+</button>
@@ -340,6 +505,7 @@ details.detail > summary:hover { color: var(--ink); }
         <div class="hint">
           <span>Enter to send &middot; Shift+Enter for a new line</span>
           <span class="grow"></span>
+          <label class="tog"><input type="checkbox" id="answerMode" checked> write an answer</label>
           <label for="mode">match
             <select id="mode">
               <option value="hybrid" selected>hybrid</option>
@@ -356,7 +522,10 @@ details.detail > summary:hover { color: var(--ink); }
   </div>
 </div>
 
-<input type="file" id="file" accept=".pdf,.docx,.xlsx,.pptx" hidden>
+<input type="file" id="file" accept=".pdf,.docx,.xlsx,.pptx" multiple hidden>
+<!-- webkitdirectory is what lets a browser hand over a whole folder. It is non-standard but
+     supported everywhere this will run, and there is no standard alternative. -->
+<input type="file" id="folder" webkitdirectory directory multiple hidden>
 
 <script>
 (() => {
@@ -405,6 +574,7 @@ const saveChats = () => store.set(CHATS_KEY, JSON.stringify(chats.slice(0, 50)))
 const active = () => chats.find((c) => c.id === activeId);
 
 function newChat() {
+  if (openDocId) closeDocView();
   activeId = null;
   $("thread").replaceChildren();
   $("welcome").hidden = false;
@@ -444,21 +614,551 @@ function paintChats() {
 }
 
 function openChat(id) {
+  if (openDocId) closeDocView();
   activeId = id;
   const chat = active();
+  if (!chat) return newChat();
+
   $("welcome").hidden = true;
   $("thread").replaceChildren();
-  chat.turns.forEach((t) => renderTurn(t.q, t.data));
+
+  chat.turns.forEach((t) => {
+    if (t.kind === "upload") renderUploadTurn(t);
+    else renderTurn(t.q, t.data);
+  });
+
+  /* A conversation with nothing to replay must still show something. This produced a genuinely
+     blank page: adding a document created a conversation but recorded no turn, so reopening it
+     hid the welcome screen and rendered an empty thread. Uploads now record a turn, and this
+     covers the remaining case — a question interrupted before its answer arrived. */
+  if (!chat.turns.length) {
+    $("thread").append(notice(
+      "Nothing saved in this conversation",
+      "It was started but never finished — most likely a question that was interrupted " +
+      "before the answer came back. Ask again below."
+    ));
+  }
+
   paintChats();
   $("scroll").scrollTop = $("scroll").scrollHeight;
 }
 
+/* Replays a finished upload from what was saved. Deliberately a static summary rather than the
+   live card: the polling that drove it belongs to the moment it ran, and resurrecting it on
+   reopen would re-poll documents that settled hours ago. */
+function renderUploadTurn(turn) {
+  const wrap = el("section", "turn");
+  const box = el("div", "upload");
+  box.append(el("div", "name", turn.title));
+  if (turn.dropped) {
+    box.append(el("div", "cite", `${turn.dropped} other file(s) in the folder were skipped`));
+  }
+  box.append(el("div", "thinking", turn.summary || "Added to the knowledge base."));
+
+  if (turn.names?.length) {
+    const list = el("div", "steps");
+    turn.names.forEach((n) => {
+      const chip = el("span", "step", n.length > 22 ? n.slice(0, 21) + "…" : n);
+      chip.title = n;
+      list.append(chip);
+    });
+    box.append(list);
+  }
+
+  wrap.append(box);
+  $("thread").append(wrap);
+}
+
+// ------------------------------------------------------------- documents
+/* The rail lists what is in the knowledge base; clicking one opens it in place.
+
+   Two things are shown, and the second is the one that matters. "Original file" is the file
+   itself, which a browser can only render for PDF -- a .docx, .xlsx or .pptx is a zip, so those
+   get a download instead. "Passages" is what the search index actually holds, and that is the
+   honest view: a document can render perfectly and still answer nothing, because extraction
+   found no text in it. An empty passage list says exactly that, where a rendered page would not.
+
+   The file cannot be put in an iframe by URL: every document endpoint requires a bearer token
+   and an iframe sends no headers. So it is fetched, held as a blob, and shown from an object
+   URL -- which must then be revoked, or a session of browsing leaks the whole corpus into
+   memory. */
+
+let docs = [], docTotal = 0, docFetched = 0, docDupes = 0;
+let docsOpen = false, docsLoading = false;
+let openDocId = null, blobUrl = null, docTab = "passages";
+
+const idOf = (d) => d.id || d.document_id;
+const baseName = (path) => String(path).split("/").pop();
+const folderOf = (path) => {
+  const i = String(path).lastIndexOf("/");
+  return i === -1 ? "" : String(path).slice(0, i);
+};
+
+const fmtSize = (n) => {
+  if (n === null || n === undefined) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+};
+
+/* Grouped by what the reader can do with the document, not by pipeline stage: searchable,
+   stopped, stored-but-never-searchable, or still moving. */
+const ST_FAILED = new Set(["REJECTED", "EXTRACTION_FAILED", "NORMALIZATION_FAILED",
+                           "CHUNKING_FAILED", "EMBEDDING_FAILED"]);
+const ST_INERT = new Set(["DUPLICATE", "SKIPPED_UNSUPPORTED_LANGUAGE", "ARCHIVED", "SUPERSEDED"]);
+
+const readable = (status) => String(status).toLowerCase().replace(/_/g, " ");
+
+function dotFor(status) {
+  if (status === "LIVE") return ["live", "Searchable"];
+  if (ST_FAILED.has(status)) return ["bad", "Stopped — " + readable(status)];
+  if (ST_INERT.has(status)) return ["off", "Stored, but not searchable — " + readable(status)];
+  return ["", "Still being processed — " + readable(status)];
+}
+
+/* Built once and reused, rather than recreated on every keystroke: re-appending the element the
+   user is typing into moves it in the DOM and drops the caret. */
+const docFilterBox = el("input", "doc-filter");
+docFilterBox.type = "search";
+docFilterBox.placeholder = "Filter by name…";
+docFilterBox.setAttribute("aria-label", "Filter documents by name");
+docFilterBox.oninput = () => paintDocList();
+
+async function loadDocs() {
+  docsLoading = true;
+  paintDocs();
+  try {
+    const r = await fetch("/api/v1/documents?limit=200", { headers: authed() });
+    if (r.status === 401) { sessionExpired(); return; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    docsError = "";
+    const all = data.documents || [];
+    docFetched = all.length;
+    docTotal = data.total === undefined ? all.length : data.total;
+
+    /* A DUPLICATE row is the record of a re-upload that was refused, not a document — its
+       bytes were already promoted under the original. Listing them shows every file twice
+       (re-running a folder ingest produced 39 of them against 39 real documents), so they are
+       counted out of the way rather than shown. */
+    docDupes = all.filter((d) => d.status === "DUPLICATE").length;
+    docs = all.filter((d) => d.status !== "DUPLICATE");
+  } catch (e) {
+    docs = []; docTotal = 0; docFetched = 0; docDupes = 0;
+    docsError = e.message;
+  } finally {
+    docsLoading = false;
+    paintDocs();
+  }
+}
+
+let docsError = "";
+
+function paintDocs() {
+  const box = $("docsSec");
+  if (!box) return;
+  box.replaceChildren();
+
+  const head = el("button", "rail-sec");
+  head.setAttribute("aria-expanded", String(docsOpen));
+  head.append(el("span", "caret", "›"), el("span", null, "Documents"));
+  if (docs.length) head.append(el("span", "count", String(docs.length)));
+  head.onclick = () => {
+    docsOpen = !docsOpen;
+    if (docsOpen && !docs.length && !docsLoading) loadDocs();
+    else paintDocs();
+  };
+  box.append(head);
+  if (!docsOpen) return;
+
+  if (docsLoading) { box.append(el("div", "rail-note", "Loading…")); return; }
+  box.append(docFilterBox);
+  const list = el("div", null);
+  list.id = "docList";
+  box.append(list);
+  paintDocList();
+}
+
+function paintDocList() {
+  const list = $("docList");
+  if (!list) return;
+  list.replaceChildren();
+
+  const q = docFilterBox.value.trim().toLowerCase();
+  const shown = q ? docs.filter((d) => String(d.filename).toLowerCase().includes(q)) : docs;
+
+  if (!shown.length) {
+    list.append(el("div", "rail-note",
+      docsError ? "Could not load documents: " + docsError
+      : docs.length ? "Nothing matches that."
+      : "No documents yet — use “Add documents” above."));
+    return;
+  }
+
+  shown.forEach((d) => {
+    const pair = dotFor(d.status);
+    const row = el("button", "doc-item" + (idOf(d) === openDocId ? " active" : ""));
+    row.title = d.filename + "\n" + pair[1];
+    row.append(el("span", "dot-st " + pair[0]), el("span", "nm", baseName(d.filename)));
+    row.onclick = () => openDoc(idOf(d));
+    list.append(row);
+  });
+
+  if (docTotal > docFetched) {
+    list.append(el("div", "rail-note",
+      "Showing the first " + docFetched + " of " + docTotal + "."));
+  }
+  if (docDupes) {
+    const note = el("div", "rail-note",
+      docDupes + " re-upload" + (docDupes === 1 ? "" : "s") + " of files already here, hidden.");
+    note.title = "These were refused as duplicates at upload. The original is in the list above.";
+    list.append(note);
+  }
+}
+
+function refreshDocs() {
+  if (docsOpen) loadDocs();
+}
+
+/* The upload tier, read at send time rather than captured earlier, so changing the selector
+   between picking files and the request going out does what the person expects. */
+const tier = () => ($("uploadTier") && $("uploadTier").value) || "PUBLIC";
+
+/* Two clicks, no modal. A dialog for this is heavier than the action deserves, and the
+   second click carries the consequence in its own label — which is the part people read. */
+function confirmDelete(doc, button) {
+  if (button.dataset.armed !== "1") {
+    button.dataset.armed = "1";
+    button.textContent = "Really delete?";
+    button.classList.add("armed");
+    setTimeout(() => {
+      if (button.dataset.armed === "1") {
+        button.dataset.armed = "";
+        button.textContent = "Delete";
+        button.classList.remove("armed");
+      }
+    }, 4000);
+    return;
+  }
+  doDelete(doc, button);
+}
+
+async function doDelete(doc, button) {
+  button.disabled = true;
+  button.textContent = "Deleting\u2026";
+  try {
+    const r = await fetch(`/api/v1/documents/${idOf(doc)}`, {
+      method: "DELETE", headers: authed(),
+    });
+    if (r.status === 401) return sessionExpired();
+    if (!r.ok) {
+      let why = `Delete failed (${r.status}).`;
+      try { const j = await r.json(); if (j.detail) why = String(j.detail); } catch { /* not json */ }
+      button.disabled = false;
+      button.textContent = "Delete";
+      button.classList.remove("armed");
+      $("docview").prepend(notice("Could not delete", " " + why, true));
+      return;
+    }
+    /* Gone from search immediately, bytes retained. Saying both is the point: "deleted" alone
+       would leave someone unsure whether a document they cited last week still exists. */
+    docs = docs.filter((d) => idOf(d) !== idOf(doc));
+    docTotal = Math.max(0, docTotal - 1);
+    closeDocView();
+    paintDocs();
+    $("thread").prepend(notice(
+      "Removed from the knowledge base",
+      ` \u201c${baseName(doc.filename)}\u201d will no longer appear in search or answers. `
+      + `The file itself is kept \u2014 ask an administrator if it needs to be erased entirely.`));
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = "Delete";
+    $("docview").prepend(notice("Could not delete", " " + e.message, true));
+  }
+}
+
+/* The document a question is restricted to, or null for the whole corpus.
+
+   Explicit rather than inferred from the wording. "Is there confidential data in this
+   document" is a question about one document, and guessing which one from a pronoun will
+   sometimes guess wrong and answer confidently from everything — which is what used to
+   happen. */
+let scopeDoc = null;
+
+function setScope(doc) {
+  scopeDoc = doc;
+  const bar = $("scopeBar");
+  if (!doc) { bar.hidden = true; return; }
+  $("scopeName").textContent = baseName(doc.filename);
+  bar.hidden = false;
+}
+
+function releaseBlob() {
+  if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
+}
+
+function showDocView() {
+  $("welcome").hidden = true;
+  $("thread").hidden = true;
+  $("docview").hidden = false;
+  $("composerWrap").hidden = true;
+  $("app").classList.remove("open");
+  $("scroll").scrollTop = 0;
+}
+
+/* Called from the rail as well as from the panel's own button, so starting or reopening a
+   conversation while reading a document puts the conversation back rather than leaving the
+   thread hidden underneath. */
+function closeDocView() {
+  releaseBlob();
+  openDocId = null;
+  $("docview").hidden = true;
+  $("docview").replaceChildren();
+  $("thread").hidden = false;
+  $("composerWrap").hidden = false;
+  paintDocList();
+}
+
+function closeDoc() {
+  closeDocView();
+  if (activeId) openChat(activeId); else newChat();
+}
+
+function openDoc(id) {
+  releaseBlob();
+  openDocId = id;
+  docTab = "passages";
+  paintDocList();
+  showDocView();
+
+  const doc = docs.find((d) => idOf(d) === id);
+  if (!doc) {
+    $("docview").replaceChildren(notice("Not found",
+      " That document is no longer in the list. Close and reopen Documents to refresh it.", true));
+    return;
+  }
+  renderDoc(doc);
+}
+
+const unitWord = (mime) => {
+  const m = mime || "";
+  if (m.includes("presentation")) return "slides";
+  if (m.includes("sheet")) return "sheets";
+  return "pages";
+};
+
+function renderDoc(doc) {
+  const wrap = $("docview");
+  wrap.replaceChildren();
+
+  const head = el("div", "dv-head");
+  const titles = el("div", "dv-titles");
+  titles.append(el("h1", null, doc.title || baseName(doc.filename)));
+  const folder = folderOf(doc.filename);
+  if (folder) titles.append(el("p", "dv-path", folder));
+  const back = el("button", "mini", "← Back to chat");
+  back.onclick = closeDoc;
+
+  const actions = el("div", "dv-actions");
+  actions.append(back);
+
+  /* Offered to the uploader and to administrators — the same rule the endpoint enforces. The
+     server checks again regardless; hiding it here only avoids presenting an action that would
+     be refused. */
+  /* The fix for "I'm asking about *this* document, why are you using others?" — made a button
+     rather than something to phrase correctly, because a pronoun the system has to resolve is
+     a pronoun it will sometimes resolve wrongly, and answer confidently anyway. */
+  const askThis = el("button", "mini", "Ask about this");
+  askThis.title = "Restrict questions to this document until you clear it.";
+  askThis.onclick = () => {
+    setScope(doc);
+    closeDoc();
+    $("q").focus();
+  };
+  actions.append(askThis);
+
+  const mine = me && doc.owner_id && me.user_id === doc.owner_id;
+  const admin = me && me.role === "ADMIN";
+  if (mine || admin) {
+    const del = el("button", "mini danger", "Delete");
+    del.title = "Remove this document from the knowledge base. Recoverable — the file is kept.";
+    del.onclick = () => confirmDelete(doc, del);
+    actions.append(del);
+  }
+
+  head.append(titles, actions);
+  wrap.append(head);
+
+  const meta = el("div", "dv-meta");
+  const bit = (k, v) => {
+    const span = el("span", null, k + " ");
+    span.append(el("b", null, String(v)));
+    meta.append(span);
+  };
+  bit("state", doc.status);
+  if (doc.extraction_method && doc.extraction_method !== "NATIVE") {
+    bit("read by", doc.extraction_method === "OCR" ? "OCR" : "OCR + text layer");
+  }
+  if (doc.page_count) bit(unitWord(doc.mime_type), doc.page_count);
+  if (doc.size) bit("size", fmtSize(doc.size));
+  if (doc.classification) bit("access", doc.classification);
+  if (doc.document_date) bit("dated", doc.document_date);
+  if (doc.uploaded_by) bit("added by", doc.uploaded_by);
+  wrap.append(meta);
+
+  /* Anything that is not LIVE cannot answer a question, and the reason belongs on the document
+     rather than in a status code the reader has to interpret. */
+  /* A passage read from pixels is worth flagging before someone quotes it in a submission.
+     OCR measures 0.99 confidence on this corpus and still drops word boundaries. */
+  if (doc.extraction_method === "OCR" || doc.extraction_method === "MIXED") {
+    wrap.append(notice(
+      doc.extraction_method === "OCR" ? "Read by OCR" : "Partly read by OCR",
+      " This file had no text layer — it is a scan — so the words were read from the " +
+      "page image. That is accurate but not perfect: check wording against the original before " +
+      "quoting it."));
+  }
+
+  if (doc.status !== "LIVE") {
+    wrap.append(notice(dotFor(doc.status)[1],
+      " " + (FAILED[doc.status] ||
+        "It is still moving through the pipeline — reopen Documents shortly to refresh."),
+      ST_FAILED.has(doc.status)));
+  }
+
+  const tabs = el("div", "tabs");
+  const panel = el("div", "dv-panel");
+  const mk = (key, label, render) => {
+    const t = el("button", "tab" + (docTab === key ? " on" : ""), label);
+    t.onclick = () => {
+      docTab = key;
+      Array.from(tabs.children).forEach((c) => c.classList.toggle("on", c === t));
+      render(doc, panel);
+    };
+    return t;
+  };
+  tabs.append(mk("passages", "Passages", showPassages),
+              mk("original", "Original file", showOriginal));
+  wrap.append(tabs, panel);
+
+  showPassages(doc, panel);
+}
+
+async function showPassages(doc, panel) {
+  panel.replaceChildren(el("div", "rail-note", "Loading the passages…"));
+  try {
+    const r = await fetch("/api/v1/documents/" + idOf(doc) + "/chunks?limit=500",
+                          { headers: authed() });
+    if (r.status === 401) { sessionExpired(panel); return; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    panel.replaceChildren();
+
+    if (!data.total) {
+      panel.append(notice("No passages",
+        " Nothing was extracted from this file, so search has nothing to match against. " +
+        "For a PDF that usually means it is a scan rather than typed text.", true));
+      return;
+    }
+
+    const missing = data.chunks.filter((c) => !c.embedded).length;
+    let line = data.total + " passage" + (data.total === 1 ? "" : "s");
+    if (data.total > data.chunks.length) line += ", showing the first " + data.chunks.length;
+    if (missing) line += " · " + missing + " not indexed for search";
+    panel.append(el("div", "dv-meta", line));
+    data.chunks.forEach((c) => panel.append(chunkCard(c)));
+  } catch (e) {
+    panel.replaceChildren(notice("Could not load the passages", " " + e.message, true));
+  }
+}
+
+/* Deliberately the same card the search results use, so a passage looks the same whether it was
+   found by a question or read here. */
+function chunkCard(c) {
+  const card = el("article", "hit");
+  const top = el("div", "hit-top");
+  top.append(el("span", "rank", String(c.chunk_index + 1)));
+  const bits = [];
+  if (c.page_number !== null && c.page_number !== undefined) bits.push("p." + c.page_number);
+  if (c.char_count) bits.push(c.char_count + " chars");
+  if (bits.length) top.append(el("span", "cite", bits.join(" · ")));
+  if (c.is_table) top.append(el("span", "tag", "table"));
+  if (!c.embedded) {
+    const t = el("span", "tag warn", "not indexed");
+    t.title = "This passage has no vector, so meaning-based search cannot return it.";
+    top.append(t);
+  }
+  card.append(top);
+  card.append(c.section_heading
+    ? el("div", "hit-head", c.section_heading)
+    : el("div", "hit-head none", "no section recorded"));
+  card.append(el("div", "hit-body" + (c.is_table ? " table" : ""), c.text));
+  return card;
+}
+
+async function showOriginal(doc, panel) {
+  panel.replaceChildren(el("div", "rail-note", "Loading the file…"));
+  releaseBlob();
+  try {
+    const r = await fetch("/api/v1/documents/" + idOf(doc) + "/download", { headers: authed() });
+    if (r.status === 401) { sessionExpired(panel); return; }
+    if (r.status === 409) {
+      panel.replaceChildren(notice("No file to show",
+        " This document never made it past validation, so no content was kept.", true));
+      return;
+    }
+    if (r.status === 410) {
+      panel.replaceChildren(notice("Deleted",
+        " This document was permanently deleted and its bytes were erased.", true));
+      return;
+    }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+
+    const blob = await r.blob();
+    blobUrl = URL.createObjectURL(blob);
+    panel.replaceChildren();
+
+    if (String(doc.mime_type || "").includes("pdf")) {
+      const f = el("iframe", "frame");
+      f.src = blobUrl;
+      f.title = baseName(doc.filename);
+      panel.append(f);
+      return;
+    }
+
+    /* Word, Excel and PowerPoint are zip archives -- no browser renders them, and an iframe
+       pointed at one shows an empty box or silently downloads. The passages tab is the in-app
+       view for these formats. */
+    panel.append(notice("This format opens in its own application",
+      " Word, Excel and PowerPoint files cannot be displayed by a browser. The Passages tab " +
+      "shows the text read out of it, which is what search actually uses."));
+    const a = el("a", "dl", "Download " + baseName(doc.filename));
+    a.href = blobUrl;
+    a.download = baseName(doc.filename);
+    panel.append(a);
+  } catch (e) {
+    panel.replaceChildren(notice("Could not load the file", " " + e.message, true));
+  }
+}
+
 // ------------------------------------------------------------------ auth
 const showLogin = () => { $("login").hidden = false; $("app").hidden = true; };
+/* Needed to decide whether to offer Delete. Fetched rather than inferred from the token,
+   because the token is a bearer credential and the UI should not be parsing claims out of it
+   to make authorisation decisions — the server re-checks anyway, so this only governs whether
+   a button that would be refused is shown at all. */
+let me = null;
+
+async function loadMe() {
+  try {
+    const r = await fetch("/api/v1/auth/me", { headers: authed() });
+    if (r.ok) me = await r.json();
+  } catch { /* the button simply stays hidden */ }
+}
+
 const showApp = (email) => {
   $("login").hidden = true; $("app").hidden = false;
   $("whoami").textContent = email || store.get("apag.email") || "";
-  paintChats(); $("q").focus();
+  paintChats(); paintDocs(); loadDocs(); loadMe(); $("q").focus();
 };
 
 $("loginForm").onsubmit = async (e) => {
@@ -537,6 +1237,16 @@ function passage(hit, rank) {
     return b;
   };
   arms.append(badge("meaning", hit.semantic_rank), badge("words", hit.lexical_rank));
+
+  /* Where the passage sat before the reranker read it against the question. Shown only when it
+     moved up past the cut, because that is the case worth seeing: without reranking this
+     passage would not have been returned at all. */
+  if (hit.fusion_rank != null && hit.fusion_rank > rank) {
+    const moved = el("span", "arm on", `moved up from #${hit.fusion_rank}`);
+    moved.title = "Hybrid search ranked this passage #" + hit.fusion_rank + ". The reranker read "
+                + "it against your question and moved it to #" + rank + ".";
+    arms.append(moved);
+  }
   top.append(arms);
   card.append(top);
 
@@ -557,6 +1267,23 @@ function kvRows(pairs) {
 }
 
 // ------------------------------------------------------------------ rendering a turn
+/* Brings the *question* to the top of the view rather than scrolling to the bottom of the
+   page. Scrolling to the bottom puts the end of the citation list on screen and the answer
+   above the fold, so the reader lands on the apparatus instead of the result. Keeping the
+   question in view also preserves the thing the answer is an answer to. */
+function scrollToTurn(turn) {
+  if (!turn) return;
+  const scroller = $("scroll");
+  requestAnimationFrame(() => {
+    const top = turn.offsetTop - 12;
+    if (typeof scroller.scrollTo === "function") {
+      scroller.scrollTo({ top, behavior: "smooth" });
+    } else {
+      scroller.scrollTop = top;
+    }
+  });
+}
+
 function renderTurn(question, data) {
   const turn = el("section", "turn");
   const user = el("div", "msg-user");
@@ -566,12 +1293,199 @@ function renderTurn(question, data) {
   const bot = el("div", "msg-bot");
   turn.append(bot);
   $("thread").append(turn);
+  // Held on the bot element so the answer handler can bring this turn into view once it has
+  // something to show, without having to find it again.
+  bot._turn = turn;
 
-  if (data) fillAnswer(bot, data);
+  if (data) {
+    fillAnswer(bot, data);
+  } else {
+    // Only reached when replaying a saved turn: the question was asked but the answer never
+    // came back. Saying so beats an empty space under the question.
+    bot.append(el("div", "thinking", "No answer was recorded for this question."));
+  }
   return bot;
 }
 
+/* Questions *about* the corpus rather than *from* it: "which document has a signature",
+   "how many files are there", "when was this uploaded". Retrieval searches passage text, so
+   these cannot work however the threshold is tuned — the answer is a property of a document,
+   not a sentence inside one. Worth naming separately, because "nothing is close enough" sends
+   someone looking for a document that is sitting right there. */
+const _ABOUT_CORPUS = /\b(which|what|how many|list|show me)\b[^?]*\b(document|file|pdf|report|upload)s?\b/i;
+
+function looksLikeCorpusQuestion(q) {
+  return _ABOUT_CORPUS.test(q || "");
+}
+
+function fillWrittenAnswer(bot, data) {
+  bot.replaceChildren();
+
+  if (!data.grounded) {
+    /* Same contract as search: withhold rather than flag. The model was never called, so there
+       is no answer to hedge — and a citation beside text that does not answer the question is
+       how someone quotes the wrong thing in a submission. */
+    /* The scope is named when it is the reason. "Nothing in the corpus covers this" and
+       "nothing in *this document* covers this" lead a reader to do different things. */
+    bot.append(notice(
+      "I don't have anything on that.",
+      data.excluded_restricted
+        ? " Every passage that matched is restricted, so none of it could be sent to the model."
+        : data.scopedTo
+          ? ` Nothing in \u201c${data.scopedTo}\u201d answers this. Clear the filter above the `
+            + `box to search every document.`
+          : looksLikeCorpusQuestion(data.question)
+            ? " That looks like a question about the documents rather than about what is "
+              + "inside them. This searches the text of every passage, so it can answer "
+              + "\u201cwhat are the FGD timelines\u201d but not \u201cwhich file is signed\u201d. "
+              + "Try asking for the content you are after, or open Documents to browse."
+            : " Nothing in the documents I can see is close enough to this question to answer it."
+    ));
+    return;
+  }
+
+  bot.append(answerText(data.answer));
+
+  const cites = data.citations || [];
+  if (cites.length) {
+    const src = disclosure("Sources", `${cites.length} cited`);
+    cites.forEach((c) => {
+      const card = el("article", "hit");
+      const top = el("div", "hit-top");
+      top.append(el("span", "rank", String(c.marker)), el("span", "src", baseName(c.filename)));
+      if (c.page_number != null) top.append(el("span", "cite", "p." + c.page_number));
+      card.append(top);
+      card.append(c.section_heading
+        ? el("div", "hit-head", c.section_heading)
+        : el("div", "hit-head none", "no section recorded"));
+      card.append(el("div", "hit-body", c.text));
+      src.body.append(card);
+    });
+    bot.append(src.root);
+  }
+
+  /* The worst error this system can make: a claim wearing a citation that points at nothing.
+     Surfaced rather than logged, because the reader is the one who would otherwise trust it. */
+  if (data.invalid_markers && data.invalid_markers.length) {
+    bot.append(notice(
+      "Some citations were removed",
+      ` The model referred to ${data.invalid_markers.length} passage(s) it was not given `
+      + `(${data.invalid_markers.join(", ")}). Those markers were stripped — treat any claim `
+      + `they were attached to as unsupported.`, true));
+  }
+
+  const b = data.boundary;
+  const masked = b && b.masked ? b.masked : [];
+  const maskedTotal = masked.reduce((n, m) => n + m.count, 0);
+
+  /* What crossed the boundary, and what did not. Shown on the answer rather than only in a
+     log, because the person reading it is the one who needs to know it was built from
+     redacted evidence. */
+  const pill = maskedTotal
+    ? `${maskedTotal} value${maskedTotal === 1 ? "" : "s"} masked`
+    : (b ? "nothing withheld" : "");
+  const det = disclosure("What happened", pill, maskedTotal > 0);
+
+  const rows = [];
+  if (b) {
+    rows.push(["sent to", b.model || "—"]);
+    rows.push(["request tier", b.tier]);
+    rows.push(["passages sent", `${b.passages_sent} of ${b.passages_considered}`]);
+    if (b.passages_withheld_restricted) {
+      rows.push(["withheld as restricted", `${b.passages_withheld_restricted} passage(s)`, true]);
+    }
+  }
+  rows.push(["tokens", `${(data.input_tokens || 0).toLocaleString()} in, `
+                     + `${(data.output_tokens || 0).toLocaleString()} out`]);
+  /* Inside the panel with everything else it belongs to, rather than floating under the
+     answer: the cost is part of what happened, not a footnote about it. */
+  if (data.cost_inr != null) {
+    rows.push(["cost", `\u20b9${Number(data.cost_inr).toFixed(3)}`]);
+  }
+  /* Shown when the search differed from the question, which happens for a short follow-up.
+     A search that quietly looked for something other than what was typed is worse than one
+     that found nothing. */
+  if (data.searched_for) rows.push(["searched for", data.searched_for, true]);
+  rows.push(["prompt caching", "not offered by Sarvam \u2014 every token billed again"]);
+  det.body.append(kvRows(rows));
+
+  if (maskedTotal) {
+    const head = el("div", "cite");
+    head.style.margin = "10px 0 6px";
+    head.textContent = "Removed before anything was sent — these never left this deployment:";
+    det.body.append(head);
+    /* The partials are the point. "1 phone number was masked" leaves a reader unable to tell
+       whether the system caught the number they care about; `011xxxxxx746` tells them which,
+       without reproducing it. These are built after redaction and never sent anywhere. */
+    const list = el("div", "masked-list");
+    masked.forEach((m) => {
+      const kind = m.label.toLowerCase().replace(/_/g, " ");
+      (m.previews && m.previews.length ? m.previews : [`${m.count} value(s)`])
+        .forEach((preview, i) => {
+          const row = el("div", "masked-row");
+          row.append(el("span", "masked-kind", kind));
+          row.append(el("code", "masked-val", preview));
+          const ph = (m.placeholders || [])[i];
+          if (ph) row.append(el("span", "masked-arrow", "\u2192"), el("code", "masked-ph", ph));
+          list.append(row);
+        });
+    });
+    det.body.append(list);
+    const note = el("div", "cite");
+    note.style.marginTop = "8px";
+    note.textContent = "Shown masked here and nowhere else \u2014 the model received the "
+                     + "placeholder on the right, so anything it wrote about these is about the "
+                     + "placeholder, not the real value.";
+    det.body.append(note);
+  } else if (b) {
+    const note = el("div", "cite");
+    note.style.marginTop = "6px";
+    /* Deliberately narrower than it used to read. It said "no phone numbers, emails or
+       identifiers were found", which is a claim about the passages; all the system actually
+       knows is that none of *its own patterns* matched. A landline went through while that
+       sentence was on screen. */
+    note.textContent = "None of the patterns this checks for \u2014 phone, email, PAN, Aadhaar, "
+                     + "GSTIN, IFSC, card \u2014 matched these passages. Names are not detected.";
+    det.body.append(note);
+  }
+
+  bot.append(det.root);
+
+}
+
+function say2(node, text) {
+  node.replaceChildren(el("span", "dot"), el("span", null, text));
+}
+
+/* Splits an answer into text, citation markers [3], and boundary placeholders <PHONE_1>.
+
+   The placeholders are the point. The model wrote them because that is literally what it was
+   given — the real value never left this deployment — and rendering them as ordinary text
+   would leave a reader guessing whether `<PHONE_1>` was a redaction or something the model
+   invented. Marked up, it says plainly: a real value stood here and was withheld. */
+const _TOKEN = /(\[\d+\]|<[A-Z_]+_\d+>)/g;
+
+function answerText(text) {
+  const box = el("div", "answer");
+  for (const part of String(text).split(_TOKEN)) {
+    if (!part) continue;
+    if (/^\[\d+\]$/.test(part)) {
+      box.append(el("span", "mk", part.slice(1, -1)));
+    } else if (/^<[A-Z_]+_\d+>$/.test(part)) {
+      const kind = part.slice(1, -1).replace(/_\d+$/, "").toLowerCase().replace(/_/g, " ");
+      const tag = el("span", "masked", part);
+      tag.title = `A ${kind} stood here. It was removed before the question was sent, and `
+                + `never left this deployment.`;
+      box.append(tag);
+    } else {
+      box.append(document.createTextNode(part));
+    }
+  }
+  return box;
+}
+
 function fillAnswer(bot, data) {
+  if (data && data.kind === "answer") return fillWrittenAnswer(bot, data);
   bot.replaceChildren();
 
   if (data.error) { bot.append(notice("Something went wrong", data.error, true)); return; }
@@ -596,6 +1510,12 @@ function fillAnswer(bot, data) {
     return;
   }
 
+  if (data.answerFailed) {
+    bot.append(notice(
+      "Couldn't write an answer",
+      " " + data.answerFailed + " The passages below are what retrieval found, unchanged."));
+  }
+
   const n = data.count;
   const sum = el("div", "summary");
   sum.append(document.createTextNode("Found "));
@@ -603,7 +1523,7 @@ function fillAnswer(bot, data) {
   sum.append(document.createTextNode(" across the documents you can see."));
   bot.append(sum);
 
-  const src = disclosure("Sources", `${n} passage${n === 1 ? "" : "s"}`, true);
+  const src = disclosure("Sources", `${n} passage${n === 1 ? "" : "s"}`);
   data.results.forEach((h, i) => src.body.append(passage(h, i + 1)));
   bot.append(src.root);
 
@@ -630,29 +1550,65 @@ async function ask(question) {
   $("welcome").hidden = true;
   const chat = ensureChat(question);
 
+  // Recorded before the request, for the same reason uploads are: a turn written only on
+  // success leaves the conversation empty if the tab closes while the search is running.
+  const record = { q: question, data: null };
+  chat.turns.push(record);
+  saveChats();
+
   const bot = renderTurn(question, null);
   const thinking = el("div", "thinking");
   thinking.append(el("span", "dot"), el("span", null, "Searching the documents…"));
   bot.append(thinking);
-  $("scroll").scrollTop = $("scroll").scrollHeight;
+  scrollToTurn(bot._turn);
 
   let data;
-  try {
+  const search = async () => {
     const url = `/api/v1/search?q=${encodeURIComponent(question)}`
       + `&limit=${$("k").value}&mode=${$("mode").value}`;
     const r = await fetch(url, { headers: authed() });
-    if (r.status === 401) return sessionExpired(bot);
+    if (r.status === 401) { sessionExpired(bot); return null; }
     if (!r.ok) {
       let detail = `Search failed (${r.status}).`;
       try { const j = await r.json(); if (j.detail) detail = String(j.detail); } catch { /* not json */ }
-      data = { error: detail };
+      return { error: detail };
+    }
+    return await r.json();
+  };
+
+  try {
+    if ($("answerMode").checked) {
+      /* Ask for a written answer first. If generation is unavailable — no API key, the model
+         unreachable — fall back to the passages rather than showing nothing: retrieval still
+         works, and saying so is more useful than an error. */
+      say2(thinking, "Reading the documents and writing an answer…");
+      let url = `/api/v1/ask?q=${encodeURIComponent(question)}&passages=${$("k").value}`;
+      if (scopeDoc) url += `&document_id=${encodeURIComponent(idOf(scopeDoc))}`;
+      const r = await fetch(url, { method: "POST", headers: authed() });
+      if (r.status === 401) return sessionExpired(bot);
+      if (r.ok) {
+        data = await r.json();
+        data.kind = "answer";
+        if (scopeDoc) data.scopedTo = baseName(scopeDoc.filename);
+      } else {
+        let why = `Answer unavailable (${r.status}).`;
+        try { const j = await r.json(); if (j.detail) why = String(j.detail); } catch { /* not json */ }
+        say2(thinking, "Falling back to passages…");
+        data = await search();
+        if (data) { data.kind = "passages"; data.answerFailed = why; }
+      }
     } else {
-      data = await r.json();
+      data = await search();
+      if (data) data.kind = "passages";
     }
   } catch { data = { error: "Could not reach the server." }; }
+  if (!data) return;
 
   fillAnswer(bot, data);
-  chat.turns.push({ q: question, data });
+  // The answer, not the end of the page. Scrolling to the bottom lands the reader on the last
+  // line of the "What happened" panel with the answer above the fold.
+  scrollToTurn(bot._turn);
+  record.data = data;
   saveChats();
   $("scroll").scrollTop = $("scroll").scrollHeight;
 }
@@ -695,10 +1651,144 @@ function markSteps(steps, status) {
   });
 }
 
+/* The API accepts MAX_FILES_PER_UPLOAD (5) files per request, so a folder goes in waves. Each
+   wave is awaited before the next: a browser firing forty parallel uploads at a rate-limited
+   endpoint produces 429s that look, to the person watching, exactly like the folder failing.
+
+   Only the *upload* is batched. Reading and indexing stay asynchronous on the workers, which is
+   why this reports "queued" and then follows each document to LIVE rather than blocking. */
+const UPLOAD_BATCH = 5;
+
+async function uploadMany(files, droppedCount) {
+  if (!store.get(TOKEN_KEY)) return showLogin();
+  if (files.length === 1 && !droppedCount) return upload(files[0]);
+
+  $("welcome").hidden = true;
+  const chat = ensureChat(`${files.length} documents`);
+
+  /* Recorded before anything is uploaded, not after it settles. A turn written only on success
+     leaves the conversation empty if the tab is closed mid-upload — which is exactly how
+     reopening one produced a blank page. `record.summary` is updated in place as it progresses. */
+  const record = {
+    kind: "upload",
+    title: `${files.length} document${files.length === 1 ? "" : "s"}`,
+    names: files.map((f) => f.name),
+    dropped: droppedCount || 0,
+    summary: "Uploading…",
+  };
+  chat.turns.push(record);
+  saveChats();
+
+  const remember = (text) => { record.summary = text; saveChats(); };
+
+  const turn = el("section", "turn");
+  const box = el("div", "upload");
+  box.append(el("div", "name", `${files.length} document${files.length === 1 ? "" : "s"}`));
+  if (droppedCount) {
+    box.append(el("div", "cite", `${droppedCount} other file(s) in the folder were skipped`));
+  }
+  const status = el("div", "thinking");
+  status.append(el("span", "dot"), el("span", null, "Uploading…"));
+  box.append(status);
+  const list = el("div", "steps");
+  box.append(list);
+  turn.append(box);
+  $("thread").append(turn);
+  $("scroll").scrollTop = $("scroll").scrollHeight;
+
+  const say = (t) => status.replaceChildren(el("span", "dot"), el("span", null, t));
+  const settle = (t) => { remember(t); status.replaceChildren(el("span", null, t)); };
+
+  const queued = [];
+  let rejected = 0;
+
+  for (let i = 0; i < files.length; i += UPLOAD_BATCH) {
+    const wave = files.slice(i, i + UPLOAD_BATCH);
+    say(`Uploading ${Math.min(i + wave.length, files.length)} of ${files.length}…`);
+
+    const form = new FormData();
+    wave.forEach((f) => form.append("files", f));
+    form.append("classification", tier());
+    try {
+      const r = await fetch("/api/v1/documents/upload",
+                            { method: "POST", body: form, headers: authed() });
+      if (r.status === 401) return sessionExpired(box);
+      if (!r.ok) { rejected += wave.length; continue; }
+      const body = await r.json();
+      (Array.isArray(body) ? body : [body]).forEach((row) => {
+        if (row?.document_id) queued.push({ id: row.document_id, name: row.filename });
+      });
+    } catch {
+      rejected += wave.length;
+    }
+  }
+
+  if (!queued.length) {
+    return settle("None of those files could be uploaded.");
+  }
+
+  // One chip per document, so a folder of forty is a wall of state rather than a single
+  // spinner that says nothing about which document is stuck.
+  const chips = new Map();
+  queued.forEach((d) => {
+    const chip = el("span", "step", d.name.length > 22 ? d.name.slice(0, 21) + "…" : d.name);
+    chip.title = d.name;
+    chips.set(d.id, chip);
+    list.append(chip);
+  });
+
+  say(`Reading ${queued.length} document${queued.length === 1 ? "" : "s"}…`);
+
+  const pending = new Set(queued.map((d) => d.id));
+  const done = { live: 0, failed: 0 };
+  const deadline = Date.now() + 30 * 60 * 1000;
+
+  while (pending.size && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2500));
+    for (const id of [...pending]) {
+      let st;
+      try {
+        const r = await fetch(`/api/v1/documents/${id}/status`, { headers: authed() });
+        if (r.status === 401) return sessionExpired(box);
+        if (!r.ok) continue;
+        st = await r.json();
+      } catch { continue; }
+
+      const chip = chips.get(id);
+      if (st.status === "LIVE") {
+        chip.className = "step done";
+        pending.delete(id);
+        done.live += 1;
+      } else if (FAILED[st.status]) {
+        chip.className = "step bad";
+        chip.title = `${chip.title} — ${FAILED[st.status]}`;
+        pending.delete(id);
+        done.failed += 1;
+      } else {
+        chip.className = "step now";
+      }
+    }
+    say(`${done.live} ready, ${done.failed} failed, ${pending.size} still reading…`);
+  }
+
+  const parts = [`${done.live} ready to search`];
+  if (done.failed) parts.push(`${done.failed} could not be read`);
+  if (rejected) parts.push(`${rejected} rejected at upload`);
+  if (pending.size) parts.push(`${pending.size} still processing in the background`);
+  settle(parts.join(" · "));
+  refreshDocs();
+}
+
 async function upload(file) {
   if (!store.get(TOKEN_KEY)) return showLogin();
   $("welcome").hidden = true;
-  ensureChat(file.name);
+  const chat = ensureChat(file.name);
+  const record = {
+    kind: "upload", title: file.name, names: [file.name], dropped: 0,
+    summary: "Uploading…",
+  };
+  chat.turns.push(record);
+  saveChats();
 
   const turn = el("section", "turn");
   const card = uploadCard(file.name);
@@ -707,12 +1797,17 @@ async function upload(file) {
   $("scroll").scrollTop = $("scroll").scrollHeight;
 
   const say = (text) => { card.status.replaceChildren(el("span", "dot"), el("span", null, text)); };
-  const settle = (node) => { card.status.replaceChildren(node); };
+  const settle = (node) => {
+    record.summary = typeof node === "string" ? node : node.textContent;
+    saveChats();
+    card.status.replaceChildren(typeof node === "string" ? el("span", null, node) : node);
+  };
 
   let docId;
   try {
     const form = new FormData();
     form.append("files", file);
+    form.append("classification", tier());
     const r = await fetch("/api/v1/documents/upload", { method: "POST", body: form, headers: authed() });
     if (r.status === 401) return sessionExpired(card.box);
     if (!r.ok) {
@@ -771,15 +1866,47 @@ const submit = () => {
 $("askBtn").onclick = submit;
 q.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } };
 
-$("newChat").onclick = newChat;
+$("scopeClear").onclick = () => { setScope(null); $("q").focus(); };
+/* A new conversation starts unscoped. Carrying a filter across a fresh chat is the kind of
+   invisible state that makes a system feel like it is ignoring you. */
+$("newChat").onclick = () => { setScope(null); newChat(); };
 $("burger").onclick = () => $("app").classList.toggle("open");
+const ACCEPTED = [".pdf", ".docx", ".xlsx", ".pptx"];
+
+/* A folder picker hands over everything in the tree, including things that are not documents and
+   the `~$name.docx` lock files Word leaves beside anything currently open. Filtering here keeps
+   the server from rejecting a pile of files the user never meant to send — the same filter
+   bulk_ingest.py applies when walking a directory. Content still decides the format server-side;
+   this only avoids uploading obvious non-documents. */
+function acceptable(file) {
+  const name = file.name.toLowerCase();
+  if (file.name.startsWith("~$")) return false;
+  return ACCEPTED.some((ext) => name.endsWith(ext));
+}
+
+function pickFiles(input) {
+  const all = [...(input.files || [])];
+  input.value = "";
+  const keep = all.filter(acceptable);
+  return { keep, dropped: all.length - keep.length };
+}
+
 $("file").onchange = (e) => {
-  const f = e.target.files?.[0];
-  e.target.value = "";
-  if (f) upload(f);
+  const { keep, dropped } = pickFiles(e.target);
+  if (keep.length) uploadMany(keep, dropped);
 };
+
+$("folder").onchange = (e) => {
+  const { keep, dropped } = pickFiles(e.target);
+  if (keep.length) uploadMany(keep, dropped);
+  else if (dropped) {
+    alert(`That folder has no PDF, Word, Excel or PowerPoint files (${dropped} other file(s) skipped).`);
+  }
+};
+
 $("uploadBtn").onclick = () => $("file").click();
 $("attachBtn").onclick = () => $("file").click();
+$("folderBtn").onclick = () => $("folder").click();
 
 [
   "What are the enforcement obligations for thermal power plants?",

@@ -100,7 +100,7 @@ async def semantic_search(
         limit=limit,
         mode=mode,
     )
-    grounded, best = assess(results)
+    grounded, best = assess(results, query)
     if not grounded:
         # The passages are withheld, not just flagged. Showing a citation next to text that does
         # not answer the question is how a reader ends up quoting something irrelevant in a

@@ -27,6 +27,38 @@ from src.storage.bucket_manager import BucketManager
 logger = logging.getLogger(__name__)
 
 # Languages the configured model is expected to represent. langdetect returns ISO 639-1 codes.
+_DEFAULT_LANGUAGE = "en"
+
+
+def prose_ratio(text: str) -> float:
+    """The share of characters sitting inside word-like tokens.
+
+    A token counts when it is three or more characters long and contains no digit. The test
+    never looks *inside* the token, and that is the whole design: an earlier version counted
+    runs of three or more letters, which works in English and scores Devanagari at **0.034**,
+    because matras are combining marks and break the run. A genuine Hindi document would have
+    looked exactly like a spreadsheet and slipped past the language gate — the precise failure
+    the gate exists to prevent.
+
+    Measured across this corpus and a Devanagari sample:
+
+        CEDS_SO2 Emissions.xlsx (the misdetected grid)   0.021
+        lowest real document                             0.309
+        typical real document                            0.62 - 0.75
+        Hindi prose                                      0.758
+
+    Fifteen times the separation between the grid and the thinnest real document, and Devanagari
+    lands with the documents rather than with the grids.
+    """
+    if not text:
+        return 0.0
+    counted = sum(
+        len(tok) for tok in text.split()
+        if len(tok) >= 3 and not any(c.isdigit() for c in tok)
+    )
+    return counted / len(text)
+
+
 _SUPPORTED_LANGUAGES = {"en"}
 
 
@@ -223,10 +255,16 @@ class EmbeddingJobHandler:
         )
 
     def _detected_language(self, document_id: uuid.UUID) -> str | None:
-        """Reads the language normalization already detected.
+        """Reads the language normalization detected, if it is worth believing.
 
         Returns None when the artifact cannot be read, which the caller treats as unsupported —
-        refusing to embed is the safe direction when the language is unknown.
+        refusing to embed is the safe direction when the language is genuinely unknown.
+
+        Returns the *configured* language instead when the document has too little running prose
+        for a detection to mean anything. Language detection needs sentences; given a grid it
+        answers anyway, and confidently. A 130,000-character emissions spreadsheet whose text is
+        `em  country  units  X2000  X2001 ...` was detected as Croatian and skipped, taking 460
+        chunks out of the index. See EMBEDDING_MIN_PROSE_RATIO for the measurement.
         """
         try:
             from src.modules.document_pipeline.normalization.models import (
@@ -236,10 +274,21 @@ class EmbeddingJobHandler:
             raw = self.buckets.storage.get_object(
                 self.buckets.normalized, normalized_key_for(document_id)
             )
-            return NormalizationResult.model_validate_json(raw.decode("utf-8")).language
+            result = NormalizationResult.model_validate_json(raw.decode("utf-8"))
         except Exception:
             logger.warning("Could not read language for doc_id=%s", document_id)
             return None
+
+        ratio = prose_ratio(result.full_text)
+        if ratio < settings.EMBEDDING_MIN_PROSE_RATIO:
+            logger.info(
+                "doc_id=%s is %.1f%% prose — too little to trust a language detection of %r; "
+                "embedding it rather than skipping it",
+                document_id, ratio * 100, result.language,
+            )
+            return _DEFAULT_LANGUAGE
+
+        return result.language
 
     def _skip_unsupported_language(self, doc, corr_id: uuid.UUID, language: str | None):
         """Records a document the configured model cannot represent.
