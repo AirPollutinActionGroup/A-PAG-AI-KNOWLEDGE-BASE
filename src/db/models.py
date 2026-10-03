@@ -257,13 +257,9 @@ class DocumentChunk(Base):
         Vector(settings.EMBEDDING_DIMENSIONS), nullable=True
     )
 
-    # Lexical half of hybrid retrieval, maintained by a trigger (migration 0015) so it stays
-    # correct for ORM writes and raw SQL alike. Never assigned from Python — the trigger owns it.
-    #
-    # `documents.search_vector` indexes title, filename and description; this indexes the passage
-    # body. Embeddings blur exact identifiers ("Section 114", "GRAP Stage III") into whatever
-    # they are semantically near, which a lexical index matches exactly.
-    search_vector: Mapped[Any | None] = mapped_column(SearchVectorType, nullable=True)
+    # There is no `search_vector` here. The lexical arm is BM25 (the bm25 index below); the
+    # tsvector column `0015` added was dropped by `0020` once nothing read it. `documents` still
+    # has one — different column, built by `0006` over title/filename/description.
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -293,7 +289,6 @@ class DocumentChunk(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
             postgresql_with={"m": 16, "ef_construction": 64},
         ),
-        Index("idx_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
         # BM25 (pg_search / ParadeDB), migration 0016. Declared here as well as in the migration
         # so `alembic check` stays meaningful — it caught this index's absence from the model the
         # moment it was created. `key_field` is how pg_search keys the scores it returns; both

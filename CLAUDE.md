@@ -341,8 +341,11 @@ predicate belongs in the `WHERE` clause, before `ORDER BY`/`LIMIT`. The shape is
   into pg_search's syntax, so a question containing a colon, a quote or the word "OR" cannot be
   reinterpreted as operators.
 
-  The `0015` tsvector column and trigger are **still present and now unread** — kept so the switch
-  stays revertible. Removing them is the immediate follow-up (`KNOWN_DEBTS.md` #35).
+  The `0015` tsvector column, its GIN index and its trigger are **gone**, dropped by `0020` once
+  the switch had an evaluation set behind it rather than 16 sample queries (`KNOWN_DEBTS.md`
+  #35). `0020`'s downgrade restores all of it, backfill included, so the revert the column was
+  kept for still works. `documents.search_vector` is a different column from `0006` and is still
+  live behind `GET /documents?q=`.
 
 They fail differently — an embedding blurs "Section 114" into whatever it is semantically near,
 while a word index is blind to paraphrase — which is why fusing beats either. Measured on this

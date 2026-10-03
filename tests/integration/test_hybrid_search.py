@@ -6,8 +6,8 @@ FULL OUTER JOIN means a row returned by either one reaches the caller. A leak in
 alone would be invisible to every test written for the semantic one.
 
 Vectors here are stubbed — the SQL is what is under test, not the model. The lexical arm is not
-stubbed, because its behaviour comes from the trigger and the tsvector, which only exist in
-Postgres.
+stubbed, because its behaviour comes from `pg_search`'s BM25 index and scoring, which exist only
+in Postgres and cannot be imitated in SQLite.
 """
 
 import uuid
@@ -94,43 +94,38 @@ def texts(hits):
 
 
 # ==============================================================================
-# The trigger keeps search_vector correct
+# The tsvector arm is gone, not dormant
 # ==============================================================================
 
-def test_inserting_a_chunk_populates_its_search_vector(db_session: Session):
-    """Maintained by a trigger rather than in Python so it is right for ORM writes and raw SQL
-    alike — the chunking stage never has to remember to set it."""
-    doc = _doc(db_session)
-    _chunk(db_session, doc, _vec(1.0), "District enforcement obligations for thermal plants.")
+def test_chunks_carry_no_tsvector_column(db_session: Session):
+    """`0015` built a tsvector column, a GIN index and a trigger for the lexical arm; `0016`
+    replaced that arm with BM25 and `0020` removed the machinery once nothing read it.
 
-    sv = db_session.execute(
-        text("SELECT search_vector FROM document_chunks WHERE document_id = :d"),
-        {"d": doc.document_id},
-    ).scalar_one()
+    This asserts the removal rather than the old behaviour, because the failure worth catching
+    now is the opposite one: a trigger recomputing a tsvector on every chunk INSERT for a column
+    no query reads, which is free at this corpus size and is not free during a bulk ingest.
+    `documents.search_vector` is a different column from `0006` and is still live."""
+    present = db_session.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'document_chunks' AND column_name = 'search_vector'"
+        )
+    ).scalar_one_or_none()
+    assert present is None, "0020 should have dropped document_chunks.search_vector"
 
-    assert sv is not None and "enforc" in sv, "expected the stemmed term in the tsvector"
-    db_session.rollback()
-
-
-def test_editing_a_chunk_refreshes_its_search_vector(db_session: Session):
-    doc = _doc(db_session)
-    _chunk(db_session, doc, _vec(1.0), "original wording about turbines")
-
-    db_session.execute(
-        text("UPDATE document_chunks SET text = :t WHERE document_id = :d"),
-        {"t": "replacement wording about incinerators", "d": doc.document_id},
-    )
-    sv = db_session.execute(
-        text("SELECT search_vector FROM document_chunks WHERE document_id = :d"),
-        {"d": doc.document_id},
-    ).scalar_one()
-
-    assert "incioner" in sv or "inciner" in sv
-    assert "turbin" not in sv, "the stale term must be gone"
-    db_session.rollback()
+    trigger = db_session.execute(
+        text(
+            "SELECT tgname FROM pg_trigger "
+            "WHERE tgname = 'trg_document_chunks_search_vector_update'"
+        )
+    ).scalar_one_or_none()
+    assert trigger is None, "the tsvector trigger outlived the column it maintained"
 
 
 def test_the_section_heading_is_indexed_too(db_session: Session):
+    """BM25 indexes `text` and `section_heading` as separate fields and ORs them, because only
+    1,056 of 2,475 headed chunks repeat their heading in the body — searching the body alone
+    silently ignores headings."""
     doc = _doc(db_session)
     _chunk(db_session, doc, _vec(1.0), "Body text with no distinctive words.",
            heading="Penalties and Prosecution")

@@ -90,11 +90,12 @@ def postgres_engine():
     #
     # create_all() builds tables from ORM metadata, and a great deal of this schema's behaviour
     # is not in the ORM: the audit_log immutability triggers (0003), the partial unique index
-    # that is the actual dedup guarantee (0004), the tsvector triggers (0006, 0015). Under
-    # create_all() every one of those is absent from the test database, so tests written against
-    # them pass or fail for the wrong reasons — a lexical-search test finds nothing because the
-    # trigger that populates search_vector was never created, which looks exactly like a broken
-    # query. Running migrations makes the test schema the schema that ships.
+    # that is the actual dedup guarantee (0004), the `documents` tsvector trigger (0006), and
+    # the BM25 index the lexical arm is built on (0016, 0018, 0019). Under create_all() every one
+    # of those is absent from the test database, so tests written against them pass or fail for
+    # the wrong reasons — a lexical-search test finds nothing because the index it queries was
+    # never created, which looks exactly like a broken query. Running migrations makes the test
+    # schema the schema that ships.
     #
     # Deliberately NOT caught-and-skipped: a schema that cannot be built is a broken schema, and
     # skipping here would turn a real failure into a silently green run with zero integration
