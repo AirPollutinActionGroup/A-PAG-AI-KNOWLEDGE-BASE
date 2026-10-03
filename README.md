@@ -1,42 +1,62 @@
 # A-PAG AI Knowledge Base Platform
 
-> Async ingestion foundation for a governed RAG platform, verified for 50 internal users, designed to scale to 500 without architectural changes.
+> A governed RAG system for the Air Pollution Action Group: documents go in, and questions come back as **cited answers**, with sensitive details masked before anything leaves the deployment. Ingestion and retrieval are built and measured; Text-to-SQL is not built yet.
 
 ---
 
 ## 🎯 What We Are Building
 
-A unified AI system for the **Air Pollution Action Group (A-PAG)** that handles two primary types of organizational questions:
+A unified AI system that handles two kinds of organizational question:
 
-1. **Document Knowledge (RAG)**: Answering policy and project questions from unstructured PDFs using vector search.
-2. **Structured Data (Text-to-SQL)**: Answering financial and operational metrics from PostgreSQL using validated natural-language-to-SQL generation.
+1. **Document knowledge (RAG)** — policy and project questions answered from PDF, Word, Excel and PowerPoint files, with a citation for every claim. **Built.**
+2. **Structured data (Text-to-SQL)** — financial and operational metrics from PostgreSQL via validated natural-language-to-SQL. **Not built yet** (see the roadmap).
 
 ```text
                          User Question
                                │
                          AI Chat Layer
                                │
-                      Intent Query Routing
+                      Intent Query Routing   ← planned: routes between the two paths
                      /                    \
                     /                      \
                    ↓                        ↓
-           Knowledge Base (RAG)         PostgreSQL (Text-to-SQL)
+        Knowledge Base (RAG) ✅        PostgreSQL (Text-to-SQL) 📋
                    │                                │
-             Vector Search                   SQL Generation
-             (Qdrant DB)                     (Read-only DB)
+     Hybrid search: vector + BM25              SQL generation
+     (PostgreSQL: pgvector + pg_search)        (read-only DB)
                    │                                │
-           Relevant Chunks                   Query Results
+             Cross-encoder rerank                   │
+                   │                                │
+         Data Boundary Gateway                      │
+         (classify → mask → record)                 │
+                   │                                │
+            Sarvam writes the answer                │
                    │                                │
                    └───────────────┬────────────────┘
                                    ↓
-                         Validated AI Response
+                      Cited, validated response
 ```
+
+### What works today
+
+| Capability | State |
+|---|---|
+| Upload PDF / DOCX / XLSX / PPTX, validated and quarantined first | ✅ |
+| Text extraction, with **OCR for scanned PDF pages** | ✅ |
+| Structure-aware chunking and local embeddings (no data leaves for indexing) | ✅ |
+| Hybrid search (vector + BM25), reranked, with permissions enforced in SQL | ✅ |
+| Written answers with citations; **declines** rather than inventing | ✅ |
+| **Masking** of phone numbers, emails, Aadhaar, PAN, GSTIN, cards, IFSC before any external model sees text | ✅ |
+| JWT auth, owner-scoped `RESTRICTED` documents, reversible delete, append-only audit log | ✅ |
+| Measured retrieval and answer quality (see Evaluation) | ✅ |
+| Deployed on an Azure VM (see `DEPLOY.md`) | ✅ test deployment |
+| Text-to-SQL, Hindi, per-document ACLs, SSO | 📋 not built |
 
 ---
 
 ## 🏗️ Core Ingestion Architecture (Asynchronous)
 
-The ingestion pipeline executes asynchronously to protect API responsiveness, isolate CPU-heavy scanning/validation, and ensure resilience against service interruptions:
+Ingestion runs asynchronously to keep the API responsive, isolate CPU-heavy work, and survive service restarts. Processes never call each other; they communicate only through the `documents` and `jobs` tables in Postgres.
 
 ```text
 Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres (documents + jobs + audit)
@@ -46,19 +66,19 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
                                                                ScanWorker Daemon
                                                      (SELECT ... FOR UPDATE SKIP LOCKED)
                                                                              │
-                                                              8-Point Validation + ClamAV Scan
+                                          Validation ladder + heuristic threat scan + SHA-256
                                                                              │
                                                         ┌────────────────────┴────────────────────┐
                                                         ▼                                         ▼
-                                                [Validation Passed]                       [Threat/Corrupt]
+                                                [Validation Passed]                       [Threat/Corrupt/Duplicate]
                                                         │                                         │
                                                 Promote to Raw Bucket                     Purge Quarantine
-                                                Set Status VALIDATED                      Set Status REJECTED
-                                                Emit DOCUMENT_PROMOTED                    Emit DOCUMENT_REJECTED
+                                                Set Status VALIDATED                      Set REJECTED / DUPLICATE
                                                         │
                                                         ▼
                                               ExtractionWorker Daemon
-                                    (pdfplumber / python-docx / python-pptx / openpyxl)
+                              (pdfplumber / python-docx / python-pptx / openpyxl,
+                               plus OCR for PDF pages that have no text layer)
                                                         │
                                         ┌───────────────┴───────────────┐
                                         ▼                               ▼
@@ -76,11 +96,12 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
                     [Quality Passed]         [Quality Failed]
                             │                       │
                 Write normalized/{id}.json   Set Status NORMALIZATION_FAILED
-                Set Status AWAITING_CLASS    (e.g. LOW_TEXT_DENSITY — the signal
-                            │                  a scanned document reached the system)
+                Set Status AWAITING_CLASS    (e.g. LOW_TEXT_DENSITY)
+                            │
                             ▼
                     ChunkingWorker Daemon
-            (split at the document's own headings; tables kept whole)
+            (split at the document's own headings; tables kept whole;
+             sized in model tokens via the tokenizer alone)
                             │
                 Write rows to document_chunks
                 Set Status CHUNKED
@@ -98,14 +119,13 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
     Set Status LIVE    PORTED_LANGUAGE
 ```
 
-- **Quarantine-First Isolation**: Files land in isolated temporary storage before any parsing or scanning.
-- **Immediate 202 Accepted**: API returns document UUID, status URL, and correlation ID in under 500ms.
-- **SKIP LOCKED Worker Pool**: Background workers pull jobs without blocking, managed by 60s leases and a 30s dead-worker reaper. One worker process per pipeline stage (`WORKER_STAGE=SCAN|EXTRACT|NORMALIZE|CHUNK|EMBED`), each its own container off the same image. Postgres is the queue rather than RabbitMQ/Redis — job state and document state then commit in the same transaction and can never drift, which matters more at this scale than a throughput ceiling nothing approaches.
-- **SHA-256 Deduplication & Partial Unique Index**: Hardware-accelerated hashing prevents duplicate storage while permitting superseded version history.
-- **Append-Only Audit Trail**: Every document lifecycle event is immutably logged with correlation IDs.
-- **Non-ML text extraction**: reads structure each format already states (Word styles, slide titles, worksheet grids) rather than inferring it — no OCR, no layout-inference model. See Current Limitations below.
-- **Structure-aware chunking**: passages are cut at the document's own headings, not at fixed intervals, so a citation points at a whole idea rather than a clause severed from the condition qualifying it. Tables become row groups that repeat their header.
-- **Embeddings on the chunk row**: `document_chunks.embedding` is a `vector(768)` beside the text it encodes, indexed with HNSW (cosine). The model runs locally on CPU and is baked into the image — nothing leaves the deployment, and no weights are fetched at boot.
+- **Quarantine-first isolation**: files land in untrusted storage before any parsing or scanning.
+- **Immediate 202 Accepted**: the API returns the document UUID, status URL and correlation ID in under 500ms. A document is *searchable* only once it reaches `LIVE`, which is after the embedding stage, so a busy queue means a wait.
+- **SKIP LOCKED worker pool**: workers claim jobs without blocking, with 60s leases and a dead-worker reaper. One process per stage (`WORKER_STAGE=SCAN|EXTRACT|NORMALIZE|CHUNK|EMBED`), each its own container off the same image. Postgres is the queue rather than RabbitMQ/Redis, so job state and document state commit in one transaction and cannot drift.
+- **SHA-256 deduplication** with a partial unique index, which is the real guarantee under concurrency.
+- **Append-only audit trail**: every lifecycle event is logged with a correlation ID, and database triggers forbid `UPDATE`/`DELETE` on it.
+- **Text extraction is non-ML**: it reads structure each format already states (Word styles, slide titles, worksheet grids). **OCR** (RapidOCR, ONNX, no PyTorch) is the one exception and runs per page, only where a PDF page has almost no text *and* has images on it. See `KNOWN_DEBTS.md` #13–14.
+- **Structure-aware chunking**: passages are cut at the document's own headings, so a citation points at a whole idea and not a clause severed from its condition. Tables become row groups that repeat their header. Chunk size is measured in the embedding model's own tokens.
 
 ---
 
@@ -113,58 +133,74 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 
 | Path | What it is |
 |---|---|
-| `/search` | **Knowledge Base UI** — a chat-style page: sign in, ask questions, upload documents inline and watch them become searchable, and open "What happened" on any answer to see the token accounting and which search found each passage. Conversations are kept in your own browser. |
-| `/` | Studio UI — upload and watch the ingestion pipeline (predates auth/multi-file, see `KNOWN_DEBTS.md` #7). |
+| `/search` | **Knowledge Base UI** — sign in, ask questions, upload documents inline, preview documents, scope a question to one document ("Ask about this"), and open **"What happened"** on any answer to see what was masked and what was sent where. Conversations stay in your own browser. |
+| `/` | Studio UI — upload and watch the pipeline (predates auth and multi-file; see `KNOWN_DEBTS.md` #7). |
 | `/docs` | Swagger. |
+
+The sign-in page can show a shared **demo login** beneath the form. It is off unless `DEMO_LOGIN_EMAIL` and `DEMO_LOGIN_PASSWORD` are set in a deployment's `.env`, is never stored in the repository, and refuses to reveal an `ADMIN` account.
 
 ---
 
-## 🔎 Hybrid Search
+## 🔎 Hybrid Search and Answers
 
-`GET /api/v1/search?q=<question>&limit=10` returns the passages whose *meaning* is closest to the
-question, each with the citation recovered at extraction time:
+### Retrieval
 
-```json
-{
-  "query": "how is machine learning model training evaluated",
-  "count": 2,
-  "results": [
-    { "filename": "Hands-On-Machine-Learning.pdf", "page_number": 221,
-      "section_heading": "Chapter 4. Training Models", "is_table": false,
-      "score": 0.699, "text": "Chapter 4. Training Models  So far we have treated …" },
-    { "filename": "Hands-On-Machine-Learning.pdf", "page_number": 154,
-      "section_heading": "Better Evaluation Using Cross-Validation", "is_table": false,
-      "score": 0.689, "text": "One way to evaluate the decision tree model would be …" }
-  ]
-}
-```
+`GET /api/v1/search?q=<question>&limit=10` returns the passages that best match, each with the citation recovered at extraction time.
 
-**Two searches run and their ranks are merged.** Vector search matches meaning but blurs exact
-identifiers — an embedding places "Section 114" near whatever it is semantically similar to.
-**BM25** (via `pg_search`) matches those exactly and is in turn blind to paraphrase. They fail differently,
-so fusing them covers more than either: on a 16-query sample the word search surfaced passages the
-vector search never returned on 6 of them. Asked for `cuDNN`, the vector arm's top hit was the
-book's *Index* page; the word arm found the actual content.
+**Two searches run and their ranks are merged.** Vector search matches meaning but blurs exact identifiers (an embedding places "Section 114" near whatever it resembles). **BM25** via `pg_search` matches those exactly and is blind to paraphrase. They fail differently, so fusing them (Reciprocal Rank Fusion) covers more than either. The BM25 query has function words trimmed, because on a natural-language question a dozen common words buried the one rare term that identifies the answer.
 
-Scores are never compared, only ranks (Reciprocal Rank Fusion) — cosine similarity and `ts_rank`
-are not on a common scale and no conversion between them exists. **So `score` is not a
-similarity**: read `semantic_rank`/`lexical_rank` instead. `mode=semantic|lexical` runs one arm
-alone, which is how a surprising result gets explained.
+A **cross-encoder reranker** then reads the question and each candidate together and reorders them. It matters because the passage that best answers a question often sits well below the top by fusion (ranks 9, 16 and 23 on three sample questions). Reranking scores `RERANK_CANDIDATES` passages (50 by default, 25 on a 2-vCPU VM) and returns the best `limit`.
 
-This is distinct from `GET /api/v1/documents/search`, which matches literal words in a document's
-**title, filename and description** — body text is not in that index at all.
+**Scores are never compared, only ranks.** `score` is not a similarity: read `semantic_rank`, `lexical_rank` and `fusion_rank` instead. `mode=semantic|lexical` runs one arm alone, which is how a surprising result gets explained.
 
-**Permissions are filtered in SQL, before `ORDER BY`/`LIMIT`.** This is a correctness requirement,
-not tidiness: a `RESTRICTED` passage removed *after* ranking has already won its slot, so a
-`limit=5` would quietly return four results — or none — with no way for the caller to tell whether
-the corpus is thin or an answer was withheld.
+**Permissions are filtered in SQL, before `ORDER BY`/`LIMIT`, in every arm.** A `RESTRICTED` passage removed *after* ranking has already taken a slot, so `limit=5` would quietly return four results with no way to tell whether the corpus is thin or an answer was withheld.
 
-**Every response carries a `usage` block** — query tokens, context tokens, the model's window, and
-how many returned passages were truncated by it. Context size is what decides whether these
-passages fit in a future LLM prompt, so it is worth watching now, while chunk sizing can still be
-changed cheaply. A passage longer than the window was embedded only up to the cap: the text is
-stored whole but the vector is not, so something mentioned only in its tail cannot be found.
-2.9% of the current corpus is in that state — see `KNOWN_DEBTS.md` #28.
+`GET /api/v1/documents/search` is separate: it matches literal words in a document's title, filename and description, not its body.
+
+### Written answers
+
+`POST /api/v1/ask?q=<question>` retrieves passages and has Sarvam (`sarvam-105b-conversations`) write an answer from them, citing passages as `[1]`, `[2]`.
+
+- **It declines rather than invents.** Vector search always returns *something*, so a similarity gate withholds passages that do not answer the question, and the model is instructed to say when the passages do not cover it. The gate catches off-topic questions; plausible-sounding fabricated ones are caught by the model, which is why both layers are measured.
+- **Scoping.** `document_id` restricts a question to named documents. A pronoun ("this document") is never resolved by guessing.
+- **Follow-ups** ("what about Category B?") are handled by query expansion for the search only, and the expanded query is shown so a search that quietly looked for something else is visible.
+
+### The Data Boundary Gateway
+
+Nothing reaches an external model except through `src/modules/gateway/`. Three steps:
+
+1. **Classify.** A request takes the highest tier present across its passages. Anything not explicitly `PUBLIC` is withheld, including a missing or unrecognised tier. If nothing survives, no call is made.
+2. **Mask.** Deterministic patterns replace GSTIN, PAN, Aadhaar (Verhoeff checksum), cards (Luhn), IFSC, email, Indian mobile and landline numbers with typed placeholders such as `<PHONE_1>`. Checksums are what keep a 12-digit emissions figure from reading as an identity number. Detection is patterns, not a model, so **a person's name in prose is not detected**.
+3. **Record.** A record is written on every crossing, including when nothing was found, so "nothing sensitive" is distinguishable from "the scan never ran".
+
+Placeholders deliberately survive into the answer so a reader sees where a real value was withheld.
+
+---
+
+## 📊 Evaluation
+
+Three harnesses, none of which need a judge model unless stated.
+
+| Harness | Measures | Run |
+|---|---|---|
+| `run_eval.py` | Retrieval: does the right document reach the model | `python run_eval.py --compare` |
+| `run_quality_suite.py` | Refusal, citations, masking, isolation, consistency, answer fidelity | `python run_quality_suite.py` |
+| `run_ragas.py` | Answer faithfulness (needs a judge with credit; never Sarvam) | `python run_ragas.py --count 25` |
+
+Retrieval, on 100 questions generated from real passages (`eval_set.json`):
+
+| configuration | hit@1 | hit@5 | MRR |
+|---|---|---|---|
+| **hybrid + rerank (shipped)** | **83.0%** | **97.0%** | 0.894 |
+| hybrid, no rerank | 80.0% | 91.0% | 0.853 |
+| semantic only | 72.0% | 90.0% | 0.801 |
+| lexical only (BM25) | 66.0% | 89.0% | 0.751 |
+
+Reranking at 25 candidates (the 2-vCPU setting) measures 82.0% / 95.0% and is about 1.8× faster. The three questions that still miss are prose, two of them asking *why* something is the case, which is the harder retrieval problem.
+
+Answer fidelity: every number in an answer is checked against the passages it was built from. Over 30 answers: **100% numeric fidelity (73 of 73 figures)** and 90% citation coverage. It cannot see a claim that is wrong without being numerically wrong, and says so.
+
+**Read these as what they are.** `eval_set.json` is a draft generated from the corpus, with `expected_answer` blank on purpose; colleagues adding the questions they actually ask is the most valuable review. The retrieval figures measure whether the right *document* was found, not whether the answer was right. Latency varies a lot by machine, so the ratios between rows are more reliable than the seconds.
 
 ---
 
@@ -172,26 +208,27 @@ stored whole but the vector is not, so something mentioned only in its tail cann
 
 | System | Role | Contents |
 |---|---|---|
-| **PostgreSQL 16 + pgvector** | Relational **and** vector database | Document metadata (incl. full-text search index), users, background job queues, audit logs, and — since Stage 7 — the retrievable passages in `document_chunks` together with their `vector(768)` embeddings and HNSW index. |
-| **MinIO** | Object Storage | Document artifacts across buckets (`quarantine/`, `raw/`, `extracted/`, `normalized/`). |
+| **PostgreSQL 16 (ParadeDB image: pgvector + pg_search)** | Relational, vector **and** BM25 database | Document metadata, users, job queues, audit logs, and the retrievable passages in `document_chunks` with their `vector(768)` embeddings (HNSW, cosine) and a BM25 index. |
+| **MinIO** | Object storage | Document artifacts across buckets (`quarantine/`, `raw/`, `extracted/`, `normalized/`). |
 
-There is deliberately **no separate vector store**. A passage's text, its citation metadata
-(`page_number`, `section_heading`, `is_table`) and its embedding live in one row, so a similarity
-search returns the answer *and* what to cite *and* enforces the permission rule in a single query.
-Splitting the vector into a second system would mean fetching ids from one store and resolving them
-in another — two round trips, and the permission check applied after the top-k was already chosen.
-The Postgres image is therefore `pgvector/pgvector:pg16` rather than stock `postgres:16-alpine`.
+There is deliberately **no separate vector store**. A passage's text, its citation metadata (`page_number`, `section_heading`, `is_table`) and its embedding live in one row, so one query returns the answer, what to cite, and enforces the permission rule. Splitting the vector into another system would mean resolving ids across two stores and applying permissions after the top-k was already chosen.
+
+Documents stay on the deployment's own disk. Nothing is sent to a cloud storage service; the only data that leaves is the masked, `PUBLIC`-only passages sent to Sarvam when someone asks a question.
 
 ---
 
 ## ⚠️ Current Limitations
 
-- **Open registration**: `POST /auth/register` has no invite gate yet — acceptable only for the internal, not-internet-exposed bootstrap phase. See `KNOWN_DEBTS.md`.
-- **2-tier classification only**: `RESTRICTED` = uploader + ADMIN (owner-scoped, not department-based); no per-document ACLs. See `ARCHITECTURE.md` §6b.
-- **Single-Tenant Deployment**: Multi-organization partitioning is deferred to later milestones.
-- **No OCR**: Pipeline implements Stages 1–7 (quarantine → validation → promotion → text extraction → normalization → chunking → embedding). Text extraction is deliberate and non-ML — it reads structure each format already states rather than inferring it — and there is no OCR fallback, since this corpus is digitally authored, not scanned. A document with no real text layer is stopped at `NORMALIZATION_FAILED` (`LOW_TEXT_DENSITY`/`EMPTY_TEXT`) rather than silently indexed empty. See `KNOWN_DEBTS.md` #13–14.
-- **English-only embeddings**: `BAAI/bge-base-en-v1.5` is an English model, so a document normalization detected as non-English stops at `SKIPPED_UNSUPPORTED_LANGUAGE` instead of being embedded. This is not a failure — an English tokenizer turns Devanagari into unknown tokens and emits vectors that match nothing, which would leave the document sitting in the index invisible with no signal it is missing. Skipped documents are a queryable backlog for the multilingual phase (~10–15% of A-PAG's corpus is Hindi). Set `EMBEDDING_SKIP_NON_ENGLISH=false` once a multilingual model is configured.
-- **Vector width is fixed at migration time**: `EMBEDDING_DIMENSIONS` must match the migrated `vector(N)` column (`alembic check` enforces this). Swapping to a model of a different width is a migration **plus a full re-embed of the corpus**, not a config edit. Chunking is deliberately a separate stage so that re-embed never requires re-chunking.
+- **Open registration**: `POST /auth/register` has no invite gate, which is acceptable only while the API is not exposed beyond a trusted network. A registrant is always a plain `USER`; a role cannot be supplied. See `KNOWN_DEBTS.md`.
+- **Classification is required at upload** (`PUBLIC` or `RESTRICTED`), with no default, because it decides what may be sent to an external model. `RESTRICTED` means the uploader plus any `ADMIN`; there are no per-document ACLs. See `ARCHITECTURE.md` §6b.
+- **Names are not masked.** The gateway detects patterned identifiers; a person's name in prose has no pattern. Presidio with NER is the upgrade path.
+- **OCR is a fallback, not a parser.** It returns text lines, so a scanned *table* comes out as ungrouped numbers, and it drops word boundaries, which costs the keyword search a term it can never match.
+- **English-only embeddings**: `BAAI/bge-base-en-v1.5` cannot embed Devanagari, so a document detected as non-English stops at `SKIPPED_UNSUPPORTED_LANGUAGE` and is recorded as a queryable backlog rather than indexed as noise (~10–15% of A-PAG's corpus is Hindi). Hindi is deliberately not built.
+- **Vector width is fixed at migration time**: swapping to a model of a different width needs a migration plus a full re-embed, not a config edit.
+- **A few chunks exceed the model window**: 5 of 4,459 (0.11%): four are single table rows wider than the window, emitted whole by design, and one is prose. Such a chunk is embedded from its first 512 tokens.
+- **Malware scanning is a heuristic signature check**, not ClamAV (see `KNOWN_DEBTS.md` #8). This fits a trusted-uploader threat model and should be revisited before any wider rollout.
+- **Single-tenant, single-VM deployment** with no automatic backups.
+- **Embedding is the slow stage on a small VM.** A bulk ingest on 2 vCPUs takes on the order of an hour; set `INFERENCE_THREADS` to the vCPU count (see `DEPLOY.md`).
 
 ### Supported upload formats
 
@@ -202,15 +239,13 @@ The Postgres image is therefore `pgvector/pgvector:pg16` rather than stock `post
 | Excel | `.xlsx` | worksheets |
 | PowerPoint | `.pptx` | slides |
 
-The format is resolved from the file's **contents**, not its name or the MIME type the browser
-declares — so a `.docx` that your OS reports as `application/octet-stream` still uploads, and a
-spreadsheet renamed to `.docx` is stored as the spreadsheet it actually is.
+The format is resolved from the file's **contents**, not its name or the MIME type the browser declares, so a `.docx` reported as `application/octet-stream` still uploads, and a spreadsheet renamed to `.docx` is stored as the spreadsheet it is.
 
 Not accepted, with the reason:
 
-- **Macro-enabled files** (`.docm`/`.xlsm`/`.pptm`, or any file containing a macro project) — re-save without macros. This is the one restriction that isn't just plumbing: a downloaded Office file does eventually get opened in Word or Excel by a person, and that executes macros.
-- **Legacy or password-protected Office files** (`.doc`/`.xls`/`.ppt`, encrypted `.docx`) — re-save as the modern format, or remove the password.
-- **Google Docs/Sheets/Slides** — these aren't files; they live in Drive and have no bytes to upload. Use *File → Download → Microsoft Excel (.xlsx)* (or Word/PowerPoint) and upload the result.
+- **Macro-enabled files** (`.docm`/`.xlsm`/`.pptm`, or any file containing a macro project) — re-save without macros. A downloaded Office file does eventually get opened by a person, and that executes macros.
+- **Legacy or password-protected Office files** (`.doc`/`.xls`/`.ppt`, encrypted `.docx`) — re-save in the modern format, or remove the password.
+- **Google Docs/Sheets/Slides** — these live in Drive and have no bytes to upload. Use *File → Download → Microsoft Excel (.xlsx)* (or Word/PowerPoint) and upload the result.
 - **CSV** — out of scope for now; it has no container structure to validate and carries a different (formula-injection) risk profile.
 
 ---
@@ -219,17 +254,17 @@ Not accepted, with the reason:
 
 | Phase | Description | Status |
 |---|---|---|
-| **Phase 1** | Ingestion & Quarantine Pipeline (Validation, Structure Checks) | ✅ Completed |
-| **Phase 2** | Threat Scanning & Deduplication Engine (ClamAV, SHA-256) | ✅ Completed |
-| **Phase 3** | Storage Promotion, DB Migrations & Immutable Audit Log | ✅ Completed |
-| **Phase C** | Asynchronous Architecture Refactor (SKIP LOCKED Workers, 202 Contract) | ✅ Completed |
-| **Phase 4** | Document Text Extraction (native parsing, no OCR — see `KNOWN_DEBTS.md` #14) | ✅ Completed |
+| **Phase 1–3** | Ingestion, quarantine, validation, deduplication, storage promotion, immutable audit log | ✅ Completed |
+| **Phase C** | Asynchronous architecture (SKIP LOCKED workers, 202 contract) | ✅ Completed |
+| **Phase 4** | Text extraction, including per-page OCR for scanned PDFs | ✅ Completed |
 | **Phase 5** | Normalization (cleaning, language detection, quality gate) | ✅ Completed |
-| **Phase 6a** | Chunking (structure-aware, citation metadata) | ✅ Completed |
-| **Phase 6b** | Embedding & Vector Indexing (pgvector, self-hosted model) | ✅ Completed |
-| **Phase 7** | Permission Governance, Hard Pre-Filtering & RBAC | 📋 Planned |
-| **Phase 6c** | Retrieval endpoint (similarity search with SQL-level permission filtering) | ✅ Completed |
-| **Phase 8** | Text-to-SQL Engine & Sovereign RAG Query Layer | 📋 Planned |
+| **Phase 6** | Chunking, embedding, hybrid retrieval (vector + BM25), reranking, SQL-level permissions | ✅ Completed |
+| **Phase 7a** | Data Boundary Gateway (classify, mask, record) and cited answer generation | ✅ Completed |
+| **Phase 7b** | Evaluation harnesses (retrieval, behaviour, fidelity, RAGAS) | ✅ Completed |
+| **Phase 7c** | Test deployment on Azure (`DEPLOY.md`) | ✅ Completed |
+| **Phase 7d** | Invite-only registration or SSO, person-name masking, backups, TLS | 📋 Planned |
+| **Phase 8** | Text-to-SQL engine, intent routing, certified metrics agreed with department heads | 📋 Planned |
+| Later | Supersede/versioning, freshness warnings, Drive connector, semantic cache | 📋 Designed, not built |
 
 ---
 
@@ -243,38 +278,59 @@ Not accepted, with the reason:
 ```bash
 cp .env.example .env
 ```
+Set `SARVAM_API_KEY` to enable written answers. Without it search still works and `/ask` returns 503, which is a reduced service and not a crash.
 
 ### 3. Start Infrastructure & Background Services
 ```bash
-# Starts PostgreSQL (pgvector build), MinIO, API, and one worker container per pipeline
-# stage (scan, extraction, normalization, chunking, embedding)
+# PostgreSQL (ParadeDB), MinIO, the API, and one worker container per pipeline stage
 docker compose up -d
 
 # Run database schema migrations
 alembic upgrade head
 ```
 
-### 4. Interactive Endpoints
-- **API Documentation (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
-- **Register**: `POST /api/v1/auth/register`
-- **Login (OAuth2 password flow)**: `POST /api/v1/auth/login` — form fields `username` (email), `password`
-- **Current user**: `GET /api/v1/auth/me`
-- **Upload Document(s) (Async 202)**: `POST /api/v1/documents/upload` — multipart `files` (1–10), requires bearer token
-- **Query Status**: `GET /api/v1/documents/{document_id}/status`
-- **List Documents (paginated)**: `GET /api/v1/documents?limit=&offset=`
-- **Full-Text Search**: `GET /api/v1/documents/search?q=`
+### 4. Use it
+- **Knowledge Base UI**: [http://localhost:8000/search](http://localhost:8000/search)
+- **API documentation (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Health check**: [http://localhost:8000/health](http://localhost:8000/health)
 
-All `/api/v1/documents/*` endpoints require `Authorization: Bearer <token>` from `/auth/login`.
+Create an account with `POST /api/v1/auth/register`, then sign in with `POST /api/v1/auth/login` (OAuth2 password flow: form fields `username` = email, `password`).
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/documents/upload` | Upload 1–10 files (multipart `files`, with a `classification`); returns 202 |
+| `GET /api/v1/documents/{id}/status` | Pipeline status of one document |
+| `GET /api/v1/documents?limit=&offset=` | Paginated list |
+| `GET /api/v1/documents/search?q=` | Title/filename/description search |
+| `GET /api/v1/search?q=` | Hybrid, reranked passage search |
+| `POST /api/v1/ask?q=` | Cited written answer |
+| `POST /api/v1/documents/{id}/classify` | Change a document's tier (owner or admin; audited) |
+| `DELETE /api/v1/documents/{id}` | Reversible delete; `?permanent=true` is admin-only |
+
+All `/api/v1/documents/*`, `/search` and `/ask` endpoints require `Authorization: Bearer <token>`.
+
+### 5. Deploy
+`DEPLOY.md` is the runbook for an Azure VM, written for a 2-person test box: sizing (8 GB RAM is the floor), the firewall allow-list, a Docker network setting Azure needs, generating secrets, and the settings that matter on a small machine (`RERANK_CANDIDATES`, `INFERENCE_THREADS`, `EMBEDDING_MEM_LIMIT`).
 
 ---
 
 ## 🧪 Testing & Verification
 
 ```bash
-# Run the complete test suite (244 tests: 211 unit + 33 PostgreSQL integration, ~25s)
+# Full suite: unit tests plus Postgres integration tests against a throwaway container
 pytest tests/ -v
 
-# Run linter
-ruff check src/ tests/ main.py
+# Unit tests only (in-memory repository, no Docker needed)
+pytest tests/unit -v
+
+# Lint: this exact file list is what CI runs
+ruff check src/ tests/ main.py worker_main.py
+
+# Evaluation
+python run_eval.py --compare
+python run_quality_suite.py
 ```
+
+Integration tests build their schema by running the real Alembic migrations, not `create_all()`, because much of this schema's behaviour (audit immutability triggers, the dedup index, the BM25 index) lives in migrations and not in the ORM. They skip, and never fall back to a real database, if Docker is unavailable.
+
+See `CLAUDE.md` for the full architecture notes, `ARCHITECTURE.md` for design decisions, and `KNOWN_DEBTS.md` for what was deliberately deferred and why.
