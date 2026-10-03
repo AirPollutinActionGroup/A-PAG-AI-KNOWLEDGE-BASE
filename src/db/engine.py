@@ -6,7 +6,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.config import settings
-from src.db.models import Base
 
 # Engine with connection pooling and pre-ping health checks
 engine = create_engine(
@@ -33,7 +32,3 @@ def get_db() -> Generator[Session, None, None]:
     finally:
         db.close()
 
-
-def create_tables():
-    """Helper to create all registered ORM tables."""
-    Base.metadata.create_all(bind=engine)
