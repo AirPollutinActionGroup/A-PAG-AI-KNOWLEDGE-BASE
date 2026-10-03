@@ -42,6 +42,8 @@ and is about 1.8x faster. Leave it at 50 on 4 vCPU. (Before this was wired throu
 
 **Optional, untested:** `EXTRACTION_CPUS=1.5` in `.env` caps the OCR container so a big scanned PDF cannot take both cores and slow search while it runs. It defaults to no limit. Try it, ask a question during an ingest, and compare the latency with and without before keeping it.
 
+**Embedding is the slow, memory-hungry stage.** On 2 vCPU it embeds a full batch of passages in about 80 seconds, and the worker needs ~2.3GB at its peak. The default limit is now 2500m (`EMBEDDING_MEM_LIMIT`), and `EMBEDDING_BATCH_SIZE=16` in `.env` lowers the peak further at some cost in speed. If a limit is set too low Docker does not kill the worker, it swaps it, and ingestion slows to a crawl with nothing in the logs; check `free -m` and the worker's `memory.swap.current` if an ingest is inexplicably slow.
+
 Expect the **first bulk ingest to be slow** on 2 vCPU: OCR runs at roughly 12s a page, so a
 162-page scanned PDF takes about half an hour. It runs in the background and the system stays
 usable — start it and leave it.
