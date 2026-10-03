@@ -126,6 +126,9 @@ services:
       # DEPLOY.md's advice to lower it on a 2-vCPU VM silently did not apply. 25 costs one point
       # of first-result accuracy and two in the top five for ~1.8x the speed (measured).
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-50}
+      # Shared demo login shown under the sign-in box. Empty (the default) hides it.
+      DEMO_LOGIN_EMAIL: ${DEMO_LOGIN_EMAIL:-}
+      DEMO_LOGIN_PASSWORD: ${DEMO_LOGIN_PASSWORD:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
