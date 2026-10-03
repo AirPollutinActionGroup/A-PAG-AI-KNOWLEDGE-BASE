@@ -303,6 +303,12 @@ services:
     # container dies, the lease lapses, the reaper re-queues, and the next worker dies on the same
     # document. See KNOWN_DEBTS.md #24.
     mem_limit: 1800m
+    # Optional ceiling on how much CPU OCR may take. 0 (the default) means no limit, so nothing
+    # changes until it is set. On a 2-vCPU VM a large scanned PDF otherwise takes both cores for
+    # the length of the job and search slows for everyone; EXTRACTION_CPUS=1.5 leaves half a core
+    # for the API and Postgres at the price of slower OCR. Untested against real load, which is
+    # why it is opt-in: measure a question's latency during an OCR ingest before relying on it.
+    cpus: ${EXTRACTION_CPUS:-0}
     command: python worker_main.py
     environment:
       WORKER_STAGE: EXTRACT

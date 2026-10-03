@@ -40,6 +40,8 @@ each, interleaved: 25 candidates scores 82.0% hit@1 / 95.0% hit@5 against 83.0% 
 and is about 1.8x faster. Leave it at 50 on 4 vCPU. (Before this was wired through
 `docker-compose.prod.yml` the setting reached no container, so it did nothing.)
 
+**Optional, untested:** `EXTRACTION_CPUS=1.5` in `.env` caps the OCR container so a big scanned PDF cannot take both cores and slow search while it runs. It defaults to no limit. Try it, ask a question during an ingest, and compare the latency with and without before keeping it.
+
 Expect the **first bulk ingest to be slow** on 2 vCPU: OCR runs at roughly 12s a page, so a
 162-page scanned PDF takes about half an hour. It runs in the background and the system stays
 usable — start it and leave it.
