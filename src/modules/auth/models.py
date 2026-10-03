@@ -43,11 +43,6 @@ class UserRegister(BaseModel):
         return value
 
 
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-
-
 class UserOut(BaseModel):
     """Safe user representation — never includes hashed_password."""
 
@@ -66,10 +61,3 @@ class Token(BaseModel):
     token_type: str = "bearer"
     expires_in_minutes: int
 
-
-class TokenPayload(BaseModel):
-    """Decoded JWT claims."""
-
-    sub: str  # user_id as string
-    role: UserRole
-    exp: int

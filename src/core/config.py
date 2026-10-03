@@ -5,7 +5,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "A-PAG AI Knowledge Base"
     ENVIRONMENT: str = "development"
 
     # Database
