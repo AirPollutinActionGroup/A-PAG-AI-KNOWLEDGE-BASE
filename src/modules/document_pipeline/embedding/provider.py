@@ -152,14 +152,12 @@ class FastEmbedProvider(EmbeddingProvider):
           which is both wrong and plausible enough to go unnoticed.
 
         Rebuilt from the same serialized state, so vocabulary and merges are identical; only
-        these two policies differ.
+        these two policies differ. Shared with `TokenizerOnlyCounter`, which the chunking stage
+        uses to count without loading the model, so the two cannot drift apart.
         """
-        from tokenizers import Tokenizer
+        from src.modules.document_pipeline.embedding.tokenizer_only import untruncated
 
-        tokenizer = Tokenizer.from_str(self._model.model.tokenizer.to_str())
-        tokenizer.no_truncation()
-        tokenizer.no_padding()
-        return tokenizer
+        return untruncated(self._model.model.tokenizer)
 
     def count_tokens(self, texts: list[str]) -> list[int]:
         if not texts:

@@ -600,22 +600,29 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   would have pointed the suite's migrations at the developer's real database, exactly what the
   existing `APAG_ALLOW_DESTRUCTIVE_DB_TESTS` guard exists to prevent.
 
-### 32. The chunking worker loads the embedding model purely to tokenize
-- **Status**: Accepted trade-off, with a cheaper option deliberately not taken.
-- **Context**: sizing chunks in tokens requires the model's tokenizer, and the only robust way to
-  obtain it is `FastEmbedProvider`, which loads the ONNX model. The chunking worker therefore
-  carries ~640MB resident (observed 524MB) for a stage that performs no inference.
-- **The cheaper option**: the tokenizer itself is a 695KB `tokenizer.json` inside fastembed's
-  cache. Loading it directly would cost a few MB. It was **not** taken because finding it means
-  hardcoding fastembed's cache layout (`models--Qdrant--bge-base-en-v1.5-onnx-Q/snapshots/<hash>/`),
-  which is undocumented and would break silently on a fastembed upgrade — and the failure mode
-  is a fallback to the character budget, i.e. a quiet return of debt #28.
-- **What contains it**: `mem_limit` on the chunking container (2g dev, 1200m prod) so the cost is
-  attributable and bounded rather than host-wide, and `ChunkingService.with_model_tokenizer()`
-  falls back to the character budget with a WARNING rather than refusing to start.
-- **Trigger to address**: if the VM proves too small for two model-loading workers, or if
-  fastembed exposes a supported way to fetch a tokenizer without the model. Either makes this a
-  small, local change.
+### 32. The chunking worker loads the embedding model purely to tokenize — **resolved**
+- **Status**: Closed. `TokenizerOnlyCounter` (`embedding/tokenizer_only.py`) counts with the
+  tokenizer alone; the chunking worker no longer builds the ONNX session.
+- **Context**: sizing chunks in tokens requires the model's tokenizer, and the only way it was
+  obtained was `FastEmbedProvider`, which loads the ONNX model — 500MB resident, measured, for a
+  stage that performs no inference. The tokenizer alone measures 95MB, most of it imports.
+- **Why the earlier objection no longer applies**: it was that finding `tokenizer.json` meant
+  hardcoding fastembed's cache layout. It does not. fastembed's documented `lazy_load=True`
+  resolves the model directory without building the session, and `load_tokenizer` (fastembed's
+  own routine, the one the full model uses) reads it. The directory comes from a private
+  attribute, which an upgrade could rename — see the fallback below.
+- **Exactness, which is the requirement and not a nicety**: a counter that disagreed with the
+  real one by a token here and there would quietly bring #28 back. Verified rather than argued:
+  zero mismatches over all 4,459 chunks plus Devanagari, control characters and 5,000-character
+  runs; and re-chunking all 69 normalized documents under both counters produced **identical
+  output, 7,319 chunks**. The provider now calls the same `untruncated()` helper, so the two
+  cannot drift on the two policies (truncation, padding) that matter.
+- **The fallback chain**: tokenizer alone, then the full provider, then the character budget.
+  If the files cannot be located, the second step costs memory and counts exactly; only if that
+  also fails does it reach characters, with a WARNING. More memory is acceptable, a different
+  count is not.
+- **Still true**: `mem_limit` on the chunking container was sized for the full model. It can come
+  down once the new footprint has been measured in the container rather than inferred.
 
 ### 33. `AWAITING_CLASSIFICATION` no longer means what it says
 - **Status**: Open. A rename, not a design flaw.
