@@ -77,6 +77,29 @@ df -h /            # at least 20GB free: images are ~2.5GB and documents accumul
 
 ---
 
+## 0. Azure: allow your IP, and fix Docker's packet size
+
+Two things that look like the app being broken and are not. Both bit the first real deploy.
+
+**The firewall rules allow specific source IPs, not everyone.** If `http://<vm-ip>:85/` or SSH
+times out while the portal says the VM is Running, your public IP is probably not in the rules.
+Find it with `curl https://api.ipify.org`, then add it to both the SSH and port-85 inbound rules
+in the VM's Networking page. A timeout means packets are being dropped; "connection refused"
+would mean the VM is up and nothing is listening. The login user is **`azureuser`**, not the
+VM's name.
+
+**Containers cannot reach the internet at Docker's default MTU on Azure.** The VM itself can
+(`curl https://pypi.org` works) while a container's TLS handshake times out, so `pip install`
+fails inside `docker build` and the API could never reach Sarvam either. Set a smaller MTU once:
+
+```bash
+echo '{"mtu": 1400}' | sudo tee /etc/docker/daemon.json
+sudo systemctl restart docker
+docker run --rm python:3.12-slim python -c "import urllib.request;print(urllib.request.urlopen('https://pypi.org/simple/fastapi/',timeout=20).status)"   # expect 200
+```
+
+---
+
 ## 1. Docker
 
 ```bash
@@ -160,8 +183,14 @@ The first build downloads the base image and bakes in the embedding, reranker an
 Expect **10–20 minutes** and do not interrupt it.
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+COMPOSE_PARALLEL_LIMIT=1 docker compose -f docker-compose.prod.yml up -d --build
 ```
+
+`COMPOSE_PARALLEL_LIMIT=1` matters on a 2-vCPU box: seven services run the same `pip install`,
+and in parallel they compete for bandwidth and time out. One at a time, the later builds reuse
+the first one's cached layers. On a **fresh** database volume the first `up` can end with
+`apag-postgres is unhealthy` because ParadeDB's first-boot initialisation outlasts the health
+check; the database is fine, so run the same command again.
 
 Migrations are not a separate step: a one-shot `migrate` service runs `alembic upgrade head` and
 exits, and the API and workers refuse to start until it has completed successfully.
