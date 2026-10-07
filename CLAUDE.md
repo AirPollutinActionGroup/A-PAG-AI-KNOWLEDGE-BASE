@@ -37,6 +37,11 @@ WORKER_STAGE=EMBED python worker_main.py
 python backfill_jobs.py --stage EMBED --dry-run
 python backfill_jobs.py --stage EMBED
 
+# Import the shared Google Drive folder. The subfolder (Public/Restricted) sets the tier, so
+# there is deliberately no --classification flag. Needs GDRIVE_* in .env; see DEPLOY.md 6b.
+python drive_sync.py --dry-run
+python drive_sync.py
+
 # Re-run a stage over documents it already finished, for when the *stage* improved rather than
 # the document being stranded (--reset moves them back to the stage's entry status first)
 python backfill_jobs.py --stage EXTRACT --status NORMALIZATION_FAILED --reset --dry-run
@@ -48,7 +53,7 @@ pytest tests/integration -v                   # integration tests (throwaway Pos
 pytest tests/unit/test_ingestion_pipeline.py::TestName::test_case -v   # single test
 
 # Lint — this exact file list is what CI runs; a wider one passing locally is not the same check
-ruff check src/ tests/ main.py worker_main.py
+ruff check src/ tests/ main.py worker_main.py bulk_ingest.py drive_sync.py
 
 # Evaluation. The first two need no judge and cost nothing but a Sarvam call.
 python run_eval.py --compare            # retrieval: hit@1 / hit@5 / MRR, four configurations
@@ -623,6 +628,65 @@ worker independently re-verifies content against the stored type before promotin
 `page_count` is really a per-format "unit count": pages for PDF, worksheets for XLSX, slides for
 PPTX, and `None` for DOCX — Word text reflows, so a page count doesn't exist until the document is
 rendered, and faking one from `app.xml` would be wrong. The column is nullable for this reason.
+
+### The Google Drive connector: a second way in, not a second pipeline
+
+`src/modules/connectors/drive/` imports a shared Drive folder. The property that matters is what
+it does **not** do: it never processes anything. Every file it accepts is handed to
+`UploadService.receive()`, the same entry point the upload form uses, so a Drive document is
+indistinguishable afterwards from an uploaded one and gets the same scan, OCR, quality gate,
+chunking, embedding, audit and gateway. A connector that grew its own shortcut would be a second
+set of rules to secure and to test, and no test would catch the divergence.
+
+Shipped in two phases. **Phase A is `drive_sync.py`**, a command run by hand, mirroring
+`bulk_ingest.py` (including its `preflight_storage()` check — running on the host with
+`STORAGE_BACKEND=local` while the workers read MinIO fails every file at SCAN minutes later, in
+a different log). Phase B wraps the same `DriveSyncService` in a timer-driven worker; note that
+**no periodic process exists in this repo today** — `BaseWorker` is entirely jobs-table claim
+logic, so that worker is a new shape rather than another subclass.
+
+Four decisions live in `service.py`:
+
+- **The folder sets the tier, matched by folder ID.** Under the Public tree is PUBLIC, under the
+  Restricted tree is RESTRICTED, and anywhere else is skipped rather than guessed. IDs rather
+  than names is a security property: a name can be renamed, duplicated, or shadowed by a
+  subfolder somebody calls "Public", and a rename would otherwise reclassify everything beneath
+  it silently. Drive also allows one folder or file under two parents, so where the trees overlap
+  the **stricter** tier wins — `is_stricter()` from `auth/access.py`, the same rule dedup uses.
+- **Change is `modifiedTime`, not a hash.** Google re-exports an unchanged Doc to slightly
+  different bytes every time, so a content hash would re-import the whole corpus on every run.
+  An edit arrives as a **new document** and the previous one is left alone, so a citation written
+  last week still resolves to the text that was cited.
+- **Removal is the reversible delete.** Binned, permanently deleted, or moved out of the watched
+  folders all arrive identically — the file is simply no longer in the listing — and all three
+  soft-delete: out of search and answers at once, bytes and audit trail kept. Never `purge()`.
+  Drive's own bin is reversible for about a month, and a sync should not be more destructive than
+  the thing it follows. **Never runs on a `--limit` pass**, where "not in the listing" only means
+  "not in the part we looked at".
+- **Ownership is provenance, not authorisation.** The Drive owner's email is matched to a local
+  account because RESTRICTED is owner-scoped; where none matches, a configured fallback owns it,
+  and for a RESTRICTED file that means only that account and admins can read it. Reported rather
+  than logged quietly, because it otherwise looks like nothing happened.
+
+`export_map.py` holds the one format decision. Google Docs, Sheets and Slides have no bytes to
+download — they must be exported, and the target is what extraction will later read structure out
+of: **docx, xlsx and pptx**, never text/plain, CSV or PDF. Word paragraph styles and slide titles
+are what the chunker cuts on, and exporting to text discards them so every chunk boundary
+afterwards is a guess. Everything else is downloaded and passed to `detect_format()`, so a format
+added to `formats.py` becomes importable from Drive with no edit here.
+
+`client.py` is httpx, not `google-api-python-client`; only `google-auth` is a dependency, for
+signing the service-account JWT. Two non-obvious things in it: **every listing follows
+`nextPageToken`** (Drive returns 100 items and silently stops, so a folder of 300 would import
+100 and report success), and **`supportsAllDrives` is set on every call** (it is off by default,
+so a folder on a Shared Drive returns an empty list rather than an error — indistinguishable from
+an empty folder).
+
+Credentials are a **service account, read-only scoped**. Not an API key, which only reaches
+publicly shared files; not per-user OAuth, which would mean a consent screen and a refresh token
+per person. The connector never writes to Drive, so deleting a document here can never delete
+somebody's file. `drive_files` maps each Drive id to what was done with it — including
+`SKIPPED`, which has no document but is exactly what is worth recording.
 
 ### Config & enums
 

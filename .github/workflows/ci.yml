@@ -45,7 +45,7 @@ jobs:
         run: uv sync --frozen
 
       - name: ruff
-        run: uv run ruff check src/ tests/ main.py worker_main.py
+        run: uv run ruff check src/ tests/ main.py worker_main.py bulk_ingest.py drive_sync.py
 
   test:
     name: Tests

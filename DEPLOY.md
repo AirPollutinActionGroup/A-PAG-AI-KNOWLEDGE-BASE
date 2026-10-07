@@ -295,6 +295,105 @@ A 162-page scanned PDF takes about 10 minutes to OCR on 4 vCPU. `AWAITING_CLASSI
 
 ---
 
+## 6b. Google Drive sync (optional)
+
+Instead of copying files up by hand, point the deployment at one shared Drive folder. Staff drop
+documents into it, and the **subfolder decides the tier** — so nobody has to remember to pick a
+classification, and a file filed anywhere else is skipped rather than given a tier nobody chose.
+
+Everything imported this way goes through `UploadService.receive()`, the same entry point as the
+upload form. Scan, OCR, quality gate, chunking, embedding, audit and the Data Boundary Gateway
+all apply unchanged. There is no second set of rules.
+
+### In Google, once
+
+1. **Google Cloud Console → APIs & Services → Library → Google Drive API → Enable.**
+2. **IAM & Admin → Service Accounts → Create.** Name it `apag-drive-sync`; skip the role step —
+   it needs no project role, only Drive sharing.
+3. **Keys → Add key → JSON.** This downloads the key. It is a credential: never commit it, never
+   email it, never put it in the image.
+4. Copy the service account's email (`…@….iam.gserviceaccount.com`).
+5. In Drive, create **A-PAG Knowledge Base** with two subfolders, **Public** and **Restricted**.
+6. Share the **top-level** folder with that email as **Viewer** — read-only is deliberate, so the
+   connector can never alter or delete anyone's files.
+7. Open each subfolder and copy its ID from the URL, the part after `/folders/`.
+
+An API key will not work: API keys only reach publicly shared files, and these folders must never
+be public.
+
+### On the VM
+
+```bash
+# the key, readable only by you, outside the repo
+mkdir -p ~/apag/secrets
+# paste the JSON into ~/apag/secrets/drive-sync.json, then:
+chmod 600 ~/apag/secrets/drive-sync.json
+```
+
+Add to `~/apag/.env`:
+
+```bash
+GDRIVE_ENABLED=true
+GDRIVE_CREDENTIALS_FILE=/app/secrets/drive-sync.json
+GDRIVE_PUBLIC_FOLDER_ID=<id of the Public subfolder>
+GDRIVE_RESTRICTED_FOLDER_ID=<id of the Restricted subfolder>
+GDRIVE_FALLBACK_OWNER_EMAIL=you@a-pag.org
+```
+
+`GDRIVE_FALLBACK_OWNER_EMAIL` **must be a registered user**. `RESTRICTED` is owner-scoped, so a
+document whose Drive owner has no account here needs someone to belong to — and a RESTRICTED
+document with no owner is invisible to everybody except admins.
+
+The folder IDs are **IDs, not names**, on purpose. A name can be renamed, duplicated, or shadowed
+by a subfolder somebody calls "Public"; matching on one would silently reclassify everything
+beneath it.
+
+### Run it
+
+```bash
+cd ~/apag
+# see what it would do, touching nothing
+docker compose -f docker-compose.prod.yml exec -T api python drive_sync.py --dry-run
+
+# a small first pass is worth it, especially on a burstable VM
+docker compose -f docker-compose.prod.yml exec -T api python drive_sync.py --limit 5
+
+# then the folder
+docker compose -f docker-compose.prod.yml exec -T api python drive_sync.py
+```
+
+Re-running is safe and cheap: unchanged files are recognised by Drive's `modifiedTime` and are
+never downloaded twice. Run it again whenever somebody adds something; a scheduled worker that
+does this automatically is the next phase.
+
+### What it does, stated plainly
+
+| In Drive | In the knowledge base |
+|---|---|
+| File added to `Public` / `Restricted` | Imported at that tier |
+| File edited | Imported as a **new** document; the old one is kept, so existing citations still resolve |
+| Google Doc / Sheet / Slides | Exported to docx / xlsx / pptx, which keeps headings and tables |
+| File binned, deleted, or moved out | Document hidden from search and answers, **reversibly** — bytes and audit trail kept |
+| File elsewhere in Drive | Ignored. The service account cannot see it |
+| Document deleted here | **Nothing.** The connector never writes to Drive |
+
+Two outcomes the report calls out rather than leaving in a log, because both change who can read
+something:
+
+- **TIER RAISED** — the same bytes are already in the corpus at a lower tier. The copy is dropped
+  and the existing document is raised to RESTRICTED. Reverse one with
+  `POST /api/v1/documents/{id}/classify` if a file was filed in the wrong folder.
+- **OWNER FELL BACK** — the Drive owner has no account here, so the fallback account owns the
+  document. For a RESTRICTED file that means only that account and admins will see it.
+
+### If nothing is found
+
+Almost always the folder not being shared with the service account, which from here is
+indistinguishable from an empty folder. Check the address the command prints at startup against
+the folder's sharing list. Failing that, confirm the Drive API is enabled on the project.
+
+---
+
 ## 7. Open it to the office
 
 The API listens on **85**. Allow it inbound:
