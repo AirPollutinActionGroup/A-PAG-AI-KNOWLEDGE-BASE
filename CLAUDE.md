@@ -803,6 +803,15 @@ rationale before "fixing" them:
   The one exception: concurrent dedup promotion races on `uq_documents_active_sha256` are caught
   as an `IntegrityError` in `ScanJobHandler.process()` and routed to `DUPLICATE` — that DB
   constraint is the real guarantee, application code is just handling its failure mode.
+- **Dedup matches on bytes, but a stricter tier still wins.** The hash is the whole of the match,
+  so the duplicate's classification would otherwise be discarded with it: a document already in
+  the corpus as PUBLIC, re-filed as RESTRICTED, stayed PUBLIC and stayed eligible to cross the
+  gateway. `ScanJobHandler._escalate_tier_if_stricter()` raises the canonical document's tier
+  first, records an unattributed `DOCUMENT_RECLASSIFIED`, and then drops the duplicate as before.
+  **One direction only** — a PUBLIC copy never lowers a RESTRICTED canonical, or re-uploading a
+  file would become a way to declassify it. `is_stricter()` lives in `src/modules/auth/access.py`
+  with the rest of the tier semantics, because "stricter" is only self-evident while there are
+  two tiers. See `KNOWN_DEBTS.md` #36.
 - **Nothing reaches an external model except through `DataBoundaryGateway`.** Adding a second
   path out — a provider called directly, a new endpoint that composes its own prompt — defeats
   the control entirely, and no test would catch it. `AnswerService` holds a gateway, not a

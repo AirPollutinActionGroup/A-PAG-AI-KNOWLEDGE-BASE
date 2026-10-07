@@ -55,6 +55,26 @@ def can_view(
     return owner_id is not None and owner_id == viewer_id
 
 
+def _tier_rank(classification: str | Classification | None) -> int:
+    """RESTRICTED outranks everything else, NULL included — which `can_view` reads as visible."""
+    return 1 if classification == Classification.RESTRICTED else 0
+
+
+def is_stricter(
+    candidate: str | Classification | None,
+    current: str | Classification | None,
+) -> bool:
+    """True when `candidate` would restrict a document more tightly than `current` does.
+
+    For the case where two tiers meet with no person to choose between them: deduplication, where
+    identical bytes arrive a second time carrying a different classification from the copy already
+    in the corpus. The rule has to live here with the rest of the tier semantics, because
+    "stricter" is only obvious while there are two tiers — a third would need a real ordering
+    rather than this predicate, and it would need it in exactly one place.
+    """
+    return _tier_rank(candidate) > _tier_rank(current)
+
+
 def visible_documents_clause(
     document_model,
     viewer_id: uuid.UUID | None,
