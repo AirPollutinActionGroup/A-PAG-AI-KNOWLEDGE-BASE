@@ -285,6 +285,33 @@ class Settings(BaseSettings):
     # than letting one long chunk set the latency of the whole query.
     RERANK_MAX_CHARS: int = 900
 
+    # --- Google Drive connector ---------------------------------------------------------
+    #
+    # Off by default, and the command refuses to run without it. A connector that silently
+    # starts pulling an organisation's Drive into the corpus because a default said so is the
+    # same class of mistake as a classification that defaulted to PUBLIC.
+    GDRIVE_ENABLED: bool = False
+    # Path to the service-account JSON key. Mounted read-only in the container; never baked into
+    # the image and never committed — it grants access to everything shared with that account.
+    GDRIVE_CREDENTIALS_FILE: str = ""
+    # The two watched folders, by **ID**, not name. The folder is what sets a document's tier, so
+    # this is a security boundary: names can be renamed, duplicated, or shadowed by a subfolder
+    # someone creates called "Public", and matching on one would let a rename silently reclassify
+    # every document underneath it. An ID cannot be spoofed by anyone who lacks access already.
+    GDRIVE_PUBLIC_FOLDER_ID: str = ""
+    GDRIVE_RESTRICTED_FOLDER_ID: str = ""
+    # Who owns a document whose Drive owner has no account here. RESTRICTED is owner-scoped, so
+    # this decides who can see such a file — in practice this account and admins. It must resolve
+    # to a real user, and the command refuses to start if it does not.
+    GDRIVE_FALLBACK_OWNER_EMAIL: str = ""
+    # Checked against Drive's reported size *before* downloading. `UploadService.receive()` takes
+    # bytes, so an oversized file would otherwise be pulled into memory purely to be rejected by
+    # a validator that already knows the limit. Matches MAX_FILE_SIZE_BYTES in the upload path.
+    GDRIVE_MAX_FILE_BYTES: int = 100 * 1024 * 1024
+    # Phase B only: how often the worker asks Drive what changed. An unchanged folder costs one
+    # small request, so this is about how quickly a new document appears, not about load.
+    GDRIVE_SYNC_INTERVAL_SECONDS: int = 900
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _pin_postgres_driver(cls, value: str) -> str:

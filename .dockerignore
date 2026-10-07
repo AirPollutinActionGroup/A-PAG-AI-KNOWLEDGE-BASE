@@ -1,0 +1,40 @@
+# What must never reach the image.
+#
+# There was no .dockerignore at all, and the Dockerfile ends in `COPY . .` — so every build was
+# baking the local `.env` into a layer, JWT signing key and Sarvam API key included. A secret in
+# a layer is a secret in every copy of that image, every registry it is pushed to and every
+# `docker history` run against it, and deleting the file in a later layer does not remove it.
+#
+# The Drive connector made this urgent rather than merely untidy: `secrets/` holds a
+# service-account key that grants access to everything shared with that account.
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Build context size, and correctness. The embedding, reranker and OCR models are pre-fetched
+# into /app/.model_cache *before* `COPY . .`; a local cache of the same name would be copied
+# over the baked one and quietly replace known-good weights with whatever is on this machine.
+.model_cache/
+.venv/
+venv/
+.git/
+.github/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local pipeline artifacts — the real ones live in MinIO.
+storage_data/
+*.db
+*.sqlite3
+
+# Editor and agent scratch
+.idea/
+.vscode/
+.claude/

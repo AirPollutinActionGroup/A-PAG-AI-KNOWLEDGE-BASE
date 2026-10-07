@@ -69,6 +69,15 @@ services:
       # behaviour for a deployment without external inference rather than a startup failure.
       SARVAM_API_KEY: ${SARVAM_API_KEY:-}
       SARVAM_MODEL: ${SARVAM_MODEL:-sarvam-105b-conversations}
+      # Google Drive connector, same shape as prod: `drive_sync.py` is run through this service
+      # because it already has the database, MinIO and the format registry.
+      GDRIVE_ENABLED: ${GDRIVE_ENABLED:-false}
+      GDRIVE_CREDENTIALS_FILE: ${GDRIVE_CREDENTIALS_FILE:-/app/secrets/drive-sync.json}
+      GDRIVE_PUBLIC_FOLDER_ID: ${GDRIVE_PUBLIC_FOLDER_ID:-}
+      GDRIVE_RESTRICTED_FOLDER_ID: ${GDRIVE_RESTRICTED_FOLDER_ID:-}
+      GDRIVE_FALLBACK_OWNER_EMAIL: ${GDRIVE_FALLBACK_OWNER_EMAIL:-}
+    volumes:
+      - ./secrets:/app/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
