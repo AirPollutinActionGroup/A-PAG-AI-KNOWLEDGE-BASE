@@ -58,6 +58,26 @@ def report(outcome: SyncOutcome, dry_run: bool) -> None:
     print(f"  {'would retire' if dry_run else 'retired'} (gone from Drive) : "
           f"{len(outcome.removed)}")
 
+    # Listed, not merely counted. A dry run exists to be read before anything happens, and
+    # "would import: 1" does not say *which* file, nor — far more important — which tier it
+    # resolved to. The tier is the decision this command makes on the operator's behalf, so it
+    # is the one thing a preview has to show.
+    if outcome.imported:
+        print()
+        print("WOULD IMPORT:" if dry_run else "IMPORTED:")
+        for name in outcome.imported[:40]:
+            print(f"  {name}")
+        if len(outcome.imported) > 40:
+            print(f"  ... and {len(outcome.imported) - 40} more")
+
+    if outcome.duplicates:
+        print()
+        print("ALREADY IN THE CORPUS:")
+        for name in outcome.duplicates[:20]:
+            print(f"  {name}")
+        if len(outcome.duplicates) > 20:
+            print(f"  ... and {len(outcome.duplicates) - 20} more")
+
     if outcome.escalated:
         print()
         print(f"TIER RAISED by {len(outcome.escalated)} duplicate(s):")
