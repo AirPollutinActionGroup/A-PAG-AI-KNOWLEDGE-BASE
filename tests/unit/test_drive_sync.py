@@ -12,8 +12,8 @@ source has gone.
 
 import io
 import uuid
-from pathlib import Path
 
+import pypdf
 import pytest
 from docx import Document as DocxDocument
 from sqlalchemy import create_engine, select
@@ -30,8 +30,6 @@ from src.modules.connectors.drive.service import DriveSyncError, DriveSyncServic
 from src.storage.bucket_manager import BucketManager
 from src.storage.object_storage import LocalFileSystemStorage
 
-FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pdfs"
-
 PUBLIC_ROOT = "folder-public"
 RESTRICTED_ROOT = "folder-restricted"
 
@@ -39,8 +37,23 @@ GOOGLE_DOC = "application/vnd.google-apps.document"
 GOOGLE_FORM = "application/vnd.google-apps.form"
 
 
-def pdf_bytes() -> bytes:
-    return (FIXTURES_DIR / "01_standard_digital_policy.pdf").read_bytes()
+def pdf_bytes(title: str = "CAQM Statutory Directive 2026") -> bytes:
+    """Built here rather than read from `tests/fixtures/pdfs/`.
+
+    Those fixtures are generated at import time by `test_ingestion_pipeline.py` and are not in
+    the repository, so reading one makes this file quietly depend on another module having been
+    imported first. That dependency is invisible until a fresh checkout reorders collection, and
+    then it fails as a missing file rather than as a missing import.
+
+    `title` varies the bytes, which is what makes "the edited file is a different document"
+    testable at all.
+    """
+    buf = io.BytesIO()
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    writer.add_metadata({"/Title": title})
+    writer.write(buf)
+    return buf.getvalue()
 
 
 def docx_bytes() -> bytes:
@@ -283,7 +296,7 @@ def test_an_edited_file_arrives_as_a_new_document(stack):
     stack.build().sync_once()
 
     stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z")
-    stack.drive.content["f1"] = (FIXTURES_DIR / "02_complex_tabular_budget.pdf").read_bytes()
+    stack.drive.content["f1"] = pdf_bytes("CAQM Statutory Directive 2026 (revised)")
     outcome = stack.build().sync_once()
 
     assert len(outcome.imported) == 1
