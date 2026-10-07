@@ -1040,3 +1040,193 @@ def test_repo_purge_is_idempotent():
 def test_repo_purge_returns_false_for_unknown_id():
     """Guards the endpoint's 404 path — purge must not invent rows."""
     assert InMemoryDocumentRepository().purge(uuid.uuid4()) is False
+
+
+# ==============================================================================
+# 10. DEDUPLICATION MUST NOT FAIL OPEN ON TIER
+# ==============================================================================
+#
+# Dedup matches on SHA-256 alone, so the second copy is dropped and its classification goes with
+# it. In one direction that silently widened access: a document already in the corpus as PUBLIC,
+# re-filed as RESTRICTED, stayed PUBLIC — org-wide visible and still eligible to cross the Data
+# Boundary Gateway. These pin the escalation, and pin that it only ever runs one way.
+
+
+@pytest.fixture
+def dedup_stack(tmp_path):
+    """Storage, repo and a real SQLite session, so audit rows can actually be asserted on.
+
+    Most tests in this file pass no `db_session`, which makes `_audit` a no-op — fine where the
+    status transition is the subject, useless here, where the record of the tier change *is* the
+    subject.
+    """
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+    buckets = BucketManager(storage=storage)
+    repo = InMemoryDocumentRepository()
+    engine = create_engine(f"sqlite:///{tmp_path / 'dedup.db'}")
+    Base.metadata.create_all(bind=engine)
+    session = Session(engine)
+    try:
+        yield SimpleNamespace(
+            repo=repo,
+            session=session,
+            service=UploadService(bucket_manager=buckets, repository=repo, db_session=session),
+            handler=ScanJobHandler(
+                bucket_manager=buckets, repository=repo, db_session=session
+            ),
+        )
+    finally:
+        session.close()
+
+
+def _upload(stack, filename, tier):
+    with open(FIXTURES_DIR / "01_standard_digital_policy.pdf", "rb") as f:
+        data = f.read()
+    return upload_and_process_sync(
+        stack.service, stack.handler, filename=filename, data=data,
+        request_meta=UploadRequest(classification=tier),
+    )
+
+
+def _reclassifications(stack, document_id):
+    return (
+        stack.session.query(AuditLog)
+        .filter(
+            AuditLog.document_id == document_id,
+            AuditLog.event_type == AuditEventType.DOCUMENT_RECLASSIFIED.value,
+        )
+        .all()
+    )
+
+
+def test_restricted_duplicate_raises_the_canonical_tier(dedup_stack):
+    """The hole this closes: the stricter of two disagreeing tiers must win."""
+    first = _upload(dedup_stack, "public_copy.pdf", Classification.PUBLIC)
+    assert first.status == DocumentStatus.VALIDATED
+    assert dedup_stack.repo.get_by_id(first.document_id).classification == Classification.PUBLIC
+
+    second = _upload(dedup_stack, "restricted_copy.pdf", Classification.RESTRICTED)
+
+    # The duplicate is still discarded — only the canonical document moves.
+    assert second.status == DocumentStatus.DUPLICATE
+    assert second.was_duplicate is True
+    assert second.document_id == first.document_id, "response should name the canonical document"
+
+    canonical = dedup_stack.repo.get_by_id(first.document_id)
+    assert canonical.classification == Classification.RESTRICTED
+    assert second.canonical_tier_escalated is True
+    assert "raised to RESTRICTED" in second.message
+
+
+def test_escalation_is_recorded_as_an_unattributed_reclassification(dedup_stack):
+    """A tier that changed with nobody asking is exactly the thing someone looks for later."""
+    first = _upload(dedup_stack, "public_copy.pdf", Classification.PUBLIC)
+    _upload(dedup_stack, "restricted_copy.pdf", Classification.RESTRICTED)
+
+    rows = _reclassifications(dedup_stack, first.document_id)
+    assert len(rows) == 1
+    details = rows[0].details
+    assert details["old_tier"] == "PUBLIC"
+    assert details["new_tier"] == "RESTRICTED"
+    assert details["reason"] == "dedup-escalation"
+    # No actor, deliberately: the endpoint names a user because a person asked for the change.
+    assert "reclassified_by" not in details
+
+
+def test_public_duplicate_never_lowers_the_canonical_tier(dedup_stack):
+    """Escalation only. Otherwise re-uploading a file would be a way to declassify it."""
+    first = _upload(dedup_stack, "restricted_copy.pdf", Classification.RESTRICTED)
+    second = _upload(dedup_stack, "public_copy.pdf", Classification.PUBLIC)
+
+    assert second.status == DocumentStatus.DUPLICATE
+    assert dedup_stack.repo.get_by_id(first.document_id).classification == Classification.RESTRICTED
+    assert second.canonical_tier_escalated is False
+    assert _reclassifications(dedup_stack, first.document_id) == []
+    assert "raised to" not in second.message
+
+
+@pytest.mark.parametrize("tier", [Classification.PUBLIC, Classification.RESTRICTED])
+def test_matching_tiers_change_nothing_and_record_nothing(dedup_stack, tier):
+    first = _upload(dedup_stack, "one.pdf", tier)
+    second = _upload(dedup_stack, "two.pdf", tier)
+
+    assert second.status == DocumentStatus.DUPLICATE
+    assert dedup_stack.repo.get_by_id(first.document_id).classification == tier
+    assert _reclassifications(dedup_stack, first.document_id) == []
+
+
+def test_a_second_escalation_is_also_recorded(dedup_stack):
+    """`_audit` de-dupes by (document_id, event_type) so a retried job cannot log a stage twice.
+
+    That guard is wrong for this event. A document reclassified, put back, and reclassified again
+    has changed tier twice, and suppressing the second row would leave the log asserting a tier
+    the document no longer carries — worse than having no row at all.
+    """
+    first = _upload(dedup_stack, "public_copy.pdf", Classification.PUBLIC)
+    _upload(dedup_stack, "restricted_copy.pdf", Classification.RESTRICTED)
+
+    # An ADMIN puts it back through POST /documents/{id}/classify.
+    canonical = dedup_stack.repo.get_by_id(first.document_id)
+    canonical.classification = Classification.PUBLIC
+    dedup_stack.repo.update_document(canonical)
+
+    _upload(dedup_stack, "restricted_again.pdf", Classification.RESTRICTED)
+
+    assert len(_reclassifications(dedup_stack, first.document_id)) == 2
+    assert dedup_stack.repo.get_by_id(first.document_id).classification == Classification.RESTRICTED
+
+
+class _RacingRepo(InMemoryDocumentRepository):
+    """Reproduces losing the promotion race, which the in-memory repo cannot do on its own.
+
+    Two workers can both pass the dedup check before either has promoted; the DB partial unique
+    index `uq_documents_active_sha256` is what actually stops the second one, surfacing as an
+    `IntegrityError` on update. That is a second route to DUPLICATE, with its own branch, and a
+    tier fix that only covered the first would leave the hole open under exactly the concurrency
+    the index exists for.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.hide_checksum_once = False
+        self.fail_promotion_once = False
+
+    def get_by_checksum(self, checksum):
+        if self.hide_checksum_once:
+            self.hide_checksum_once = False
+            return None
+        return super().get_by_checksum(checksum)
+
+    def update_document(self, doc):
+        if self.fail_promotion_once and doc.status == DocumentStatus.VALIDATED:
+            self.fail_promotion_once = False
+            raise exc.IntegrityError("uq_documents_active_sha256", {}, Exception("duplicate key"))
+        return super().update_document(doc)
+
+
+def test_the_race_branch_escalates_too(tmp_path):
+    """The losing side of a promotion race must raise the tier just as the locked branch does."""
+    storage = LocalFileSystemStorage(base_dir=str(tmp_path))
+    buckets = BucketManager(storage=storage)
+    repo = _RacingRepo()
+    engine = create_engine(f"sqlite:///{tmp_path / 'race.db'}")
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as session:
+        stack = SimpleNamespace(
+            repo=repo,
+            session=session,
+            service=UploadService(bucket_manager=buckets, repository=repo, db_session=session),
+            handler=ScanJobHandler(bucket_manager=buckets, repository=repo, db_session=session),
+        )
+        first = _upload(stack, "public_copy.pdf", Classification.PUBLIC)
+        assert first.status == DocumentStatus.VALIDATED
+
+        # Slip past dedup, then lose on the unique index — what a concurrent worker sees.
+        repo.hide_checksum_once = True
+        repo.fail_promotion_once = True
+        second = _upload(stack, "restricted_copy.pdf", Classification.RESTRICTED)
+
+        assert second.status == DocumentStatus.DUPLICATE
+        assert second.canonical_tier_escalated is True
+        assert repo.get_by_id(first.document_id).classification == Classification.RESTRICTED

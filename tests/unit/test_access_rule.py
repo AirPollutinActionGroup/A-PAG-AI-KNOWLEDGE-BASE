@@ -19,7 +19,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from src.db.enums import Classification, UserRole
 from src.db.models import Base
 from src.db.models import Document as DocumentORM
-from src.modules.auth.access import can_view, is_admin, visible_documents_clause
+from src.modules.auth.access import (
+    can_view,
+    is_admin,
+    is_stricter,
+    visible_documents_clause,
+)
 
 OWNER = uuid.uuid4()
 STRANGER = uuid.uuid4()
@@ -187,3 +192,45 @@ def test_admin_clause_is_a_predicate_not_an_omission(session_factory):
     with session_factory() as s:
         ids = _seed(s)
         assert _visible(s, None, admin=True) == set(ids.values())
+
+
+# ==============================================================================
+# Comparing two tiers
+# ==============================================================================
+#
+# `is_stricter` is used where two tiers meet with nobody to choose between them — dedup, where
+# identical bytes arrive again carrying a different classification. It lives beside `can_view`
+# because it has to agree with it about what NULL means.
+
+
+@pytest.mark.parametrize(
+    "candidate,current,expected",
+    [
+        (Classification.RESTRICTED, Classification.PUBLIC, True),
+        (Classification.RESTRICTED, None, True),
+        (Classification.PUBLIC, Classification.RESTRICTED, False),
+        (None, Classification.RESTRICTED, False),
+        (Classification.PUBLIC, None, False),
+        (None, Classification.PUBLIC, False),
+        (Classification.PUBLIC, Classification.PUBLIC, False),
+        (Classification.RESTRICTED, Classification.RESTRICTED, False),
+        (None, None, False),
+        # The DTO carries the enum and the ORM column carries a string; both reach this.
+        ("RESTRICTED", "PUBLIC", True),
+        ("PUBLIC", "RESTRICTED", False),
+    ],
+)
+def test_is_stricter(candidate, current, expected):
+    assert is_stricter(candidate, current) is expected
+
+
+def test_is_stricter_agrees_with_can_view_about_null(session_factory):
+    """NULL is visible to a stranger, exactly as PUBLIC is — so RESTRICTED must outrank it, and
+    it must not outrank PUBLIC. A disagreement here would let dedup 'escalate' a document from
+    NULL to PUBLIC and record a tier change that tightened nothing."""
+    assert can_view(None, OWNER, STRANGER, viewer_is_admin=False) is True
+    assert can_view(Classification.PUBLIC, OWNER, STRANGER, viewer_is_admin=False) is True
+
+    assert is_stricter(Classification.RESTRICTED, None) is True
+    assert is_stricter(Classification.PUBLIC, None) is False
+    assert is_stricter(None, Classification.PUBLIC) is False

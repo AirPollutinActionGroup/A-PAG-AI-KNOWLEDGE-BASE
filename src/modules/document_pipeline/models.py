@@ -50,6 +50,11 @@ class UploadResponse(BaseModel):
     checksum: str | None = None
     rejection_reason: str | None = None
     was_duplicate: bool = False
+    # Set when this upload was a duplicate *and* it was filed more restricted than the copy
+    # already held, so the canonical document's tier was raised. A caller that ingests a folder
+    # needs to report that without parsing `message` — and a tier that moved with nobody asking
+    # is worth putting in front of a person.
+    canonical_tier_escalated: bool = False
     status_url: str | None = None
     correlation_id: uuid.UUID | None = None
     upload_batch_id: uuid.UUID | None = None

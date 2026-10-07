@@ -671,3 +671,48 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   against the real corpus: the downgrade repopulated all 4,459 rows.
 - **Not to be confused with** `documents.search_vector`, which is a different column built by
   `0006` over title/filename/description and still backs `GET /documents?q=`.
+
+### 36. ✅ Dedup compared bytes only, so a stricter tier lost silently (Closed)
+- **Status**: Closed. `ScanJobHandler._escalate_tier_if_stricter()` raises the canonical
+  document's tier before the duplicate is dropped.
+- **What was wrong**: deduplication matches on SHA-256 alone — `get_by_checksum()`
+  (`repository.py:164-170`) and the `uq_documents_active_sha256` partial index that is the real
+  guarantee both key on the hash and nothing else. So the second copy was discarded and its
+  classification was discarded with it. A document already in the corpus as PUBLIC, uploaded
+  again as RESTRICTED, stayed PUBLIC: org-wide visible, and still eligible to cross the Data
+  Boundary Gateway to an external model. The tier nobody chose won, and nothing recorded that two
+  tiers had ever disagreed — the `DOCUMENT_REJECTED` row said "DUPLICATE" and stopped there.
+- **Why it surfaced now**: the Drive connector makes filing a document a one-second drag between
+  two folders, which turns a latent hole into a likely one. It was always reachable through
+  manual upload, which is why the fix is in the shared path and shipped on its own.
+- **Escalation only, deliberately.** A duplicate arriving PUBLIC against a RESTRICTED canonical
+  changes nothing. A copy turning up somewhere public is not evidence that the contents stopped
+  being sensitive, and honouring that direction would make re-uploading a file a way to
+  declassify it — a far worse hole than the one being closed.
+- **The cost**: a file dropped in the wrong folder pulls a genuinely public document out of
+  everyone's view until an ADMIN reverses it with `POST /documents/{id}/classify`. That is the
+  right way round for a control whose job is to fail closed, and it logs at WARNING and is
+  reported by the ingest commands so it is noticed rather than discovered.
+- **Two things it had to work around**: `_audit()` de-dupes by `(document_id, event_type)`
+  because jobs can be retried, which would have swallowed every escalation after the first — it
+  now takes `allow_repeat`, used for this event only. And there is no reusable reclassify
+  function: `src/api/v1/ingestion.py:289-368` does it inline, mixed with HTTP concerns, so the
+  handler writes its own `DOCUMENT_RECLASSIFIED` row matching that one's `details` shape, with
+  `"reason": "dedup-escalation"` and deliberately no `reclassified_by`, since no person asked.
+
+### 37. `get_by_checksum` means different things in the two repositories
+- **Status**: Open. Harmless today, cheap to get wrong later.
+- **What**: `PostgreSQLDocumentRepository.get_by_checksum()` excludes `SUPERSEDED` and `ARCHIVED`
+  (`repository.py:167`). `InMemoryDocumentRepository.get_by_checksum()` additionally excludes
+  `REJECTED` and `DUPLICATE` (`repository.py:301-306`). The abstract base says nothing about
+  which it should be.
+- **Consequence**: in production the canonical document a duplicate matches against can itself be
+  a `REJECTED` or `DUPLICATE` row, where raising its tier (#36) is noise rather than protection.
+  No unit test can reproduce it, because the in-memory repository the unit tests use is the one
+  that filters those statuses out.
+- **Why not fixed here**: changing which statuses dedup considers changes what counts as a
+  duplicate, which is a behaviour change to the promotion path and wants its own measurement
+  against the real corpus — not a line added to a security fix.
+- **Trigger**: the first time a duplicate matches a non-live canonical document in production, or
+  any work that touches dedup's status filter. Decide which spelling is correct, put it in the
+  ABC's docstring, and make both implementations follow it.
