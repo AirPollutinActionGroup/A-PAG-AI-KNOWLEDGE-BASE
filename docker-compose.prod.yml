@@ -275,12 +275,26 @@ services:
   embedding-worker:
     build: .
     container_name: apag-embedding-worker
-    # Holds the ONNX model plus a batch of activations. Measured on the 2-vCPU VM: loaded and idle
-    # it is already ~1.7GB, and embedding two batches of 32 full-length (512-token) passages took
-    # it to 2.28GB. At the previous 1800m limit Docker does not kill the container, it pushes it
-    # onto swap: ~1.1GB of the worker was swapped out and embedding crawled with no error anywhere.
-    # Raise EMBEDDING_MEM_LIMIT, or lower EMBEDDING_BATCH_SIZE, if that recurs.
-    mem_limit: ${EMBEDDING_MEM_LIMIT:-2500m}
+    # Holds the ONNX model plus the allocator arena, which grows with the number of inference
+    # calls a single document costs and is never returned. Measured at INFERENCE_THREADS=2 on the
+    # real corpus:
+    #
+    #   model loaded, idle        527MB
+    #   after   160 chunks      1,455MB   (+772MB)
+    #   after 1,815 chunks      2,537MB   (+1,082MB for 11x the chunks)
+    #
+    # The growth is **sublinear** -- the arena plateaus rather than scaling with document size --
+    # so the fix is headroom, not a batching rewrite: holding fewer vectors in Python would save
+    # ~45MB of the ~2GB. 3g leaves real room on an 8GB VM where only this worker is heavy; at the
+    # previous 2500m the 1,815-chunk spreadsheet fit with 3% to spare, which is not a margin.
+    #
+    # Docker does not kill a container over this limit while swap exists, it swaps it: ~1.1GB of
+    # the worker was once paged out and embedding crawled with no error in any log. A limit that
+    # is merely close enough therefore looks like a hang, not a failure.
+    #
+    # Thread count is nearly irrelevant to memory (1,455MB at 2 threads vs 1,548MB at 8 on the
+    # same 160 chunks) but is everything to speed: 1.6 chunks/s against 3.1.
+    mem_limit: ${EMBEDDING_MEM_LIMIT:-3g}
     command: python worker_main.py
     environment:
       WORKER_STAGE: EMBED
