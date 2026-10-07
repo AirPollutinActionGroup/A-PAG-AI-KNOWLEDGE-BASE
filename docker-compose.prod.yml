@@ -130,6 +130,22 @@ services:
       # Shared demo login shown under the sign-in box. Empty (the default) hides it.
       DEMO_LOGIN_EMAIL: ${DEMO_LOGIN_EMAIL:-}
       DEMO_LOGIN_PASSWORD: ${DEMO_LOGIN_PASSWORD:-}
+      # Google Drive connector. Carried by the api service because `drive_sync.py` is run
+      # through it (`docker compose exec api python drive_sync.py`) -- this container already
+      # has the database, MinIO and the format registry, which is everything the import needs.
+      # Forwarded explicitly for the same reason RERANK_CANDIDATES is: this service lists its
+      # environment rather than reading .env wholesale, so a line in .env reaches nothing
+      # unless it appears here.
+      GDRIVE_ENABLED: ${GDRIVE_ENABLED:-false}
+      GDRIVE_CREDENTIALS_FILE: ${GDRIVE_CREDENTIALS_FILE:-/app/secrets/drive-sync.json}
+      GDRIVE_PUBLIC_FOLDER_ID: ${GDRIVE_PUBLIC_FOLDER_ID:-}
+      GDRIVE_RESTRICTED_FOLDER_ID: ${GDRIVE_RESTRICTED_FOLDER_ID:-}
+      GDRIVE_FALLBACK_OWNER_EMAIL: ${GDRIVE_FALLBACK_OWNER_EMAIL:-}
+    # The service-account key, mounted read-only and never baked into the image: a credential in
+    # a layer is a credential in every copy of that image. `:ro` is not decoration -- nothing in
+    # this deployment has any reason to write to it.
+    volumes:
+      - ./secrets:/app/secrets:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

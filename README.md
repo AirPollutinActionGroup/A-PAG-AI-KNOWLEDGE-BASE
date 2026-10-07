@@ -245,7 +245,7 @@ Not accepted, with the reason:
 
 - **Macro-enabled files** (`.docm`/`.xlsm`/`.pptm`, or any file containing a macro project) — re-save without macros. A downloaded Office file does eventually get opened by a person, and that executes macros.
 - **Legacy or password-protected Office files** (`.doc`/`.xls`/`.ppt`, encrypted `.docx`) — re-save in the modern format, or remove the password.
-- **Google Docs/Sheets/Slides** — these live in Drive and have no bytes to upload. Use *File → Download → Microsoft Excel (.xlsx)* (or Word/PowerPoint) and upload the result.
+- **Google Docs/Sheets/Slides** — these live in Drive and have no bytes to upload. Either use *File → Download → Microsoft Excel (.xlsx)* (or Word/PowerPoint) and upload the result, or put the file in the shared Drive folder and let `drive_sync.py` export it for you — it converts Docs, Sheets and Slides to docx, xlsx and pptx for exactly this reason.
 - **CSV** — out of scope for now; it has no container structure to validate and carries a different (formula-injection) risk profile.
 
 ---
@@ -264,7 +264,8 @@ Not accepted, with the reason:
 | **Phase 7c** | Test deployment on Azure (`DEPLOY.md`) | ✅ Completed |
 | **Phase 7d** | Invite-only registration or SSO, person-name masking, backups, TLS | 📋 Planned |
 | **Phase 8** | Text-to-SQL engine, intent routing, certified metrics agreed with department heads | 📋 Planned |
-| Later | Supersede/versioning, freshness warnings, Drive connector, semantic cache | 📋 Designed, not built |
+| **Phase 7e** | Google Drive connector — shared folder sets the tier, `drive_sync.py` imports it through the same pipeline | ✅ Command built; scheduled worker planned |
+| Later | Supersede/versioning, freshness warnings, semantic cache | 📋 Designed, not built |
 
 ---
 

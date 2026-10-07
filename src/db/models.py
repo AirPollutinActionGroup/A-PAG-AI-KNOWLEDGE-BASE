@@ -431,3 +431,78 @@ class AuditLog(Base):
             name="chk_audit_log_event_type",
         ),
     )
+
+
+class DriveFile(Base):
+    """What the Drive connector has seen, and what it did about it.
+
+    A separate table rather than columns on `documents`, for two reasons. Most documents have no
+    Drive origin at all, so this would be a wide row of nulls on the main table. And a Drive file
+    that was *skipped* — a Google Form, something too large, a file sitting outside the watched
+    folders — has no document to hang metadata off, yet is exactly the thing worth recording: a
+    gap that is findable beats one rediscovered on every sync.
+
+    `drive_file_id` is the primary key because Drive's id is stable across renames and moves,
+    which is what makes "has this changed?" answerable at all. `drive_modified_time` is the
+    change detector, deliberately in preference to a content hash: Google re-exports an unchanged
+    Doc to slightly different bytes each time, so hashing the export would re-import every
+    document on every run.
+    """
+
+    __tablename__ = "drive_files"
+
+    drive_file_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # Nullable and ON DELETE SET NULL: a skipped file never had a document, and a purged document
+    # should not drag this row away with it — the record of having seen the file outlives it.
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("documents.document_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    drive_modified_time: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    drive_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    drive_mime_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Which watched tree it resolved under. Stored so a file moving from Restricted to Public is
+    # visible as a change rather than inferred.
+    folder_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    classification: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Provenance only. Emphatically **not** an access rule: Drive ownership says who created the
+    # file, not who may read it here, and conflating the two is how a sharing model quietly moves
+    # out of this codebase and into somebody else's product.
+    drive_owner_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('IMPORTED', 'SKIPPED', 'REMOVED', 'FAILED')",
+            name="chk_drive_files_state",
+        ),
+        Index("idx_drive_files_document_id", "document_id"),
+    )
+
+
+class DriveSyncState(Base):
+    """One row per key. Today that is the Drive change-feed page token, for Phase B.
+
+    Created with the rest of the connector rather than when the worker lands, so the worker is a
+    code change and not a code change plus a migration against a live database.
+    """
+
+    __tablename__ = "drive_sync_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

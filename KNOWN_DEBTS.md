@@ -716,3 +716,24 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Trigger**: the first time a duplicate matches a non-live canonical document in production, or
   any work that touches dedup's status filter. Decide which spelling is correct, put it in the
   ABC's docstring, and make both implementations follow it.
+
+### 38. ✅ There was no `.dockerignore`, so `.env` was baked into every image (Closed)
+- **Status**: Closed. `.dockerignore` added, excluding `.env`, `secrets/`, keys, `.venv/`,
+  `.git/`, caches, `storage_data/` and `.model_cache/`.
+- **What was wrong**: the `Dockerfile` ends in `COPY . .` and no `.dockerignore` existed, so
+  every build copied the developer's local `.env` into a layer — `JWT_SECRET_KEY` and
+  `SARVAM_API_KEY` included. A secret in a layer is a secret in every copy of that image, every
+  registry it reaches and every `docker history` run against it, and deleting the file in a later
+  layer does not remove it from the one before.
+- **Why it surfaced now**: the Drive connector adds `secrets/`, holding a service-account key
+  that grants access to everything shared with that account. That turned an untidy build context
+  into one that would ship a live Google credential.
+- **Also fixed by the same file**: `.model_cache/` is excluded. The embedding, reranker and OCR
+  models are pre-fetched into `/app/.model_cache` *before* `COPY . .`, so a developer with a
+  local cache of that name would have copied it over the baked weights — replacing known-good,
+  version-pinned models with whatever happened to be on that machine, silently.
+- **Not a full remediation.** Any image already built and pushed from a machine with a populated
+  `.env` still contains it. Rotating `JWT_SECRET_KEY` invalidates every issued token (everyone
+  signs in again) and rotating `SARVAM_API_KEY` is a console action; both are cheap, and worth
+  doing before this is ever pushed to a shared registry. Today images are built on the VM and
+  never pushed, which is what kept the exposure local.

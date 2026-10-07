@@ -56,6 +56,11 @@ dependencies = [
     # PyTorch, consistent with every other model choice here. Rasterisation needs nothing new:
     # pdfplumber already depends on pypdfium2 and `page.to_image()` uses it.
     "rapidocr>=3.4,<4",
+    # Google Drive connector. `google-auth` only: it signs the service-account JWT and refreshes
+    # the access token, which is the part worth not hand-rolling. Drive itself is plain REST and
+    # is called with the httpx already above, so `google-api-python-client` — which pulls its own
+    # HTTP stack, a discovery-document cache and protobuf — is deliberately not here.
+    "google-auth>=2.30,<3",
 ]
 
 [project.optional-dependencies]
