@@ -12,9 +12,10 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.enums import AuditEventType, JobStage, JobStatus
+from src.db.enums import AuditEventType, Classification, JobStage, JobStatus
 from src.db.models import Job as JobORM
 from src.modules.audit.service import AuditService
+from src.modules.auth.access import is_stricter
 from src.modules.document_pipeline.models import (
     DocumentStatus,
     UploadRequest,
@@ -57,8 +58,17 @@ class ScanJobHandler:
         event_type: AuditEventType,
         details: dict[str, Any] | None = None,
         correlation_id: uuid.UUID | None = None,
+        allow_repeat: bool = False,
     ) -> None:
-        """Best-effort audit log write. Prevents duplicate audit events on re-try."""
+        """Best-effort audit log write. Prevents duplicate audit events on re-try.
+
+        `allow_repeat` switches that guard off. The guard is right for stage events — a job can
+        be reaped and re-run, and a document is still only extracted once, so a second
+        EXTRACTION_COMPLETED row would be an artifact of the queue rather than a fact about the
+        document. It is wrong for DOCUMENT_RECLASSIFIED, where a second tier change is a
+        genuinely different event: dropping it would leave the log asserting a tier the document
+        no longer carries, which is worse than no row at all.
+        """
         if self._db is None:
             logger.debug(
                 "Audit skipped (no db session): doc_id=%s event=%s",
@@ -67,21 +77,22 @@ class ScanJobHandler:
             return
         try:
             # Idempotency guard: do not write duplicate audit events for the same document and event_type
-            from src.db.models import AuditLog
-            existing = (
-                self._db.query(AuditLog)
-                .filter(
-                    AuditLog.document_id == document_id,
-                    AuditLog.event_type == event_type.value,
+            if not allow_repeat:
+                from src.db.models import AuditLog
+                existing = (
+                    self._db.query(AuditLog)
+                    .filter(
+                        AuditLog.document_id == document_id,
+                        AuditLog.event_type == event_type.value,
+                    )
+                    .first()
                 )
-                .first()
-            )
-            if existing:
-                logger.debug(
-                    "Audit duplicate ignored: doc_id=%s event=%s",
-                    document_id, event_type.value,
-                )
-                return
+                if existing:
+                    logger.debug(
+                        "Audit duplicate ignored: doc_id=%s event=%s",
+                        document_id, event_type.value,
+                    )
+                    return
 
             AuditService.log_event(
                 db=self._db,
@@ -95,6 +106,70 @@ class ScanJobHandler:
                 "AUDIT WRITE FAILED: doc_id=%s event=%s — compliance gap, investigate immediately",
                 document_id, event_type.value,
             )
+
+    def _escalate_tier_if_stricter(
+        self,
+        canonical: Any,
+        incoming: Classification | None,
+        *,
+        duplicate_id: uuid.UUID,
+        sha256: str,
+        correlation_id: uuid.UUID | None,
+    ) -> bool:
+        """Raises the canonical document's tier when a duplicate arrives more restricted.
+
+        Dedup matches on SHA-256 alone, so the second copy is discarded and its classification is
+        discarded with it. That is survivable in one direction and not the other. A file already
+        in the corpus as PUBLIC, uploaded again as RESTRICTED, used to stay PUBLIC — org-wide
+        visible, and still eligible to cross the Data Boundary Gateway to an external model. The
+        tier nobody chose won, and nothing recorded that two tiers had ever disagreed. A folder
+        connector makes that a one-second action, which is what turned a latent hole into a
+        likely one.
+
+        **Escalation only.** A duplicate arriving PUBLIC against a RESTRICTED canonical changes
+        nothing: a copy turning up somewhere public is not evidence that the contents stopped
+        being sensitive, and honouring that direction would make re-uploading a file a way to
+        declassify it.
+
+        Returns whether it moved, so the caller can say so. Logged at WARNING because it is a
+        correct outcome that someone should still see — a file dropped in the wrong place pulls a
+        genuinely public document out of everyone's view until an ADMIN reverses it through
+        `POST /documents/{id}/classify`.
+        """
+        if not is_stricter(incoming, canonical.classification):
+            return False
+
+        previous = canonical.classification.value if canonical.classification else None
+        new_tier = Classification(incoming)
+
+        # Applied before the audit write, not after. `_audit` swallows its own failures by
+        # design, so writing the record first would make the protective change conditional on
+        # something deliberately non-fatal.
+        canonical.classification = new_tier
+        self.repo.update_document(canonical)
+
+        self._audit(
+            canonical.id,
+            AuditEventType.DOCUMENT_RECLASSIFIED,
+            details={
+                "old_tier": previous,
+                "new_tier": new_tier.value,
+                # Deliberately no `reclassified_by`. The endpoint records a named user because a
+                # person asked for the change; nobody asked for this one, and naming an actor
+                # would make the log claim something untrue.
+                "reason": "dedup-escalation",
+                "duplicate_document_id": str(duplicate_id),
+                "sha256": sha256,
+            },
+            correlation_id=correlation_id,
+            allow_repeat=True,
+        )
+
+        logger.warning(
+            "TIER ESCALATED by duplicate: canonical=%s %s -> %s duplicate=%s sha256=%s",
+            canonical.id, previous, new_tier.value, duplicate_id, sha256,
+        )
+        return True
 
     def process(
         self,
@@ -224,6 +299,15 @@ class ScanJobHandler:
             # Deduplication Check
             existing_doc = self.repo.get_by_checksum(validation.sha256)
             if existing_doc and existing_doc.id != document_id:
+                # Let the stricter of the two tiers win before this copy is dropped. The
+                # duplicate is discarded either way; only the canonical document moves.
+                escalated = self._escalate_tier_if_stricter(
+                    existing_doc,
+                    doc.classification,
+                    duplicate_id=document_id,
+                    sha256=validation.sha256,
+                    correlation_id=corr_id,
+                )
                 doc.status = DocumentStatus.DUPLICATE
                 # Cleared for the same reason as the rejection branch above: the object is about
                 # to be deleted, so nothing should keep pointing at it.
@@ -236,6 +320,7 @@ class ScanJobHandler:
                     "filename": filename, "reason": "DUPLICATE",
                     "canonical_document_id": str(existing_doc.id),
                     "sha256": validation.sha256,
+                    "canonical_tier_escalated": escalated,
                 }, correlation_id=corr_id)
 
                 logger.info(
@@ -250,7 +335,17 @@ class ScanJobHandler:
                     quarantine_key=quarantine_key,
                     checksum=validation.sha256,
                     was_duplicate=True,
-                    message=f"Duplicate document detected (matches canonical document ID: {existing_doc.id}).",
+                    canonical_tier_escalated=escalated,
+                    message=(
+                        f"Duplicate document detected (matches canonical document ID: "
+                        f"{existing_doc.id})."
+                        + (
+                            f" The canonical document was raised to "
+                            f"{existing_doc.classification.value} because this copy was filed "
+                            f"more restricted."
+                            if escalated else ""
+                        )
+                    ),
                 )
 
             # Versioning: check if this supersedes an older document.
@@ -342,10 +437,27 @@ class ScanJobHandler:
                 # Note: the shared/content-addressed raw object (raw_key = sha256.pdf) is left in
                 # place — it belongs to the canonical document that won the race, not this one.
                 canonical = self.repo.get_by_checksum(validation.sha256)
+
+                # Same escalation as the lock-held branch above, because this is the same
+                # situation reached by a different route: two copies, disagreeing tiers, and the
+                # loser about to be discarded. Guarding on the id matters here and not there —
+                # `doc` has just been written as DUPLICATE and the Postgres query filters only
+                # SUPERSEDED/ARCHIVED, so this lookup can hand back the very document that lost.
+                escalated = False
+                if canonical is not None and canonical.id != document_id:
+                    escalated = self._escalate_tier_if_stricter(
+                        canonical,
+                        doc.classification,
+                        duplicate_id=document_id,
+                        sha256=validation.sha256,
+                        correlation_id=corr_id,
+                    )
+
                 self._audit(document_id, AuditEventType.DOCUMENT_REJECTED, details={
                     "filename": filename, "reason": "DUPLICATE_RACE",
                     "canonical_document_id": str(canonical.id) if canonical else None,
                     "sha256": validation.sha256,
+                    "canonical_tier_escalated": escalated,
                 }, correlation_id=corr_id)
 
                 logger.info(
@@ -360,6 +472,7 @@ class ScanJobHandler:
                     quarantine_key=quarantine_key,
                     checksum=validation.sha256,
                     was_duplicate=True,
+                    canonical_tier_escalated=escalated,
                     message="Duplicate document detected (concurrent upload of identical content).",
                 )
 

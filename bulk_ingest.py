@@ -53,6 +53,11 @@ CANDIDATE_SUFFIXES = {spec.extension.lower() for spec in FORMATS.values()}
 class Tally:
     queued: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
+    # A subset of `duplicates`: the copy was dropped, but it was filed more restricted than the
+    # document already held, so that document's tier was raised. Tracked separately because it is
+    # the one outcome here that changes who can read something, and a line in a log nobody reads
+    # is not how somebody finds out their public document went restricted.
+    escalated: list[str] = field(default_factory=list)
     unsupported: list[tuple[str, str]] = field(default_factory=list)
     failed: list[tuple[str, str]] = field(default_factory=list)
     skipped_empty: list[str] = field(default_factory=list)
@@ -187,6 +192,8 @@ def ingest_one(service: UploadService, path: Path, meta: UploadRequest, tally: T
 
     if response.was_duplicate:
         tally.duplicates.append(rel)
+        if response.canonical_tier_escalated:
+            tally.escalated.append(rel)
     else:
         tally.queued.append(rel)
 
@@ -201,6 +208,17 @@ def report(tally: Tally, batch_id: uuid.UUID | None, dry_run: bool) -> None:
     print(f"  unsupported format    : {len(tally.unsupported)}")
     print(f"  empty, skipped        : {len(tally.skipped_empty)}")
     print(f"  failed                : {len(tally.failed)}")
+
+    if tally.escalated:
+        print()
+        print(f"TIER RAISED by {len(tally.escalated)} duplicate(s):")
+        for name in tally.escalated[:20]:
+            print(f"  {name}")
+        if len(tally.escalated) > 20:
+            print(f"  ... and {len(tally.escalated) - 20} more")
+        print("  These files were already in the corpus at a lower tier. The copy was dropped and")
+        print("  the existing document was raised to RESTRICTED. Reverse one with")
+        print("  POST /api/v1/documents/{id}/classify if a file was filed in the wrong place.")
 
     for label, rows in (("UNSUPPORTED", tally.unsupported), ("FAILED", tally.failed)):
         if rows:

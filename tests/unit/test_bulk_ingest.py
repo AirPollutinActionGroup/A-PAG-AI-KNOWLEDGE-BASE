@@ -23,17 +23,27 @@ PDF_BYTES = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\ntrailer\n%%EOF\n"
 class FakeService:
     """Records what reached UploadService.receive(), and can be told to fail."""
 
-    def __init__(self, fail_on: str | None = None, duplicate: bool = False):
+    def __init__(
+        self,
+        fail_on: str | None = None,
+        duplicate: bool = False,
+        escalated: bool = False,
+    ):
         self.calls: list[dict] = []
         self._fail_on = fail_on
         self._duplicate = duplicate
+        self._escalated = escalated
 
     def receive(self, *, filename, data, request_meta, mime_type):
         if self._fail_on and self._fail_on in filename:
             raise RuntimeError("storage unavailable")
         self.calls.append({"filename": filename, "size": len(data), "mime": mime_type,
                            "meta": request_meta})
-        return SimpleNamespace(was_duplicate=self._duplicate, document_id=uuid.uuid4())
+        return SimpleNamespace(
+            was_duplicate=self._duplicate,
+            canonical_tier_escalated=self._escalated,
+            document_id=uuid.uuid4(),
+        )
 
 
 @pytest.fixture
@@ -156,6 +166,23 @@ def test_a_duplicate_is_counted_separately(tmp_path, meta):
 
     assert tally.duplicates == [str(path)]
     assert tally.queued == []
+    assert tally.escalated == []
+
+
+def test_a_duplicate_that_raised_the_tier_is_called_out(tmp_path, meta):
+    """Still a duplicate, but this one changed who can read an existing document.
+
+    Dropping the copy is routine; raising the canonical document to RESTRICTED is not, and an
+    import of several hundred files is exactly where it would otherwise go unnoticed.
+    """
+    path = tmp_path / "restricted_copy.pdf"
+    path.write_bytes(PDF_BYTES)
+    tally = Tally()
+
+    ingest_one(FakeService(duplicate=True, escalated=True), path, meta, tally)
+
+    assert tally.duplicates == [str(path)]
+    assert tally.escalated == [str(path)], "a tier change must not hide inside the duplicate count"
 
 
 def test_one_failing_file_does_not_stop_the_run(tmp_path, meta):
