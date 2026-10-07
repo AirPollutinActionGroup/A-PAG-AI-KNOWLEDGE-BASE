@@ -737,3 +737,34 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   signs in again) and rotating `SARVAM_API_KEY` is a console action; both are cheap, and worth
   doing before this is ever pushed to a shared registry. Today images are built on the VM and
   never pushed, which is what kept the exposure local.
+
+### 39. A row-per-record spreadsheet costs 19 minutes to embed
+- **Status**: Open. The memory half is handled by headroom (`EMBEDDING_MEM_LIMIT` 2500m -> 3g);
+  the time half is not addressed.
+- **What happened**: the first document imported from Google Drive was a Faridabad complaint
+  log -- 7 worksheets of one row per complaint. It chunked to **1,815 passages** and took
+  **19 minutes** to embed at `INFERENCE_THREADS=2` (1.6 chunks/s), against roughly 8 minutes at
+  8 threads. A policy PDF of comparable byte size produces a few dozen chunks.
+- **Measured, at 2 threads, on the real document**:
+
+  | point | RSS |
+  |---|---|
+  | model loaded, idle | 527MB |
+  | after 160 chunks | 1,455MB |
+  | after 1,815 chunks | 2,537MB |
+
+  Growth is **sublinear** -- 772MB for the first 160 chunks, 1,082MB for the next 1,655. That is
+  an ONNX allocator arena extending and never returning memory, not a leak and not the accumulated
+  vectors (1,815 x 768 Python floats is ~45MB, 2% of the growth). **A batching rewrite of
+  `EmbeddingService.embed_document()` would therefore buy almost nothing**, which is why it was
+  measured before being written.
+- **Why thread count is not the lever it looks like**: 1,455MB at 2 threads vs 1,548MB at 8, on
+  the same 160 chunks -- 6% apart. It is worth ~2x on *speed* and nothing on memory.
+- **The real cause is chunk count, not embedding.** The chunker splits a large table into row
+  groups that each repeat the header, which is right for a budget table being cited and wrong for
+  a 1,800-row operational log: those chunks are near-identical record shapes whose retrieval value
+  is low and whose embedding cost is the whole bill. A per-document chunk ceiling, or treating a
+  sheet above some row count as data rather than prose, is the shape of the fix.
+- **Trigger**: when somebody syncs a folder of operational spreadsheets and ingestion stops
+  finishing overnight, or when a sheet exceeds ~5,000 rows. Until then this is a known cost on a
+  document type that is rare in a policy corpus.
