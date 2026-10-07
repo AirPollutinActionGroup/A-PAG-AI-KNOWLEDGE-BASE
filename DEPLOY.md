@@ -293,6 +293,14 @@ docker compose -f docker-compose.prod.yml exec -T postgres \
 A 162-page scanned PDF takes about 10 minutes to OCR on 4 vCPU. `AWAITING_CLASSIFICATION` or
 `CHUNKED` rows that stop moving mean a worker died; see below.
 
+**Spreadsheets of operational records are the slow case, not scans.** A 7-sheet complaint log with
+one row per record chunked to 1,815 passages and took 19 minutes to embed on 2 vCPU, peaking at
+2,537MB. That is why `EMBEDDING_MEM_LIMIT` defaults to `3g`: at the previous `2500m` it fit with
+3% to spare, and Docker responds to that limit by swapping rather than failing — so a document
+slightly larger would not error, it would simply stop making progress with nothing in any log.
+A document sitting at `CHUNKED` with the embedding worker at ~100% CPU is working, not stuck;
+check `docker stats` before restarting anything (see `KNOWN_DEBTS.md` #39).
+
 ---
 
 ## 6b. Google Drive sync (optional)
