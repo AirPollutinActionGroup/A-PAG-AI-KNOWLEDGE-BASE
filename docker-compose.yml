@@ -274,6 +274,54 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # Google Drive sync, on a clock rather than a queue: daily at GDRIVE_SYNC_AT in
+  # GDRIVE_SYNC_TIMEZONE (midnight IST by default). Not a pipeline stage -- it only feeds files to
+  # UploadService.receive() and the stage workers above do the rest. Idles, healthy and quiet,
+  # while GDRIVE_ENABLED is false, so it can ship in the stack before anyone has a key.
+  #
+  # 512m: it holds one file at a time between Drive and quarantine (capped at
+  # GDRIVE_MAX_FILE_BYTES, 100MB) and loads no models.
+  drive-sync:
+    build: .
+    container_name: apag-drive-sync
+    mem_limit: 512m
+    command: python worker_main.py
+    environment:
+      WORKER_STAGE: DRIVE_SYNC
+      DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: apag_knowledge_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: apag_secure_password_2026
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: apag_admin
+      MINIO_SECRET_KEY: apag_secure_password_2026
+      MINIO_SECURE: "false"
+      WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
+      GDRIVE_ENABLED: ${GDRIVE_ENABLED:-false}
+      GDRIVE_CREDENTIALS_FILE: ${GDRIVE_CREDENTIALS_FILE:-/app/secrets/drive-sync.json}
+      GDRIVE_PUBLIC_FOLDER_ID: ${GDRIVE_PUBLIC_FOLDER_ID:-}
+      GDRIVE_RESTRICTED_FOLDER_ID: ${GDRIVE_RESTRICTED_FOLDER_ID:-}
+      GDRIVE_FALLBACK_OWNER_EMAIL: ${GDRIVE_FALLBACK_OWNER_EMAIL:-}
+      GDRIVE_SYNC_AT: ${GDRIVE_SYNC_AT:-00:00}
+      GDRIVE_SYNC_TIMEZONE: ${GDRIVE_SYNC_TIMEZONE:-Asia/Kolkata}
+    volumes:
+      - ./secrets:/app/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test $$(( $$(date +%s) - $$(stat -c %Y /tmp/worker_alive) )) -lt 30"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   postgres_data:
     driver: local

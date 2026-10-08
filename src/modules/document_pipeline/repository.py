@@ -80,6 +80,20 @@ class DocumentRepository(ABC):
         ...
 
     @abstractmethod
+    def restore(self, doc_id: uuid.UUID) -> bool:
+        """Undoes `soft_delete()`: the document returns to search and the document list.
+
+        Exists because "reversible" was otherwise only true in principle. Re-uploading the same
+        file does **not** bring a soft-deleted document back -- dedup matches on the hash and
+        does not look at `deleted_at`, so the new copy is marked DUPLICATE against the hidden
+        original and nothing becomes visible. Restoring the original row is the only way back.
+
+        Refuses a purged document: its bytes are gone, so there is nothing left to show. Returns
+        False if the document does not exist, is not deleted, or was purged.
+        """
+        ...
+
+    @abstractmethod
     def purge(self, doc_id: uuid.UUID) -> bool:
         """Tombstones a document whose bytes have already been erased from object storage:
         stamps deleted_at/purged_at and nulls sha256 + raw_path. Nulling sha256 is what frees
@@ -259,6 +273,20 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         self.db.flush()
         return True
 
+    def restore(self, doc_id: uuid.UUID) -> bool:
+        """See the base class."""
+        stmt = select(DocumentORM).where(
+            DocumentORM.document_id == doc_id,
+            DocumentORM.deleted_at.is_not(None),
+            DocumentORM.purged_at.is_(None),
+        )
+        orm = self.db.execute(stmt).scalar_one_or_none()
+        if orm is None:
+            return False
+        orm.deleted_at = None
+        self.db.flush()
+        return True
+
     def purge(self, doc_id: uuid.UUID) -> bool:
         stmt = select(DocumentORM).where(
             DocumentORM.document_id == doc_id, DocumentORM.purged_at.is_(None)
@@ -370,6 +398,15 @@ class InMemoryDocumentRepository(DocumentRepository):
             if doc is None or doc.deleted_at is not None or doc.purged_at is not None:
                 return False
             doc.deleted_at = datetime.now(UTC)
+            return True
+
+    def restore(self, doc_id: uuid.UUID) -> bool:
+        """See the base class."""
+        with self._lock:
+            doc = self._storage.get(doc_id)
+            if doc is None or doc.deleted_at is None or doc.purged_at is not None:
+                return False
+            doc.deleted_at = None
             return True
 
     def purge(self, doc_id: uuid.UUID) -> bool:

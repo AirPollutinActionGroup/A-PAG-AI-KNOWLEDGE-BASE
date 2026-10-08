@@ -32,6 +32,7 @@ WORKER_STAGE=EXTRACT python worker_main.py
 WORKER_STAGE=NORMALIZE python worker_main.py
 WORKER_STAGE=CHUNK python worker_main.py
 WORKER_STAGE=EMBED python worker_main.py
+WORKER_STAGE=DRIVE_SYNC python worker_main.py   # Drive sync, daily at GDRIVE_SYNC_AT; not a pipeline stage
 
 # Enqueue jobs for documents stranded before a stage existed (idempotent)
 python backfill_jobs.py --stage EMBED --dry-run
@@ -638,35 +639,61 @@ indistinguishable afterwards from an uploaded one and gets the same scan, OCR, q
 chunking, embedding, audit and gateway. A connector that grew its own shortcut would be a second
 set of rules to secure and to test, and no test would catch the divergence.
 
-Shipped in two phases. **Phase A is `drive_sync.py`**, a command run by hand, mirroring
+It runs two ways over the same `DriveSyncService`: **`drive_sync.py`** by hand, mirroring
 `bulk_ingest.py` (including its `preflight_storage()` check — running on the host with
-`STORAGE_BACKEND=local` while the workers read MinIO fails every file at SCAN minutes later, in
-a different log). Phase B wraps the same `DriveSyncService` in a timer-driven worker; note that
-**no periodic process exists in this repo today** — `BaseWorker` is entirely jobs-table claim
-logic, so that worker is a new shape rather than another subclass.
+`STORAGE_BACKEND=local` while the workers read MinIO fails every file at SCAN minutes later, in a
+different log), and the **`drive-sync` container** (`src/workers/drive_sync_worker.py`), daily at
+`GDRIVE_SYNC_AT` in `GDRIVE_SYNC_TIMEZONE` — 00:00 Asia/Kolkata by default. That worker is **the
+only timer-driven process in the repo** and deliberately not a `BaseWorker`: all of `BaseWorker`
+is jobs-table claim logic, and nothing enqueues a Drive sync. It keeps only the heartbeat and
+SIGTERM handling. A time of day rather than an interval, because an interval is anchored to the
+last container restart. Its last success, attempt and error are persisted in `drive_sync_state`,
+which is what makes a missed midnight catchable on start. A Postgres advisory lock
+(`sync_lock()`) stops the worker and a hand-run command importing the same file twice.
 
-Four decisions live in `service.py`:
+**The constraint everything else follows from: a run can only act on what an earlier run
+imported.** `receive()` returns as soon as the bytes are in quarantine; whether a file was a
+duplicate, extracted, or embedded is decided minutes later by workers this module never talks
+to. So each pass syncs Drive into the pipeline and then **reconciles** `drive_file_versions`
+against what the workers decided. Do not add a report line or a decision that needs the scan
+result at import time — `UploadResponse.was_duplicate` is always False from `receive()` (#40).
+
+The decisions, all in `service.py`:
 
 - **The folder sets the tier, matched by folder ID.** Under the Public tree is PUBLIC, under the
   Restricted tree is RESTRICTED, and anywhere else is skipped rather than guessed. IDs rather
   than names is a security property: a name can be renamed, duplicated, or shadowed by a
-  subfolder somebody calls "Public", and a rename would otherwise reclassify everything beneath
-  it silently. Drive also allows one folder or file under two parents, so where the trees overlap
-  the **stricter** tier wins — `is_stricter()` from `auth/access.py`, the same rule dedup uses.
-- **Change is `modifiedTime`, not a hash.** Google re-exports an unchanged Doc to slightly
-  different bytes every time, so a content hash would re-import the whole corpus on every run.
-  An edit arrives as a **new document** and the previous one is left alone, so a citation written
-  last week still resolves to the text that was cited.
-- **Removal is the reversible delete.** Binned, permanently deleted, or moved out of the watched
-  folders all arrive identically — the file is simply no longer in the listing — and all three
-  soft-delete: out of search and answers at once, bytes and audit trail kept. Never `purge()`.
-  Drive's own bin is reversible for about a month, and a sync should not be more destructive than
-  the thing it follows. **Never runs on a `--limit` pass**, where "not in the listing" only means
-  "not in the part we looked at".
+  subfolder somebody calls "Public". Drive allows one folder or file under two parents, so where
+  the trees overlap the **stricter** tier wins — `is_stricter()`, the same rule dedup uses.
+- **A move between folders reclassifies in place.** Same content, new tier, nothing re-imported,
+  a `DOCUMENT_RECLASSIFIED` row with reason `drive-folder-move`. Re-importing instead collides
+  with dedup, which never lowers a tier: an ordinary file moved to Public would silently stay
+  RESTRICTED, while a Google Doc would land as a second document. Anyone with edit access to the
+  folder can therefore change a tier by moving a file — inherent to "the folder is the tier".
+- **Content change is Drive's `md5Checksum` where it exists, `modifiedTime` where it does not.**
+  A rename or move can bump the modified time without changing a byte. Google-native files have
+  no checksum, and their exports are not byte-stable — measured, two exports of one unchanged
+  Sheet hashed differently — so for them the modified time is the only honest signal.
+- **An edit is a new version, and the old one is retired only once the new one is live.**
+  Retiring at import would leave the file with nothing searchable if the new version then failed
+  extraction. Retirement uses the existing versioning vocabulary — status `SUPERSEDED`,
+  `supersedes_id`, `version + 1`, `DOCUMENT_SUPERSEDED` — plus `deleted_at`, because search
+  filters on `deleted_at` and not on status. `SUPERSEDED` also matters mechanically: dedup and the
+  active-hash index exclude it, so reverting a file to earlier content imports cleanly. Until the
+  next run after the new version settles, both versions can appear in search.
+- **Removal is reversible, and putting the file back really restores it.** Binned, deleted, or
+  moved out all arrive identically and all soft-delete — every version that could surface,
+  including one still processing. An unedited file that returns is **restored**, not re-imported
+  (`DocumentRepository.restore()`, `DOCUMENT_RESTORED`): a re-import would be marked DUPLICATE
+  against its own hidden original, because dedup ignores `deleted_at` (#41). Never `purge()`, and
+  never on a `--limit` pass, where "not in the listing" only means "not in the part we looked at".
 - **Ownership is provenance, not authorisation.** The Drive owner's email is matched to a local
   account because RESTRICTED is owner-scoped; where none matches, a configured fallback owns it,
   and for a RESTRICTED file that means only that account and admins can read it. Reported rather
   than logged quietly, because it otherwise looks like nothing happened.
+
+Every action the connector takes on a document writes an audit row attributed to `drive-sync`,
+never to a person.
 
 `export_map.py` holds the one format decision. Google Docs, Sheets and Slides have no bytes to
 download — they must be exported, and the target is what extraction will later read structure out
@@ -686,7 +713,9 @@ Credentials are a **service account, read-only scoped**. Not an API key, which o
 publicly shared files; not per-user OAuth, which would mean a consent screen and a refresh token
 per person. The connector never writes to Drive, so deleting a document here can never delete
 somebody's file. `drive_files` maps each Drive id to what was done with it — including
-`SKIPPED`, which has no document but is exactly what is worth recording.
+`SKIPPED`, which has no document but is exactly what is worth recording — and
+`drive_file_versions` holds every document a file has produced, with the state reconciliation
+works from (`PENDING`, `CURRENT`, `SUPERSEDED`, `DUPLICATE`, `FAILED`, `REMOVED`).
 
 ### Config & enums
 

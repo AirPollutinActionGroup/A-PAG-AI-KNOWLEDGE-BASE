@@ -370,27 +370,76 @@ docker compose -f docker-compose.prod.yml exec -T api python drive_sync.py --lim
 docker compose -f docker-compose.prod.yml exec -T api python drive_sync.py
 ```
 
-Re-running is safe and cheap: unchanged files are recognised by Drive's `modifiedTime` and are
-never downloaded twice. Run it again whenever somebody adds something; a scheduled worker that
-does this automatically is the next phase.
+Re-running is safe and cheap: unchanged files are recognised by Drive's checksum (or, for Google
+Docs, Sheets and Slides, which have none, by their modified time) and are never downloaded twice.
+Two runs cannot overlap — a database lock makes the second one stop and say so.
+
+### Let it run every night
+
+The `drive-sync` container does the same thing on its own, **daily at 00:00 India time**. It is
+already in `docker-compose.prod.yml` and idles quietly until `GDRIVE_ENABLED=true`:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d drive-sync
+docker compose -f docker-compose.prod.yml logs drive-sync | grep "Next Drive sync"
+# Next Drive sync at 2026-10-09T00:00:00+05:30
+```
+
+- **It is a time of day, not an interval.** "Every 24 hours" would be anchored to whenever the
+  container last started, so a restart at 4pm would move the sync to 4pm for good.
+- **A missed night is caught up.** If the VM was off at midnight, the sync runs as soon as the
+  container is back, then returns to midnight.
+- **A failure retries within the hour** rather than waiting for the next night.
+- **Midnight is deliberate on a B-series VM**: it earns CPU credits while idle and spends them
+  when nobody is asking questions.
+
+Change the time with `GDRIVE_SYNC_AT=02:30`, or the zone with `GDRIVE_SYNC_TIMEZONE`. The
+result of the last run is in the database, readable without the logs:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T postgres psql -U postgres -d apag_knowledge_base \
+  -c "SELECT key, value FROM drive_sync_state;"
+```
+
+A document added during the day is searchable the morning after. For anything urgent, run
+`drive_sync.py` by hand as above.
 
 ### What it does, stated plainly
 
 | In Drive | In the knowledge base |
 |---|---|
 | File added to `Public` / `Restricted` | Imported at that tier |
-| File edited | Imported as a **new** document; the old one is kept, so existing citations still resolve |
+| File edited | Imported as a new version. The previous version is retired — hidden, not erased — **only once the new one is searchable**, so the file is never left with nothing to find |
+| File moved between `Public` and `Restricted` | The same document changes tier. Nothing is re-imported, and the audit log records that a folder move did it |
+| File binned, deleted, or moved out | Hidden from search and answers, reversibly. Bytes and audit trail kept |
+| File put back, unedited | **The same document comes back** — not a copy |
 | Google Doc / Sheet / Slides | Exported to docx / xlsx / pptx, which keeps headings and tables |
-| File binned, deleted, or moved out | Document hidden from search and answers, **reversibly** — bytes and audit trail kept |
 | File elsewhere in Drive | Ignored. The service account cannot see it |
+| File added as a **shortcut** | Skipped — a shortcut is a pointer, with no content. Ask people to *Move*, not *Add shortcut* |
 | Document deleted here | **Nothing.** The connector never writes to Drive |
 
-Two outcomes the report calls out rather than leaving in a log, because both change who can read
-something:
+**Anyone with edit access to the folder can change a document's tier by moving it.** That is
+inherent to "the folder is the tier", and every move is audited. Moving a file into `Public`
+widens who can read it and makes it eligible to be sent to the external model, which is why the
+report marks those moves.
 
-- **TIER RAISED** — the same bytes are already in the corpus at a lower tier. The copy is dropped
-  and the existing document is raised to RESTRICTED. Reverse one with
-  `POST /api/v1/documents/{id}/classify` if a file was filed in the wrong folder.
+### Reading the report
+
+Some outcomes are only known a run later. Importing a file only puts it in quarantine; whether it
+was a duplicate, or failed to extract, is decided by the workers afterwards. So each run ends with
+a section headed *From earlier syncs*, reporting on what previous runs imported:
+
+- **PREVIOUS VERSION RETIRED** — an edit is now live, and the version before it was hidden.
+- **CAME OUT A DUPLICATE** — identical content was already in the knowledge base.
+- **TIER RAISED** — that duplicate was filed more restricted than the copy already held, so the
+  held document was raised to RESTRICTED. Reverse with `POST /api/v1/documents/{id}/classify` if
+  a file was filed in the wrong folder.
+- **COULD NOT BE MADE SEARCHABLE** — the pipeline rejected it. If it was an edit, the previous
+  version stays visible.
+
+And two reported the moment they happen:
+
+- **TIER CHANGED by moving between folders** — with moves into `Public` marked.
 - **OWNER FELL BACK** — the Drive owner has no account here, so the fallback account owns the
   document. For a RESTRICTED file that means only that account and admins will see it.
 

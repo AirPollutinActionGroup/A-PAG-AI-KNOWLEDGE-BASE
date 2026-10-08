@@ -53,11 +53,6 @@ CANDIDATE_SUFFIXES = {spec.extension.lower() for spec in FORMATS.values()}
 class Tally:
     queued: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
-    # A subset of `duplicates`: the copy was dropped, but it was filed more restricted than the
-    # document already held, so that document's tier was raised. Tracked separately because it is
-    # the one outcome here that changes who can read something, and a line in a log nobody reads
-    # is not how somebody finds out their public document went restricted.
-    escalated: list[str] = field(default_factory=list)
     unsupported: list[tuple[str, str]] = field(default_factory=list)
     failed: list[tuple[str, str]] = field(default_factory=list)
     skipped_empty: list[str] = field(default_factory=list)
@@ -192,8 +187,6 @@ def ingest_one(service: UploadService, path: Path, meta: UploadRequest, tally: T
 
     if response.was_duplicate:
         tally.duplicates.append(rel)
-        if response.canonical_tier_escalated:
-            tally.escalated.append(rel)
     else:
         tally.queued.append(rel)
 
@@ -208,17 +201,6 @@ def report(tally: Tally, batch_id: uuid.UUID | None, dry_run: bool) -> None:
     print(f"  unsupported format    : {len(tally.unsupported)}")
     print(f"  empty, skipped        : {len(tally.skipped_empty)}")
     print(f"  failed                : {len(tally.failed)}")
-
-    if tally.escalated:
-        print()
-        print(f"TIER RAISED by {len(tally.escalated)} duplicate(s):")
-        for name in tally.escalated[:20]:
-            print(f"  {name}")
-        if len(tally.escalated) > 20:
-            print(f"  ... and {len(tally.escalated) - 20} more")
-        print("  These files were already in the corpus at a lower tier. The copy was dropped and")
-        print("  the existing document was raised to RESTRICTED. Reverse one with")
-        print("  POST /api/v1/documents/{id}/classify if a file was filed in the wrong place.")
 
     for label, rows in (("UNSUPPORTED", tally.unsupported), ("FAILED", tally.failed)):
         if rows:
@@ -237,6 +219,16 @@ def report(tally: Tally, batch_id: uuid.UUID | None, dry_run: bool) -> None:
         print("Track it with:")
         print("  SELECT status, count(*) FROM documents "
               f"WHERE upload_batch_id = '{batch_id}' GROUP BY 1;")
+        # Not knowable from here. `receive()` only quarantines; whether a file was a duplicate,
+        # and whether that duplicate raised a held document's tier, is decided by the scan worker
+        # after this command has returned. Pointing at where the answer will be beats printing a
+        # count that reads as one.
+        print("\nDuplicates are decided by the scan stage after this returns and show above as")
+        print("DUPLICATE. Any that were filed more restricted than the copy already held raised")
+        print("that document to RESTRICTED; list them with:")
+        print("  SELECT document_id, details->>'old_tier', details->>'new_tier', event_time")
+        print("  FROM audit_log WHERE event_type = 'DOCUMENT_RECLASSIFIED'")
+        print("    AND details->>'reason' = 'dedup-escalation' ORDER BY event_time DESC;")
     print("\nThe workers process these in the background. Documents become searchable as they")
     print("reach LIVE; nothing further is required here.")
 
