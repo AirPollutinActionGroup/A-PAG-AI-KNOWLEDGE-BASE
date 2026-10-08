@@ -10,6 +10,7 @@ resolved under, whether anything was downloaded at all, and what happens to a do
 source has gone.
 """
 
+import hashlib
 import io
 import uuid
 
@@ -20,9 +21,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from src.db.enums import Classification, UserRole
-from src.db.models import Base
+from src.db.models import AuditLog, Base
 from src.db.models import Document as DocORM
 from src.db.models import DriveFile as DriveFileORM
+from src.db.models import DriveFileVersion as VersionORM
 from src.db.models import User as UserORM
 from src.modules.connectors.drive.export_map import DOCX_MIME, FOLDER_MIME
 from src.modules.connectors.drive.models import DriveFile, DriveFileState
@@ -98,7 +100,7 @@ class FakeDrive:
         self.children.setdefault(folder_id, []).append(
             DriveFile(file_id=file_id, name=name, mime_type=mime, modified_time=modified,
                       size=size if size is not None else (len(data) if data else None),
-                      owner_email=owner, parents=parents)
+                      owner_email=owner, parents=parents, md5=self._md5(mime, data))
         )
         for other in extra_parents:
             self.children.setdefault(other, []).append(self.children[folder_id][-1])
@@ -110,11 +112,26 @@ class FakeDrive:
             f for f in self.children.get(folder_id, []) if f.file_id != file_id
         ]
 
-    def touch(self, folder_id: str, file_id: str, modified: str) -> None:
-        self.children[folder_id] = [
-            DriveFile(**{**f.__dict__, "modified_time": modified}) if f.file_id == file_id else f
-            for f in self.children[folder_id]
-        ]
+    @staticmethod
+    def _md5(mime: str, data: bytes | None) -> str | None:
+        """What Drive reports: a checksum for ordinary files, none for Google-native ones."""
+        if data is None or mime.startswith("application/vnd.google-apps."):
+            return None
+        return hashlib.md5(data).hexdigest()
+
+    def touch(self, folder_id: str, file_id: str, modified: str,
+              data: bytes | None = None) -> None:
+        """Bumps the modified time; with `data`, also changes the content, as an edit would."""
+        updated = []
+        for f in self.children[folder_id]:
+            if f.file_id == file_id:
+                changes = {"modified_time": modified}
+                if data is not None:
+                    self.content[file_id] = data
+                    changes["md5"] = self._md5(f.mime_type, data)
+                f = DriveFile(**{**f.__dict__, **changes})
+            updated.append(f)
+        self.children[folder_id] = updated
 
     # --- the client interface the service uses --------------------------------
 
@@ -197,6 +214,38 @@ def drive_rows(stack) -> dict[str, DriveFileORM]:
         return {r.drive_file_id: r for r in s.execute(select(DriveFileORM)).scalars().all()}
 
 
+def versions(stack, file_id: str) -> list[VersionORM]:
+    with stack.sessions() as s:
+        return list(s.execute(
+            select(VersionORM).where(VersionORM.drive_file_id == file_id)
+            .order_by(VersionORM.imported_at)
+        ).scalars().all())
+
+
+def audit(stack, document_id, event: str) -> list[AuditLog]:
+    with stack.sessions() as s:
+        return list(s.execute(
+            select(AuditLog).where(AuditLog.document_id == document_id,
+                                   AuditLog.event_type == event)
+        ).scalars().all())
+
+
+def doc(stack, document_id) -> DocORM:
+    with stack.sessions() as s:
+        return s.get(DocORM, document_id)
+
+
+def settle(stack, document_id, status: str, sha256: str | None = None) -> None:
+    """Stands in for the workers. Unit tests do not run scan, extract or embed, so a test that
+    needs a version to have *finished* sets the outcome the pipeline would have reached."""
+    with stack.sessions() as s:
+        d = s.get(DocORM, document_id)
+        d.status = status
+        if sha256 is not None:
+            d.sha256 = sha256
+        s.commit()
+
+
 # ==============================================================================
 # The folder decides the tier
 # ==============================================================================
@@ -262,7 +311,7 @@ def test_files_outside_the_watched_folders_are_left_alone(stack):
     outcome = stack.build().sync_once()
 
     assert [d.filename for d in documents(stack)] == ["notice.pdf"]
-    assert outcome.seen == 1
+    assert outcome.files_found == 1
     assert stack.drive.downloaded == ["f1"], "an unwatched file must not even be fetched"
 
 
@@ -295,8 +344,8 @@ def test_an_edited_file_arrives_as_a_new_document(stack):
     stack.drive.add_file(PUBLIC_ROOT, "f1", "notice.pdf", pdf_bytes())
     stack.build().sync_once()
 
-    stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z")
-    stack.drive.content["f1"] = pdf_bytes("CAQM Statutory Directive 2026 (revised)")
+    stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z",
+                      data=pdf_bytes("CAQM Statutory Directive 2026 (revised)"))
     outcome = stack.build().sync_once()
 
     assert len(outcome.imported) == 1
@@ -305,15 +354,33 @@ def test_an_edited_file_arrives_as_a_new_document(stack):
     assert all(d.deleted_at is None for d in docs), "the previous version must survive"
 
 
-def test_a_file_moved_between_tiers_is_re_imported_at_the_new_tier(stack):
-    stack.drive.add_file(RESTRICTED_ROOT, "f1", "note.pdf", pdf_bytes())
-    stack.build().sync_once()
+@pytest.mark.parametrize("src,dst", [(RESTRICTED_ROOT, PUBLIC_ROOT), (PUBLIC_ROOT, RESTRICTED_ROOT)])
+def test_a_move_between_folders_reclassifies_in_place(stack, src, dst):
+    """Same content, new tier: nothing is downloaded or re-embedded, the one document changes.
 
-    stack.drive.remove_file(RESTRICTED_ROOT, "f1")
-    stack.drive.add_file(PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    Re-importing instead collides with dedup, which never lowers a tier: an ordinary file moved
+    to Public would silently stay RESTRICTED, while a Google Doc (whose exports differ byte for
+    byte) would land as a second document. One rule for both beats two accidents.
+    """
+    stack.drive.add_file(src, "f1", "note.pdf", pdf_bytes())
     stack.build().sync_once()
+    stack.drive.downloaded.clear()
 
-    assert drive_rows(stack)["f1"].classification == Classification.PUBLIC.value
+    stack.drive.remove_file(src, "f1")
+    stack.drive.add_file(dst, "f1", "note.pdf", pdf_bytes())
+    outcome = stack.build().sync_once()
+
+    new_tier = "PUBLIC" if dst == PUBLIC_ROOT else "RESTRICTED"
+    docs = documents(stack)
+    assert len(docs) == 1, "a move is not a new document"
+    assert docs[0].classification == new_tier
+    assert stack.drive.downloaded == [], "nothing to fetch: the content did not change"
+    assert outcome.reclassified == [("note.pdf", "RESTRICTED" if new_tier == "PUBLIC"
+                                     else "PUBLIC", new_tier)]
+    assert outcome.removed == [], "moving between watched folders is not leaving them"
+    reasons = [r.details.get("reason") for r in audit(stack, docs[0].document_id,
+                                                       "DOCUMENT_RECLASSIFIED")]
+    assert reasons == ["drive-folder-move"]
 
 
 # ==============================================================================
@@ -506,3 +573,190 @@ def test_a_duplicate_is_counted_as_one(stack):
     outcome = stack.build().sync_once()
 
     assert len(outcome.imported) + len(outcome.duplicates) == 2
+
+
+# ==============================================================================
+# Edits: a new version, and the old one retired only once the new one is live
+# ==============================================================================
+
+def _import_and_settle(stack, folder, file_id, name, data, sha="sha-v1"):
+    """Imports a file and makes its first version CURRENT, as a real night would leave it."""
+    stack.drive.add_file(folder, file_id, name, data)
+    stack.build().sync_once()
+    first = versions(stack, file_id)[0].document_id
+    settle(stack, first, "LIVE", sha256=sha)
+    stack.build().sync_once()  # reconciles: PENDING -> CURRENT
+    assert [v.state for v in versions(stack, file_id)] == ["CURRENT"]
+    return first
+
+
+def test_the_old_version_stays_visible_while_the_new_one_processes(stack):
+    """Retiring at import time would leave the file with nothing searchable if the new version
+    then failed extraction. Nothing is retired until the newest version has settled."""
+    first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z", data=pdf_bytes("revised"))
+
+    outcome = stack.build().sync_once()
+
+    assert outcome.edited == ["note.pdf [PUBLIC]"]
+    assert outcome.still_processing == 1
+    assert doc(stack, first).deleted_at is None, "still the version people can find"
+    assert [v.state for v in versions(stack, "f1")] == ["CURRENT", "PENDING"]
+
+
+def test_the_old_version_is_retired_once_the_new_one_is_live(stack):
+    first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z", data=pdf_bytes("revised"))
+    stack.build().sync_once()
+    second = versions(stack, "f1")[1].document_id
+    settle(stack, second, "LIVE", sha256="sha-v2")
+
+    outcome = stack.build().sync_once()
+
+    assert outcome.superseded == ["note.pdf"]
+    old, new = doc(stack, first), doc(stack, second)
+    assert old.status == "SUPERSEDED", "the codebase's own word for a replaced version"
+    assert old.deleted_at is not None, "search filters on deleted_at, not on status"
+    assert old.purged_at is None, "retired, not erased"
+    assert new.supersedes_id == first
+    assert new.version == 2
+    assert [v.state for v in versions(stack, "f1")] == ["SUPERSEDED", "CURRENT"]
+    reasons = [r.details["reason"] for r in audit(stack, first, "DOCUMENT_SUPERSEDED")]
+    assert reasons == ["drive-file-edited"]
+
+
+def test_a_new_version_that_fails_keeps_the_old_one(stack):
+    first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z", data=pdf_bytes("revised"))
+    stack.build().sync_once()
+    settle(stack, versions(stack, "f1")[1].document_id, "EXTRACTION_FAILED")
+
+    outcome = stack.build().sync_once()
+
+    assert outcome.pipeline_failed == [("note.pdf", "EXTRACTION_FAILED")]
+    assert doc(stack, first).deleted_at is None
+    assert [v.state for v in versions(stack, "f1")] == ["CURRENT", "FAILED"]
+
+
+def test_a_retired_version_does_not_block_reverting_to_its_content(stack):
+    """`SUPERSEDED` takes the old version out of dedup. Without that, reverting a file to earlier
+    content would match its own retired copy, be marked DUPLICATE, and never appear."""
+    from src.modules.document_pipeline.repository import PostgreSQLDocumentRepository
+
+    first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes(), sha="sha-v1")
+    stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z", data=pdf_bytes("revised"))
+    stack.build().sync_once()
+    settle(stack, versions(stack, "f1")[1].document_id, "LIVE", sha256="sha-v2")
+    stack.build().sync_once()
+    assert doc(stack, first).status == "SUPERSEDED"
+
+    with stack.sessions() as s:
+        assert PostgreSQLDocumentRepository(s).get_by_checksum("sha-v1") is None
+
+
+def test_a_rename_alone_is_not_an_edit(stack):
+    """Drive's checksum, not the modified time, for ordinary files. A rename or a move can bump
+    the modified time without changing a byte, and nightly that would re-embed for nothing."""
+    stack.drive.add_file(PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    stack.build().sync_once()
+    stack.drive.downloaded.clear()
+
+    stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z")  # same bytes
+    outcome = stack.build().sync_once()
+
+    assert outcome.unchanged == 1
+    assert outcome.imported == []
+    assert stack.drive.downloaded == []
+
+
+def test_a_google_doc_edit_is_detected_by_modified_time(stack):
+    """Google-native files have no checksum, and their exports are not byte-stable, so the
+    modified time is the only honest signal for them."""
+    stack.drive.add_file(PUBLIC_ROOT, "g1", "FGD Note", docx_bytes(), mime=GOOGLE_DOC)
+    stack.build().sync_once()
+
+    stack.drive.touch(PUBLIC_ROOT, "g1", "2026-06-01T00:00:00Z")
+    outcome = stack.build().sync_once()
+
+    assert outcome.edited == ["FGD Note [PUBLIC]"]
+
+
+# ==============================================================================
+# Removal is audited, and putting the file back really restores it
+# ==============================================================================
+
+def test_removal_is_recorded_in_the_audit_log(stack):
+    first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    stack.drive.remove_file(PUBLIC_ROOT, "f1")
+
+    stack.build().sync_once()
+
+    rows = audit(stack, first, "DOCUMENT_DELETED")
+    assert len(rows) == 1
+    assert rows[0].details["reason"] == "drive-file-removed"
+    assert rows[0].details["permanent"] is False
+    assert rows[0].user_id == "drive-sync", "attributed to the connector, never to a person"
+
+
+def test_removal_also_hides_a_version_still_being_processed(stack):
+    """Otherwise it finishes embedding and appears in search for a file that is gone."""
+    stack.drive.add_file(PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    stack.build().sync_once()
+    pending = versions(stack, "f1")[0].document_id  # never settled
+
+    stack.drive.remove_file(PUBLIC_ROOT, "f1")
+    stack.build().sync_once()
+
+    assert doc(stack, pending).deleted_at is not None
+    assert [v.state for v in versions(stack, "f1")] == ["REMOVED"]
+
+
+def test_putting_a_file_back_restores_the_same_document(stack):
+    """The promise the report makes. A re-import would be quarantined, scanned, and marked
+    DUPLICATE against the hidden original -- dedup does not look at `deleted_at` -- and nothing
+    would come back. So the original row is restored instead."""
+    first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    stack.drive.remove_file(PUBLIC_ROOT, "f1")
+    stack.build().sync_once()
+    assert doc(stack, first).deleted_at is not None
+    stack.drive.downloaded.clear()
+
+    stack.drive.add_file(PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    outcome = stack.build().sync_once()
+
+    assert outcome.restored == ["note.pdf [PUBLIC]"]
+    assert doc(stack, first).deleted_at is None, "back in search"
+    assert len(documents(stack)) == 1, "the same document, not a copy"
+    assert stack.drive.downloaded == [], "nothing re-fetched"
+    assert len(audit(stack, first, "DOCUMENT_RESTORED")) == 1
+    assert [v.state for v in versions(stack, "f1")] == ["CURRENT"]
+
+
+# ==============================================================================
+# Duplicates are known only after the scan worker has run
+# ==============================================================================
+
+def test_a_duplicate_is_reported_once_the_scan_stage_has_decided(stack):
+    """`receive()` only quarantines, so at import time nobody knows. The next run reads what the
+    scan worker decided -- including, from its audit row, whether the duplicate raised a tier."""
+    from src.modules.audit.service import AuditService
+
+    stack.drive.add_file(PUBLIC_ROOT, "f1", "a.pdf", pdf_bytes())
+    stack.drive.add_file(RESTRICTED_ROOT, "f2", "b.pdf", pdf_bytes())
+    stack.build().sync_once()
+    held = versions(stack, "f1")[0].document_id
+    copy = versions(stack, "f2")[0].document_id
+    settle(stack, held, "LIVE", sha256="same-bytes")
+    settle(stack, copy, "DUPLICATE", sha256="same-bytes")
+    with stack.sessions() as s:  # what ScanJobHandler writes when it escalates
+        AuditService.log_event(
+            db=s, document_id=copy, event_type="DOCUMENT_REJECTED",
+            details={"reason": "DUPLICATE", "canonical_tier_escalated": True},
+        )
+
+    outcome = stack.build().sync_once()
+
+    assert outcome.duplicates == [("b.pdf", "a.pdf")]
+    assert outcome.escalated == ["b.pdf"]
+    assert [v.state for v in versions(stack, "f2")] == ["DUPLICATE"]
+    assert [v.state for v in versions(stack, "f1")] == ["CURRENT"]

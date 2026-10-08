@@ -9,9 +9,10 @@ container (see KNOWN_DEBTS.md #5), so stages get their own containers rather tha
 import logging
 import os
 import sys
+from typing import Protocol
 
-from src.workers.base_worker import BaseWorker
 from src.workers.chunking_worker import ChunkingWorker
+from src.workers.drive_sync_worker import DriveSyncWorker
 from src.workers.embedding_worker import EmbeddingWorker
 from src.workers.extraction_worker import ExtractionWorker
 from src.workers.normalization_worker import NormalizationWorker
@@ -25,16 +26,25 @@ logging.basicConfig(
 
 logger = logging.getLogger("worker_main")
 
-WORKERS: dict[str, type[BaseWorker]] = {
+class Worker(Protocol):
+    """Anything with a blocking `run()`. The pipeline stages are `BaseWorker`s that claim rows
+    from the jobs table; DRIVE_SYNC runs on a clock instead, so the contract is just this."""
+
+    def run(self) -> None: ...
+
+
+WORKERS: dict[str, type[Worker]] = {
     "SCAN": ScanWorker,
     "EXTRACT": ExtractionWorker,
     "NORMALIZE": NormalizationWorker,
     "CHUNK": ChunkingWorker,
     "EMBED": EmbeddingWorker,
+    # Not a pipeline stage and not in JobStage: nothing enqueues it. See drive_sync_worker.py.
+    "DRIVE_SYNC": DriveSyncWorker,
 }
 
 
-def build_worker(stage: str) -> BaseWorker:
+def build_worker(stage: str) -> Worker:
     worker_cls = WORKERS.get(stage)
     if worker_cls is None:
         raise SystemExit(

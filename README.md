@@ -264,7 +264,7 @@ Not accepted, with the reason:
 | **Phase 7c** | Test deployment on Azure (`DEPLOY.md`) | ✅ Completed |
 | **Phase 7d** | Invite-only registration or SSO, person-name masking, backups, TLS | 📋 Planned |
 | **Phase 8** | Text-to-SQL engine, intent routing, certified metrics agreed with department heads | 📋 Planned |
-| **Phase 7e** | Google Drive connector — shared folder sets the tier, `drive_sync.py` imports it through the same pipeline | ✅ Command built; scheduled worker planned |
+| **Phase 7e** | Google Drive connector — shared folder sets the tier, imported through the same pipeline nightly at 00:00 IST; edits version, moves reclassify, removals reverse | ✅ Completed |
 | Later | Supersede/versioning, freshness warnings, semantic cache | 📋 Designed, not built |
 
 ---

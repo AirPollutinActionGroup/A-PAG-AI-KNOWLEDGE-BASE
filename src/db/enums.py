@@ -107,3 +107,7 @@ class AuditEventType(str, Enum):
     EMBEDDING_COMPLETED = "EMBEDDING_COMPLETED"
     EMBEDDING_FAILED = "EMBEDDING_FAILED"
     EMBEDDING_SKIPPED = "EMBEDDING_SKIPPED"
+    # The reverse of a soft delete. Without it the log can say a document left the knowledge
+    # base but never that it came back, so an audit read later would show it gone while search
+    # shows it present -- the record contradicting the system it is a record of.
+    DOCUMENT_RESTORED = "DOCUMENT_RESTORED"
