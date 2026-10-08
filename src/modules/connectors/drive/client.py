@@ -34,7 +34,9 @@ API_ROOT = "https://www.googleapis.com/drive/v3"
 # Everything the connector needs about a file, requested in one go. Drive returns only `id` and
 # `name` unless asked, and a missing `modifiedTime` would silently disable change detection —
 # every file would look unchanged forever.
-FILE_FIELDS = "id,name,mimeType,modifiedTime,size,owners(emailAddress),parents,trashed"
+FILE_FIELDS = (
+    "id,name,mimeType,modifiedTime,size,md5Checksum,owners(emailAddress),parents,trashed"
+)
 LIST_FIELDS = f"nextPageToken,files({FILE_FIELDS})"
 
 PAGE_SIZE = 200

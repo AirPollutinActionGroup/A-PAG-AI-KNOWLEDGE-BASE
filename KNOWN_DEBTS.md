@@ -691,8 +691,11 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   declassify it — a far worse hole than the one being closed.
 - **The cost**: a file dropped in the wrong folder pulls a genuinely public document out of
   everyone's view until an ADMIN reverses it with `POST /documents/{id}/classify`. That is the
-  right way round for a control whose job is to fail closed, and it logs at WARNING and is
-  reported by the ingest commands so it is noticed rather than discovered.
+  right way round for a control whose job is to fail closed. It logs at WARNING. As first
+  shipped this entry also claimed it was "reported by the ingest commands"; that was wrong (see
+  #40) — `receive()` returns before the scan stage decides anything, so no command can report it
+  at import time. `drive_sync.py` now reports it a run later, from the scan stage's own audit row;
+  `bulk_ingest.py` prints the query that finds it.
 - **Two things it had to work around**: `_audit()` de-dupes by `(document_id, event_type)`
   because jobs can be retried, which would have swallowed every escalation after the first — it
   now takes `allow_repeat`, used for this event only. And there is no reusable reclassify
@@ -768,3 +771,43 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Trigger**: when somebody syncs a folder of operational spreadsheets and ingestion stops
   finishing overnight, or when a sheet exceeds ~5,000 rows. Until then this is a known cost on a
   document type that is rare in a policy corpus.
+
+### 40. ✅ Three Drive connector claims were false when shipped (Closed)
+- **Status**: Closed, by the change that added the nightly worker. Recorded because each one was
+  stated confidently in docs, a report or a commit message, and each was found only by testing
+  the behaviour against a real folder rather than reading the code that described it.
+- **"Put the file back and the next sync restores it" did not.** Dedup matches on the hash and
+  does not consult `deleted_at` (#41). A returned file was re-imported, scanned, marked DUPLICATE
+  against its own hidden original, and nothing came back. Fixed by not re-importing at all: an
+  unedited returning file restores the original row (`DocumentRepository.restore()`, new) and
+  writes `DOCUMENT_RESTORED` (new audit event, migration `0022`).
+- **"Already in the corpus" and "TIER RAISED" could never appear.** `UploadService.receive()`
+  only quarantines and always returns `was_duplicate=False`; duplicates are decided by the scan
+  worker minutes later. Both report sections in `drive_sync.py`, and the one #36 added to
+  `bulk_ingest.py`, were unreachable in production — the unit tests passed because their fakes
+  returned what the real service never does. `drive_sync.py` now reports these a run later, by
+  reconciling `drive_file_versions` against what the workers decided and reading escalation from
+  the scan stage's audit row. `bulk_ingest.py` prints the query instead of a count of zero.
+- **"Removal reuses the existing `DOCUMENT_DELETED` event" — it wrote no audit row at all.** The
+  `0021` docstring and CLAUDE.md said so; `_retire_vanished()` only called `soft_delete()`, which
+  writes nothing. Every retirement, supersession, restore and folder-move reclassification now
+  writes its own row, attributed to `drive-sync` and never to a person.
+- **The lesson worth keeping**: a fake that returns a field the real implementation never sets
+  makes a test prove the fake. The bulk-ingest fake returned `was_duplicate=True` on request.
+
+### 41. Re-uploading a soft-deleted document's bytes makes it a hidden DUPLICATE
+- **Status**: Open, on the upload form and `bulk_ingest.py`. The Drive connector avoids it (#40).
+- **What**: `get_by_checksum()` excludes SUPERSEDED and ARCHIVED but not documents with
+  `deleted_at` set, and the `uq_documents_active_sha256` index does not consider `deleted_at`
+  either. So delete a document (the reversible kind), upload the same file again, and the new
+  upload is marked DUPLICATE against the deleted one. The user sees "duplicate" and the document
+  stays hidden — the reversible delete is reversible only by an admin restoring the original row,
+  which no endpoint currently offers.
+- **Why not fixed here**: the right answer is not obvious. Excluding deleted documents from dedup
+  means a re-upload creates a second document while the first's bytes and chunks still exist;
+  treating a re-upload as "undelete" means an upload silently resurrects a row someone removed on
+  purpose, with its old tier and owner. Either is a product decision about what delete means.
+- **Trigger**: the first person who deletes a document, re-uploads it, and reports it missing.
+  The fix will want a `POST /documents/{id}/restore` endpoint either way, now that
+  `DocumentRepository.restore()` exists to back it.
+

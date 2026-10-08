@@ -44,48 +44,54 @@ logger.setLevel(logging.INFO)
 logging.getLogger("src.modules.connectors").setLevel(logging.INFO)
 
 
+def _listing(title: str, rows: list[str], cap: int = 20) -> None:
+    if not rows:
+        return
+    print()
+    print(title)
+    for row in rows[:cap]:
+        print(f"  {row}")
+    if len(rows) > cap:
+        print(f"  ... and {len(rows) - cap} more")
+
+
 def report(outcome: SyncOutcome, dry_run: bool) -> None:
+    would = dry_run
     print()
     print("=" * 72)
-    print(f"{'Found' if dry_run else 'Synced'}: {outcome.seen} file(s) under the watched folders")
+    print(f"{'Found' if would else 'Synced'}: {outcome.files_found} file(s) "
+          f"under the watched folders")
     print("-" * 72)
-    print(f"  {'would import' if dry_run else 'queued for processing'} : "
-          f"{len(outcome.imported)}")
-    print(f"  unchanged since last sync : {outcome.unchanged}")
-    print(f"  already in the corpus     : {len(outcome.duplicates)}")
-    print(f"  skipped                   : {len(outcome.skipped)}")
-    print(f"  failed                    : {len(outcome.failed)}")
-    print(f"  {'would retire' if dry_run else 'retired'} (gone from Drive) : "
-          f"{len(outcome.removed)}")
+    counts = [
+        ("would import" if would else "queued for processing",
+         f"{len(outcome.imported)}  ({len(outcome.edited)} of them edits)"),
+        ("unchanged since last sync", outcome.unchanged),
+        ("would restore (put back)" if would else "restored (put back)", len(outcome.restored)),
+        ("would change tier (moved)" if would else "tier changed (moved)",
+         len(outcome.reclassified)),
+        ("skipped", len(outcome.skipped)),
+        ("failed", len(outcome.failed)),
+        ("would retire (gone from Drive)" if would else "retired (gone from Drive)",
+         len(outcome.removed)),
+    ]
+    width = max(len(label) for label, _ in counts)
+    for label, value in counts:
+        print(f"  {label.ljust(width)} : {value}")
 
     # Listed, not merely counted. A dry run exists to be read before anything happens, and
-    # "would import: 1" does not say *which* file, nor — far more important — which tier it
-    # resolved to. The tier is the decision this command makes on the operator's behalf, so it
-    # is the one thing a preview has to show.
-    if outcome.imported:
-        print()
-        print("WOULD IMPORT:" if dry_run else "IMPORTED:")
-        for name in outcome.imported[:40]:
-            print(f"  {name}")
-        if len(outcome.imported) > 40:
-            print(f"  ... and {len(outcome.imported) - 40} more")
+    # "would import: 1" does not say *which* file, nor -- far more important -- which tier it
+    # resolved to. The tier is the decision this command makes on the operator's behalf.
+    _listing("WOULD IMPORT:" if would else "IMPORTED:", outcome.imported, cap=40)
+    _listing("RESTORED (back in a watched folder):", outcome.restored)
 
-    if outcome.duplicates:
+    if outcome.reclassified:
         print()
-        print("ALREADY IN THE CORPUS:")
-        for name in outcome.duplicates[:20]:
-            print(f"  {name}")
-        if len(outcome.duplicates) > 20:
-            print(f"  ... and {len(outcome.duplicates) - 20} more")
-
-    if outcome.escalated:
-        print()
-        print(f"TIER RAISED by {len(outcome.escalated)} duplicate(s):")
-        for name in outcome.escalated[:20]:
-            print(f"  {name}")
-        print("  These files are already in the corpus at a lower tier. The copy was dropped and")
-        print("  the existing document was raised to RESTRICTED. Reverse one with")
-        print("  POST /api/v1/documents/{id}/classify if a file was filed in the wrong folder.")
+        print("TIER CHANGED by moving between folders:")
+        for name, old, new in outcome.reclassified[:20]:
+            marker = "   <-- now readable by everyone" if new == "PUBLIC" else ""
+            print(f"  {name}: {old} -> {new}{marker}")
+        print("  Anyone with edit access to the folder can do this. Each change is in the audit")
+        print("  log as DOCUMENT_RECLASSIFIED with reason drive-folder-move.")
 
     if outcome.owner_fallbacks:
         print()
@@ -104,13 +110,33 @@ def report(outcome: SyncOutcome, dry_run: bool) -> None:
                 print(f"  ... and {len(rows) - 20} more")
 
     if outcome.removed:
-        print("\nRETIRED (no longer in a watched Drive folder):")
-        for name in outcome.removed[:20]:
-            print(f"  {name}")
-        if len(outcome.removed) > 20:
-            print(f"  ... and {len(outcome.removed) - 20} more")
-        print("  Hidden from search and answers. The files and audit trail are kept, so this is")
-        print("  reversible: put the file back in the folder, or ask an admin to restore it.")
+        _listing("RETIRED (no longer in a watched Drive folder):", outcome.removed)
+        print("  Hidden from search and answers, not erased. Put the file back in the folder and")
+        print("  the next sync restores the same document.")
+
+    # Reconciliation. These are outcomes of *earlier* imports: `receive()` only quarantines, so
+    # whether a file turned out a duplicate or failed to extract is decided by the workers after
+    # the run that imported it has already finished.
+    settled = (outcome.superseded or outcome.duplicates or outcome.escalated
+               or outcome.pipeline_failed or outcome.still_processing)
+    if settled:
+        print()
+        print("-" * 72)
+        print("From earlier syncs, now that the pipeline has finished with them:")
+        _listing("PREVIOUS VERSION RETIRED (a newer edit is now live):", outcome.superseded)
+        if outcome.duplicates:
+            _listing("CAME OUT A DUPLICATE (identical content already held):",
+                     [f"{name}  ==  {canonical}" for name, canonical in outcome.duplicates])
+        if outcome.escalated:
+            _listing("TIER RAISED by a duplicate:", outcome.escalated)
+            print("  The same content was already held at a lower tier; that document was raised")
+            print("  to RESTRICTED. Reverse with POST /api/v1/documents/{id}/classify if a file")
+            print("  was filed in the wrong folder.")
+        if outcome.pipeline_failed:
+            _listing("COULD NOT BE MADE SEARCHABLE (previous version, if any, kept):",
+                     [f"{name}  ({status})" for name, status in outcome.pipeline_failed])
+        if outcome.still_processing:
+            print(f"\n  still processing: {outcome.still_processing} file(s) -- settled next sync")
 
     if dry_run:
         print("\nDry run — nothing was imported, retired or changed. Re-run without --dry-run.")
@@ -168,7 +194,7 @@ def main() -> int:
     except (DriveAuthError, DriveSyncError) as e:
         raise SystemExit(str(e)) from e
 
-    if outcome.seen == 0:
+    if outcome.files_found == 0:
         # Overwhelmingly the common first-run problem, and an empty folder looks identical to no
         # access from here, so say both.
         print(

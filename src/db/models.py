@@ -189,6 +189,11 @@ class Document(Base):
             "sha256",
             unique=True,
             postgresql_where=text("status NOT IN ('SUPERSEDED', 'ARCHIVED', 'REJECTED', 'DUPLICATE')"),
+            # The same predicate for SQLite, which the unit tests build their schema on. Without
+            # it the index there is *fully* unique, so a test cannot even represent a DUPLICATE
+            # row sharing its original's hash -- the ordinary state in production -- and any code
+            # that reads duplicates back (the Drive reconciliation does) goes untested.
+            sqlite_where=text("status NOT IN ('SUPERSEDED', 'ARCHIVED', 'REJECTED', 'DUPLICATE')"),
         ),
         Index("idx_documents_search_vector", "search_vector", postgresql_using="gin"),
     )
@@ -427,7 +432,7 @@ class AuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED', 'EXTRACTION_COMPLETED', 'EXTRACTION_FAILED', 'NORMALIZATION_COMPLETED', 'NORMALIZATION_FAILED', 'DOCUMENT_RECLASSIFIED', 'CHUNKING_COMPLETED', 'CHUNKING_FAILED', 'EMBEDDING_COMPLETED', 'EMBEDDING_FAILED', 'EMBEDDING_SKIPPED')",
+            "event_type IN ('DOCUMENT_UPLOADED', 'DOCUMENT_QUARANTINED', 'VALIDATION_PASSED', 'VALIDATION_FAILED', 'DOCUMENT_PROMOTED', 'DOCUMENT_REJECTED', 'DOCUMENT_SUPERSEDED', 'DOCUMENT_ARCHIVED', 'DOCUMENT_DELETED', 'EXTRACTION_COMPLETED', 'EXTRACTION_FAILED', 'NORMALIZATION_COMPLETED', 'NORMALIZATION_FAILED', 'DOCUMENT_RECLASSIFIED', 'CHUNKING_COMPLETED', 'CHUNKING_FAILED', 'EMBEDDING_COMPLETED', 'EMBEDDING_FAILED', 'EMBEDDING_SKIPPED', 'DOCUMENT_RESTORED')",
             name="chk_audit_log_event_type",
         ),
     )
@@ -460,6 +465,11 @@ class DriveFile(Base):
         nullable=True,
     )
     drive_modified_time: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Drive's own content checksum, for ordinary (non-Google) files. Preferred over
+    # `drive_modified_time` wherever it exists, because a rename or a move can bump the modified
+    # time without changing a byte -- and on a nightly sync that would re-import and re-embed an
+    # unchanged document. Google-native files have none, since they have no bytes until exported.
+    drive_md5: Mapped[str | None] = mapped_column(String(32), nullable=True)
     drive_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     drive_mime_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Which watched tree it resolved under. Stored so a file moving from Restricted to Public is
@@ -485,6 +495,55 @@ class DriveFile(Base):
             name="chk_drive_files_state",
         ),
         Index("idx_drive_files_document_id", "document_id"),
+    )
+
+
+class DriveFileVersion(Base):
+    """One row per document a Drive file has produced.
+
+    A Drive file is one thing; the documents imported from it over time are several. An edit
+    arrives as a new document rather than overwriting the old one, so that a citation made last
+    week still resolves to the text that was cited -- but then the previous version has to leave
+    search, or a document edited most days returns five near-identical copies.
+
+    It cannot leave at import time. The new version has only been *received*; it may yet fail
+    extraction, or turn out at scan to be a duplicate. Retiring the old one first would leave the
+    file with nothing visible at all. So a version is `PENDING` until its document settles, and the
+    previous one is retired only once the new one is `CURRENT` -- by the next sync run, which is
+    why this has to be durable state rather than something one run keeps in memory.
+    """
+
+    __tablename__ = "drive_file_versions"
+
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    drive_file_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("drive_files.drive_file_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("documents.document_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    drive_modified_time: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    drive_md5: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('PENDING', 'CURRENT', 'SUPERSEDED', 'DUPLICATE', 'FAILED', 'REMOVED')",
+            name="chk_drive_file_versions_state",
+        ),
+        Index("idx_drive_file_versions_file", "drive_file_id"),
+        Index("idx_drive_file_versions_document", "document_id"),
     )
 
 

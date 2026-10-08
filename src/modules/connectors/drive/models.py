@@ -24,6 +24,22 @@ class DriveFileState(str, Enum):
     FAILED = "FAILED"
 
 
+class VersionState(str, Enum):
+    """Where one imported document stands relative to the Drive file it came from.
+
+    `PENDING` until the pipeline has finished with it -- `receive()` only quarantines, so at
+    import time nothing is known about whether it will extract, embed, or turn out a duplicate.
+    Only a settled version can retire the one before it.
+    """
+
+    PENDING = "PENDING"
+    CURRENT = "CURRENT"
+    SUPERSEDED = "SUPERSEDED"
+    DUPLICATE = "DUPLICATE"
+    FAILED = "FAILED"
+    REMOVED = "REMOVED"
+
+
 @dataclass(frozen=True)
 class DriveFile:
     """One file as Drive describes it, reduced to what the connector actually uses."""
@@ -39,6 +55,10 @@ class DriveFile:
     owner_email: str | None = None
     parents: list[str] = field(default_factory=list)
     trashed: bool = False
+    # Drive's content checksum. Present for ordinary files, absent for Google-native ones, which
+    # have no bytes until exported -- and whose exports are not byte-stable, so a hash of the
+    # export would report an unchanged Doc as edited on every run.
+    md5: str | None = None
 
     @classmethod
     def from_api(cls, payload: dict) -> "DriveFile":
@@ -53,4 +73,5 @@ class DriveFile:
             owner_email=(owners[0].get("emailAddress") if owners else None),
             parents=list(payload.get("parents") or []),
             trashed=bool(payload.get("trashed", False)),
+            md5=payload.get("md5Checksum"),
         )

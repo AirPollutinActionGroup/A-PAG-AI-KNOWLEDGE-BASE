@@ -308,9 +308,21 @@ class Settings(BaseSettings):
     # bytes, so an oversized file would otherwise be pulled into memory purely to be rejected by
     # a validator that already knows the limit. Matches MAX_FILE_SIZE_BYTES in the upload path.
     GDRIVE_MAX_FILE_BYTES: int = 100 * 1024 * 1024
-    # Phase B only: how often the worker asks Drive what changed. An unchanged folder costs one
-    # small request, so this is about how quickly a new document appears, not about load.
+    # When the drive-sync worker runs: a wall-clock time, daily, in GDRIVE_SYNC_TIMEZONE. A time of
+    # day rather than "every 24 hours" on purpose -- an interval is anchored to whenever the
+    # container last started, so one restart at 4pm would move the nightly sync to 4pm for good.
+    # Midnight suits a burstable VM: it earns CPU credits while idle and spends them when nobody
+    # is asking questions. Leave empty to run on GDRIVE_SYNC_INTERVAL_SECONDS instead.
+    GDRIVE_SYNC_AT: str = "00:00"
+    # Explicit, because the container's clock is UTC: "00:00" with no zone would fire at 05:30 in
+    # India. Asia/Kolkata has no daylight saving, but any IANA name works.
+    GDRIVE_SYNC_TIMEZONE: str = "Asia/Kolkata"
+    # Only when GDRIVE_SYNC_AT is empty.
     GDRIVE_SYNC_INTERVAL_SECONDS: int = 900
+    # After a failed run, try again this much later rather than waiting for tomorrow. A nightly
+    # job that fails on a network blip should not cost a day; one that fails on bad config costs
+    # one cheap attempt an hour, logged each time.
+    GDRIVE_SYNC_RETRY_SECONDS: int = 3600
 
     @field_validator("DATABASE_URL")
     @classmethod
