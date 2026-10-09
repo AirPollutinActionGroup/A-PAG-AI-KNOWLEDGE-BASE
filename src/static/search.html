@@ -124,18 +124,6 @@ button { cursor: pointer; background: none; border: 0; }
 .rail-btn:hover { border-color: var(--yellow-deep); }
 .rail-btn .ic { font-size: 15px; line-height: 1; }
 
-.rail-sel {
-  display: flex; flex-direction: column; gap: 4px; padding: 2px 2px 0;
-  font: 400 11px/1.4 "IBM Plex Mono", monospace; color: var(--ink-faint);
-}
-.rail-sel select {
-  width: 100%; padding: 6px 8px; font-size: 12.5px; border: 1px solid var(--line);
-  border-radius: 7px; background: var(--paper); color: var(--ink);
-}
-.rail-sel select:focus { border-color: var(--yellow-deep); outline: 0; }
-.rail-sel.need { color: var(--danger); }
-.rail-sel.need select { border-color: var(--danger); }
-.rail-sel.need::after { content: "Choose this before adding documents."; }
 
 .chats { flex: 1; overflow-y: auto; padding: 6px 8px 12px; min-height: 0; }
 .chats h2 {
@@ -262,6 +250,15 @@ button { cursor: pointer; background: none; border: 0; }
 .access .seg.on { background: var(--surface-2); color: var(--ink); font-weight: 500; cursor: default; }
 .access .seg:not(.on):hover { color: var(--ink); }
 .access .seg.armed { background: var(--danger-bg); color: var(--danger); }
+.access-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 14px 0 0;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2);
+  font-size: 12.5px;
+}
+.access-bar .access { font: 500 12.5px/1.4 "IBM Plex Sans", sans-serif; }
+.access-bar .seg { padding: 4px 12px; }
+.access-label { font: 500 11px/1 "IBM Plex Mono", monospace; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }
+.access-says { flex: 1 1 18rem; color: var(--ink-soft); }
 .doc-item .lock { flex: none; font-size: 10px; opacity: .7; }
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
 .tab {
@@ -477,17 +474,6 @@ details.detail > summary:hover { color: var(--ink); }
       <button class="rail-btn" id="newChat"><span class="ic">+</span> New chat</button>
       <button class="rail-btn" id="uploadBtn"><span class="ic">&#8593;</span> Add documents</button>
       <button class="rail-btn" id="folderBtn"><span class="ic">&#128193;</span> Add a folder</button>
-      <!-- Deliberately beside the upload buttons and never pre-decided for the uploader. The
-           boundary gateway reads this to decide whether a document may be sent to an external
-           model, so a value nobody chose is the one thing this control must not produce. -->
-      <label class="rail-sel" for="uploadTier">
-        <span>Uploads are</span>
-        <select id="uploadTier">
-          <option value="" selected disabled>Choose who can see them&hellip;</option>
-          <option value="PUBLIC">Public &mdash; anyone here</option>
-          <option value="RESTRICTED">Restricted &mdash; only me</option>
-        </select>
-      </label>
     </div>
     <div class="chats">
       <div id="docsSec"></div>
@@ -856,17 +842,12 @@ function refreshDocs() {
 
 /* The upload tier, read at send time rather than captured earlier, so changing the selector
    between picking files and the request going out does what the person expects. */
-const tier = () => ($("uploadTier") && $("uploadTier").value) || "";
-
-/* No fallback tier, here or on the server. Asked before the file picker opens rather than
-   after, so nobody chooses forty files and then meets a question they skimmed past. */
-function tierChosen() {
-  if (tier()) return true;
-  const sel = $("uploadTier");
-  sel.closest(".rail-sel").classList.add("need");
-  sel.focus();
-  return false;
-}
+/* Every upload starts RESTRICTED and is made Public afterwards, from the top of the document.
+   Nobody is asked before uploading, so the starting tier is the one nobody chose -- and that
+   has to be the one that fails closed. A forgotten Public leaks to everyone and to the answer
+   model; a forgotten Restricted costs the uploader a click. The API still requires the field,
+   so this is stated here explicitly rather than defaulted on the server. */
+const UPLOAD_TIER = "RESTRICTED";
 
 const TIER_SAYS = {
   PUBLIC: "Public — everyone here can find it, and its passages may be sent to the answer " +
@@ -927,7 +908,6 @@ async function setTier(doc, next, box) {
     paintDocList();
     docTab = "passages";
     renderDoc(doc);
-    $("docview").prepend(notice("Access changed", " " + TIER_SAYS[next]));
   } catch {
     $("docview").prepend(notice("Access not changed", " The server could not be reached.", true));
     box.querySelectorAll("button").forEach((b) => { b.disabled = false; });
@@ -1099,6 +1079,14 @@ function renderDoc(doc) {
   head.append(titles, actions);
   wrap.append(head);
 
+  /* At the top, because uploads start Restricted and this is where they are made Public. */
+  if (mine || admin) {
+    const bar = el("div", "access-bar");
+    bar.append(el("span", "access-label", "Who can see this"), accessControl(doc),
+               el("span", "access-says", TIER_SAYS[doc.classification || "PUBLIC"]));
+    wrap.append(bar);
+  }
+
   const meta = el("div", "dv-meta");
   const bit = (k, v) => {
     const span = el("span", null, k + " ");
@@ -1111,13 +1099,7 @@ function renderDoc(doc) {
   }
   if (doc.page_count) bit(unitWord(doc.mime_type), doc.page_count);
   if (doc.size) bit("size", fmtSize(doc.size));
-  if (mine || admin) {
-    const span = el("span", null, "access ");
-    span.append(accessControl(doc));
-    meta.append(span);
-  } else if (doc.classification) {
-    bit("access", doc.classification);
-  }
+  if (!(mine || admin) && doc.classification) bit("access", doc.classification);
   if (doc.document_date) bit("dated", doc.document_date);
   if (doc.uploaded_by) bit("added by", doc.uploaded_by);
   wrap.append(meta);
@@ -1790,7 +1772,6 @@ const UPLOAD_BATCH = 5;
 
 async function uploadMany(files, droppedCount) {
   if (!store.get(TOKEN_KEY)) return showLogin();
-  if (!tierChosen()) return;
   if (files.length === 1 && !droppedCount) return upload(files[0]);
 
   $("welcome").hidden = true;
@@ -1838,7 +1819,7 @@ async function uploadMany(files, droppedCount) {
 
     const form = new FormData();
     wave.forEach((f) => form.append("files", f));
-    form.append("classification", tier());
+    form.append("classification", UPLOAD_TIER);
     try {
       const r = await fetch("/api/v1/documents/upload",
                             { method: "POST", body: form, headers: authed() });
@@ -1905,7 +1886,7 @@ async function uploadMany(files, droppedCount) {
   if (done.failed) parts.push(`${done.failed} could not be read`);
   if (rejected) parts.push(`${rejected} rejected at upload`);
   if (pending.size) parts.push(`${pending.size} still processing in the background`);
-  settle(parts.join(" · "));
+  settle(parts.join(" · ") + " · added as Restricted, open one to make it Public");
   refreshDocs();
 }
 
@@ -1937,7 +1918,7 @@ async function upload(file) {
   try {
     const form = new FormData();
     form.append("files", file);
-    form.append("classification", tier());
+    form.append("classification", UPLOAD_TIER);
     const r = await fetch("/api/v1/documents/upload", { method: "POST", body: form, headers: authed() });
     if (r.status === 401) return sessionExpired(card.box);
     if (!r.ok) {
@@ -1970,7 +1951,8 @@ async function upload(file) {
     markSteps(card.steps, status);
 
     if (status === "LIVE") {
-      settle(el("span", null, "Ready — you can ask about this document now."));
+      settle(el("span", null, "Ready — you can ask about this document now. It was added as " +
+                              "Restricted (only you); open it to make it Public."));
       return;
     }
     if (FAILED[status]) {
@@ -2034,10 +2016,9 @@ $("folder").onchange = (e) => {
   }
 };
 
-$("uploadBtn").onclick = () => { if (tierChosen()) $("file").click(); };
-$("attachBtn").onclick = () => { if (tierChosen()) $("file").click(); };
-$("folderBtn").onclick = () => { if (tierChosen()) $("folder").click(); };
-$("uploadTier").onchange = (e) => e.target.closest(".rail-sel").classList.remove("need");
+$("uploadBtn").onclick = () => $("file").click();
+$("attachBtn").onclick = () => $("file").click();
+$("folderBtn").onclick = () => $("folder").click();
 
 [
   "What are the enforcement obligations for thermal power plants?",

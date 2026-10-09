@@ -927,10 +927,11 @@ rationale before "fixing" them:
   PUBLIC, which was survivable while nothing left the deployment and stopped being so when the
   gateway started reading that field to decide what may be sent to an external model: a
   confidential document uploaded without ticking the box was *eligible to go to Sarvam*, on a
-  value nobody chose. The UI selector had quietly kept that default (`selected` on PUBLIC, and a
-  `|| "PUBLIC"` fallback) after the API dropped it; it now opens on "Choose…" and the upload
-  buttons refuse until a tier is picked. A wrong choice is corrected from the document view,
-  where the owner or an admin can switch the tier (two clicks to widen to Public, one to narrow).
+  value nobody chose. The UI kept that PUBLIC default after the API dropped it (`selected` on
+  PUBLIC plus a `|| "PUBLIC"` fallback). The web UI now asks nothing at upload and sends
+  **RESTRICTED** explicitly — the tier nobody chose has to be the one that fails closed — and the
+  owner or an admin makes a document Public from the bar at the top of the document view (two
+  clicks to widen, one to narrow). The API still has no default; every other caller states one.
 - **Delete is reversible by default.** `DELETE /documents/{id}` removes a document from search
   and the listing while keeping its bytes and audit trail; `?permanent=true` erases and is
   **ADMIN only**. Owner-or-admin applies to both. Every delete used to be a purge, which is the
