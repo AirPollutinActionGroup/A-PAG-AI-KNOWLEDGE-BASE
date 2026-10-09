@@ -1166,9 +1166,7 @@ def test_a_second_escalation_is_also_recorded(dedup_stack):
     _upload(dedup_stack, "restricted_copy.pdf", Classification.RESTRICTED)
 
     # An ADMIN puts it back through POST /documents/{id}/classify.
-    canonical = dedup_stack.repo.get_by_id(first.document_id)
-    canonical.classification = Classification.PUBLIC
-    dedup_stack.repo.update_document(canonical)
+    dedup_stack.repo.set_classification(first.document_id, Classification.PUBLIC)
 
     _upload(dedup_stack, "restricted_again.pdf", Classification.RESTRICTED)
 

@@ -484,6 +484,12 @@ class DriveSyncService:
                     if tier == Classification.RESTRICTED else "",
                 )
 
+            import_tier = (
+                self._inherited_tier(session, existing, tier)
+                if is_new_version and existing is not None
+                else tier
+            )
+
             service = UploadService(
                 bucket_manager=self._buckets,
                 repository=PostgreSQLDocumentRepository(session),
@@ -495,7 +501,7 @@ class DriveSyncService:
             response = service.receive(
                 filename=filename,
                 data=data,
-                request_meta=UploadRequest(classification=tier, owner_id=owner_id),
+                request_meta=UploadRequest(classification=import_tier, owner_id=owner_id),
                 mime_type=spec.mime_type,
             )
 
@@ -515,6 +521,31 @@ class DriveSyncService:
                 state=VersionState.PENDING.value,
             ))
             session.commit()
+
+    @staticmethod
+    def _inherited_tier(
+        session: Session, existing: DriveFileORM, tier: Classification
+    ) -> Classification:
+        """The tier an edited file's new version is imported at.
+
+        Normally the folder's. But someone may have raised the previous version to RESTRICTED
+        by hand since, and an edit in Drive must not quietly lower it back to the folder's tier
+        -- the new version carries the same content, give or take a paragraph. So while the file
+        is still in the folder it was in, the stricter of the two wins, which is the rule dedup
+        and overlapping folders already use. A file that has also *moved* takes the new folder's
+        tier: the move is the more recent decision about access.
+
+        One direction only. A RESTRICTED-folder file made PUBLIC by hand comes back RESTRICTED
+        after an edit, which fails closed.
+        """
+        if existing.classification != tier.value or existing.document_id is None:
+            return tier
+        previous = PostgreSQLDocumentRepository(session).get_by_id(existing.document_id)
+        if previous is not None and previous.classification is not None and is_stricter(
+            previous.classification, tier
+        ):
+            return previous.classification
+        return tier
 
     def _unchanged_content(
         self,
@@ -608,8 +639,7 @@ class DriveSyncService:
             previous = doc.classification.value if doc.classification else None
             if previous == tier.value:
                 continue
-            doc.classification = tier
-            repo.update_document(doc)
+            repo.set_classification(document_id, tier)
             self._audit(session, document_id, AuditEventType.DOCUMENT_RECLASSIFIED, {
                 # Same shape as the endpoint's and dedup's rows, so every tier change reads alike.
                 "old_tier": previous,
