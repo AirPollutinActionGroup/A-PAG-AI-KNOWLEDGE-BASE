@@ -149,7 +149,7 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 
 ### 7. Studio UI expects synchronous upload response
 - **Status**: Fast-follow UI task.
-- **Context**: The testing Studio UI at `/` was written for the synchronous pipeline and expects terminal `AWAITING_CLASSIFICATION` immediately from `POST /upload`. It needs to be updated to poll `GET /api/v1/documents/{id}/status` every 500ms until terminal state.
+- **Context**: The testing Studio UI (now at `/studio`; `/` serves the knowledge base) was written for the synchronous pipeline and expects terminal `AWAITING_CLASSIFICATION` immediately from `POST /upload`. It needs to be updated to poll `GET /api/v1/documents/{id}/status` every 500ms until terminal state.
 - **Trigger to address**: Before internal user onboarding.
 
 ### 8. Malware Scanning: Heuristic Only, Real ClamAV Deliberately Deferred
@@ -811,3 +811,44 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   The fix will want a `POST /documents/{id}/restore` endpoint either way, now that
   `DocumentRepository.restore()` exists to back it.
 
+
+### 42. ✅ A tier changed mid-pipeline was silently put back when the stage finished (Closed)
+- **Status**: Closed. Found by testing the document view's access control against the running
+  stack, not in review.
+- **What**: every pipeline handler loads its document when the job starts and writes it back
+  with `update_document()` when the job ends, and `update_document()` wrote every column —
+  `classification` included. A tier changed in between was overwritten by the stale copy. Seen
+  live: a document set PUBLIC seconds after upload was RESTRICTED again once normalization
+  finished. The dangerous direction is the reverse, which the same race produces just as
+  readily: a document marked RESTRICTED while still processing reverts to PUBLIC, and so
+  becomes eligible to cross the gateway, with an audit row saying it was restricted.
+- **The claim it made false**: the `POST /documents/{id}/classify` docstring said "a document
+  mid-extraction can be reclassified without disturbing the work in flight". It could not.
+- **Fix**: `update_document()` no longer writes `classification` at all — no stage has a reason
+  to change a tier. `DocumentRepository.set_classification()` is a single-column `UPDATE`, and
+  the three places that change a tier use it: the endpoint, dedup escalation in
+  `ScanJobHandler`, and a Drive folder move. Both repositories behave the same, so the unit
+  tests cannot pass on behaviour production lacks. Pinned by `tests/unit/test_reclassify_race.py`
+  and `tests/integration/test_postgres_repository.py`; re-checked live after the fix (marked
+  RESTRICTED right after upload, still RESTRICTED after three stages).
+- **Related, same change**: an edited Drive file used to import its new version at the folder's
+  tier, which would have undone a RESTRICTED set by hand. It now keeps the stricter of the two
+  while the file stays in its folder (`DriveSyncService._inherited_tier`).
+
+### 43. ✅ Deleting a document from the UI never deleted it (Closed)
+- **Status**: Closed. Found by noticing test documents still in the list after six `200`s.
+- **What**: `PostgreSQLDocumentRepository.soft_delete()` (and `restore()`) flushed and left the
+  commit to the caller. `DELETE /documents/{id}` never committed: its `DOCUMENT_DELETED` audit
+  row was written first, in its own committed transaction, then the soft delete was flushed and
+  thrown away when the request's session closed. Every reversible delete made through the API
+  since `55525fd` (1 Oct 2026) answered 200, was recorded in the audit log as done, and left the
+  document in search and the list. The Drive connector was unaffected — it commits afterwards.
+- **Why the tests missed it**: every delete test ran on `InMemoryDocumentRepository`, where a
+  write is visible the moment it is made. A flush-without-commit cannot fail there.
+- **Fix**: both methods commit, like every other write in the class.
+  `test_a_reversible_delete_is_still_there_after_the_request` goes through the real endpoint
+  and the SQL repository and reads back from a new session; it fails on the old code.
+- **Consequence to check**: the audit log holds `DOCUMENT_DELETED` rows for documents that are
+  still live. Each was a person's request, so re-apply them deliberately rather than in bulk:
+  `SELECT d.document_id, d.filename, a.event_time FROM audit_log a JOIN documents d USING
+  (document_id) WHERE a.event_type = 'DOCUMENT_DELETED' AND d.deleted_at IS NULL;`

@@ -625,6 +625,65 @@ def test_the_old_version_is_retired_once_the_new_one_is_live(stack):
     assert reasons == ["drive-file-edited"]
 
 
+def _reclassify_by_hand(stack, document_id, tier: str) -> None:
+    """What `POST /documents/{id}/classify` does to the row, without the HTTP around it."""
+    with stack.sessions() as s:
+        s.get(DocORM, document_id).classification = tier
+        s.commit()
+
+
+def test_a_tier_changed_by_hand_survives_the_next_sync(stack):
+    """The sync compares the folder against the folder it saw last time, not against the
+    document, so an unmoved file is left at whatever tier somebody set in the UI."""
+    first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    _reclassify_by_hand(stack, first, "RESTRICTED")
+
+    outcome = stack.build().sync_once()
+
+    assert outcome.reclassified == []
+    assert doc(stack, first).classification == "RESTRICTED"
+
+
+def test_an_edit_does_not_lower_a_tier_raised_by_hand(stack):
+    """Otherwise marking a Public-folder file RESTRICTED lasts only until somebody fixes a typo
+    in it, and the new version -- nearly the same content -- is imported PUBLIC."""
+    first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
+    _reclassify_by_hand(stack, first, "RESTRICTED")
+    stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z", data=pdf_bytes("revised"))
+
+    stack.build().sync_once()
+
+    second = versions(stack, "f1")[1].document_id
+    assert doc(stack, second).classification == "RESTRICTED"
+
+
+def test_an_edit_does_not_carry_a_tier_lowered_by_hand(stack):
+    """One direction only: a Restricted-folder file made PUBLIC by hand comes back at the
+    folder's tier after an edit. Failing closed costs someone a click; failing open leaks."""
+    first = _import_and_settle(stack, RESTRICTED_ROOT, "f1", "note.pdf", pdf_bytes())
+    _reclassify_by_hand(stack, first, "PUBLIC")
+    stack.drive.touch(RESTRICTED_ROOT, "f1", "2026-06-01T00:00:00Z", data=pdf_bytes("revised"))
+
+    stack.build().sync_once()
+
+    second = versions(stack, "f1")[1].document_id
+    assert doc(stack, second).classification == "RESTRICTED"
+
+
+def test_a_file_moved_and_edited_takes_its_new_folders_tier(stack):
+    """The move is the later decision about access, so it wins over an earlier one made by hand."""
+    first = _import_and_settle(stack, RESTRICTED_ROOT, "f1", "note.pdf", pdf_bytes())
+    _reclassify_by_hand(stack, first, "RESTRICTED")
+    stack.drive.remove_file(RESTRICTED_ROOT, "f1")
+    stack.drive.add_file(PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes("revised"),
+                         modified="2026-06-01T00:00:00Z")
+
+    stack.build().sync_once()
+
+    second = versions(stack, "f1")[1].document_id
+    assert doc(stack, second).classification == "PUBLIC"
+
+
 def test_a_new_version_that_fails_keeps_the_old_one(stack):
     first = _import_and_settle(stack, PUBLIC_ROOT, "f1", "note.pdf", pdf_bytes())
     stack.drive.touch(PUBLIC_ROOT, "f1", "2026-06-01T00:00:00Z", data=pdf_bytes("revised"))

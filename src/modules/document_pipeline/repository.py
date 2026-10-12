@@ -6,7 +6,7 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from src.db.enums import Classification, DocumentStatus
@@ -34,7 +34,24 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     def update_document(self, doc: DocumentDTO) -> DocumentDTO:
-        """Updates full document record."""
+        """Updates a document record -- every field **except its classification**.
+
+        Pipeline handlers load a document when their job starts and write it back when it ends,
+        sometimes minutes later. Writing the tier back too meant a reclassification made in
+        between was silently undone: a document marked RESTRICTED mid-pipeline came back PUBLIC
+        when the stage finished, and with it the right to cross the gateway. No stage has a
+        reason to change a tier, so this method no longer can; `set_classification()` is the
+        only way to change one."""
+
+    @abstractmethod
+    def set_classification(
+        self, doc_id: uuid.UUID, classification: Classification
+    ) -> DocumentDTO | None:
+        """Changes one document's tier, and nothing else about it.
+
+        A single-column write, so it cannot be overwritten by -- or overwrite -- a stage
+        finishing with an older copy of the row. Callers record the change in the audit log;
+        this only makes it. Returns the updated document, or None if it does not exist."""
 
     @abstractmethod
     def list_paginated(
@@ -188,8 +205,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         orm = self.db.execute(stmt).scalar_one_or_none()
         if orm:
             orm.status = doc.status.value if hasattr(doc.status, "value") else str(doc.status)
-            if hasattr(doc, "classification") and doc.classification:
-                orm.classification = doc.classification.value if hasattr(doc.classification, "value") else str(doc.classification)
+            # Not classification: see the base class.
             orm.document_date = doc.document_date
             orm.sha256 = doc.checksum
             orm.mime_type = doc.mime_type
@@ -207,6 +223,19 @@ class PostgreSQLDocumentRepository(DocumentRepository):
             self.db.refresh(orm)
             return self._to_dto(orm)
         return self.create(doc)
+
+    def set_classification(
+        self, doc_id: uuid.UUID, classification: Classification
+    ) -> DocumentDTO | None:
+        """See the base class."""
+        self.db.execute(
+            update(DocumentORM)
+            .where(DocumentORM.document_id == doc_id)
+            .values(classification=classification.value, updated_at=func.now())
+            .execution_options(synchronize_session="fetch")
+        )
+        self.db.commit()
+        return self.get_by_id(doc_id)
 
     def list_paginated(
         self,
@@ -270,7 +299,11 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         if orm is None:
             return False
         orm.deleted_at = datetime.now(UTC)
-        self.db.flush()
+        # Committed here, like every other write in this class. It used to flush and leave the
+        # commit to the caller, and the delete endpoint never made one: its audit row commits
+        # first, in its own transaction, so the endpoint answered 200, logged DOCUMENT_DELETED
+        # and then discarded the delete when the session closed (`KNOWN_DEBTS.md` #43).
+        self.db.commit()
         return True
 
     def restore(self, doc_id: uuid.UUID) -> bool:
@@ -284,7 +317,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         if orm is None:
             return False
         orm.deleted_at = None
-        self.db.flush()
+        self.db.commit()  # see soft_delete()
         return True
 
     def purge(self, doc_id: uuid.UUID) -> bool:
@@ -338,8 +371,26 @@ class InMemoryDocumentRepository(DocumentRepository):
     def update_document(self, doc: DocumentDTO) -> DocumentDTO:
         with self._lock:
             doc.updated_at = datetime.now(UTC)
-            self._storage[doc.id] = doc.model_copy(deep=True)
+            stored = self._storage.get(doc.id)
+            saved = doc.model_copy(deep=True)
+            if stored is not None:
+                # Not classification: see the base class. Kept identical to Postgres, or the
+                # unit tests would pass on behaviour production does not have.
+                saved.classification = stored.classification
+            self._storage[doc.id] = saved
             return self._storage[doc.id]
+
+    def set_classification(
+        self, doc_id: uuid.UUID, classification: Classification
+    ) -> DocumentDTO | None:
+        """See the base class."""
+        with self._lock:
+            stored = self._storage.get(doc_id)
+            if stored is None:
+                return None
+            stored.classification = classification
+            stored.updated_at = datetime.now(UTC)
+            return stored.model_copy(deep=True)
 
     def list_paginated(
         self,

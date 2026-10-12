@@ -84,3 +84,32 @@ def test_postgres_repository_dedup_checksum(db_session: Session):
     found = repo.get_by_checksum(checksum)
     assert found is not None
     assert found.id == doc2.id
+
+
+def test_a_stage_finishing_does_not_undo_a_reclassification(db_session: Session):
+    """The race this pins was found against the running stack, not in review: a document set to
+    PUBLIC while it was still in the pipeline was RESTRICTED again a few seconds later, because
+    the stage that finished wrote back the copy it loaded when it started. The direction that
+    matters is the reverse -- RESTRICTED undone back to PUBLIC, and so eligible for the gateway.
+    """
+    repo = PostgreSQLDocumentRepository(db_session)
+    doc_id = uuid.uuid4()
+    repo.create(DocumentDTO(
+        id=doc_id, filename="board_note.pdf", owner_id=None, size=10,
+        status=DocumentStatus.VALIDATED, classification=Classification.PUBLIC, version=1,
+    ))
+
+    in_flight = repo.get_by_id(doc_id)                       # a worker starts its job
+    repo.set_classification(doc_id, Classification.RESTRICTED)  # somebody reclassifies
+    in_flight.status = DocumentStatus.EXTRACTED               # the worker finishes
+    repo.update_document(in_flight)
+
+    final = repo.get_by_id(doc_id)
+    assert final.status == DocumentStatus.EXTRACTED
+    assert final.classification == Classification.RESTRICTED
+
+
+def test_set_classification_on_a_missing_document_returns_none(db_session: Session):
+    assert PostgreSQLDocumentRepository(db_session).set_classification(
+        uuid.uuid4(), Classification.RESTRICTED
+    ) is None

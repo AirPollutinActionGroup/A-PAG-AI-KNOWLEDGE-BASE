@@ -291,7 +291,7 @@ alembic upgrade head
 ```
 
 ### 4. Use it
-- **Knowledge Base UI**: [http://localhost:8000/search](http://localhost:8000/search)
+- **Knowledge Base UI**: [http://localhost:8000/](http://localhost:8000/) (`/search` still works)
 - **API documentation (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
 - **Health check**: [http://localhost:8000/health](http://localhost:8000/health)
 
