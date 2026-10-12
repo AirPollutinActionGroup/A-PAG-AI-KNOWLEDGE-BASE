@@ -462,7 +462,7 @@ az network nsg rule create --resource-group <group> --nsg-name <nsg> \
   --destination-port-ranges 85 --protocol Tcp --access Allow
 ```
 
-Then `http://<vm-ip>:85/search` from the office network.
+Then `http://<vm-ip>:85/` from the office network (`/search` is the same page).
 
 **Postgres and MinIO stay closed.** They are not published to the host at all in this compose
 file. To reach them for maintenance, tunnel over SSH rather than opening a port:

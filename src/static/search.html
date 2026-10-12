@@ -250,6 +250,30 @@ button { cursor: pointer; background: none; border: 0; }
 .access .seg.on { background: var(--surface-2); color: var(--ink); font-weight: 500; cursor: default; }
 .access .seg:not(.on):hover { color: var(--ink); }
 .access .seg.armed { background: var(--danger-bg); color: var(--danger); }
+.tier-dlg {
+  width: min(34rem, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--paper); color: var(--ink);
+}
+.tier-dlg::backdrop { background: rgb(0 0 0 / .35); }
+.tier-dlg form { display: flex; flex-direction: column; gap: 10px; padding: 20px; }
+.tier-dlg h2 { margin: 0; font: 600 17px/1.3 "Archivo", sans-serif; overflow-wrap: anywhere; }
+.tier-sub { margin: -4px 0 2px; font-size: 12.5px; color: var(--ink-faint); }
+.tier-opt {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 8px; font-size: 13px; color: var(--ink-soft);
+}
+.tier-opt:has(input:checked) { border-color: var(--yellow-deep); background: var(--surface); }
+.tier-opt input { margin-top: 3px; accent-color: var(--yellow-deep); }
+.tier-opt b { display: block; color: var(--ink); font-weight: 600; margin-bottom: 2px; }
+.tier-each summary { cursor: pointer; font-size: 13px; color: var(--ink-soft); }
+.tier-count { color: var(--ink-faint); font: 400 11.5px/1 "IBM Plex Mono", monospace; margin-left: 6px; }
+.tier-list { max-height: 14rem; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+.tier-row { display: flex; gap: 8px; align-items: center; padding: 5px 10px; font-size: 12.5px; cursor: pointer; }
+.tier-row + .tier-row { border-top: 1px solid var(--line); }
+.tier-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tier-tag { flex: none; font: 400 11px/1 "IBM Plex Mono", monospace; color: var(--ink-faint); }
+.tier-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.tier-btns .mini { padding: 8px 14px; font-size: 13px; }
 .access-bar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 14px 0 0;
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2);
@@ -842,12 +866,94 @@ function refreshDocs() {
 
 /* The upload tier, read at send time rather than captured earlier, so changing the selector
    between picking files and the request going out does what the person expects. */
-/* Every upload starts RESTRICTED and is made Public afterwards, from the top of the document.
-   Nobody is asked before uploading, so the starting tier is the one nobody chose -- and that
-   has to be the one that fails closed. A forgotten Public leaks to everyone and to the answer
-   model; a forgotten Restricted costs the uploader a click. The API still requires the field,
-   so this is stated here explicitly rather than defaulted on the server. */
-const UPLOAD_TIER = "RESTRICTED";
+/* Asked once per upload, after the files are picked and before anything is sent: a tier is
+   about these particular files, so the question belongs beside them, not in a setting chosen
+   earlier and forgotten. Public is preselected -- most of this corpus is published policy --
+   and Restricted is one click. A folder gets one answer for every file, with a list to pick out
+   the exceptions, because a folder of forty is rarely forty different decisions.
+   Resolves to a Map of file -> tier, or null if the person cancels. */
+function askTier(files) {
+  return new Promise((resolve) => {
+    const many = files.length > 1;
+    const folder = (files[0].webkitRelativePath || "").split("/")[0];
+    const dlg = el("dialog", "tier-dlg");
+    const form = el("form");
+    form.method = "dialog";
+
+    form.append(el("h2", null, many
+      ? `Who can see these ${files.length} files?`
+      : `Who can see “${baseName(files[0].name)}”?`));
+    if (folder) form.append(el("p", "tier-sub", `From the folder “${folder}”`));
+
+    const restrict = new Map(files.map((f) => [f, false]));
+    const option = (value, title, body, checked) => {
+      const lab = el("label", "tier-opt");
+      const radio = el("input");
+      radio.type = "radio"; radio.name = "tier"; radio.value = value; radio.checked = checked;
+      const text = el("span");
+      text.append(el("b", null, title), el("span", null, body));
+      lab.append(radio, text);
+      radio.onchange = () => {
+        files.forEach((f) => restrict.set(f, value === "RESTRICTED"));
+        paintList();
+      };
+      return lab;
+    };
+    form.append(
+      option("PUBLIC", "Everyone at A‑PAG (Public)",
+             "Anyone signed in can find it. Passages may be sent to the answer model, with " +
+             "emails, phone numbers and ID numbers masked — names are not.", true),
+      option("RESTRICTED", "Only me (Restricted)",
+             "Only you and administrators can find it. Never sent to the answer model.", false),
+    );
+
+    const count = el("span", "tier-count");
+    const list = el("div", "tier-list");
+    function paintList() {
+      if (!many) return;
+      const n = [...restrict.values()].filter(Boolean).length;
+      count.textContent = n === 0 ? "all Public"
+        : n === files.length ? "all Restricted" : `${n} of ${files.length} Restricted`;
+      list.replaceChildren();
+      files.forEach((f) => {
+        const row = el("label", "tier-row");
+        const box = el("input");
+        box.type = "checkbox"; box.checked = restrict.get(f);
+        box.onchange = () => { restrict.set(f, box.checked); paintList(); };
+        row.append(box, el("span", "nm", f.webkitRelativePath || f.name),
+                   el("span", "tier-tag", box.checked ? "Restricted" : "Public"));
+        list.append(row);
+      });
+    }
+    if (many) {
+      const det = el("details", "tier-each");
+      const sum = el("summary", null, "Choose file by file ");
+      sum.append(count);
+      det.append(sum, el("p", "tier-sub", "Tick a file to make it Restricted."), list);
+      form.append(det);
+      paintList();
+    }
+
+    const buttons = el("div", "tier-btns");
+    const cancel = el("button", "mini", "Cancel");
+    cancel.type = "button";
+    const go = el("button", "primary", many ? `Upload ${files.length} files` : "Upload");
+    go.type = "submit";
+    buttons.append(cancel, go);
+    form.append(buttons);
+    dlg.append(form);
+    document.body.append(dlg);
+
+    let answer = null;
+    cancel.onclick = () => dlg.close();
+    form.onsubmit = () => {
+      answer = new Map(files.map((f) => [f, restrict.get(f) ? "RESTRICTED" : "PUBLIC"]));
+    };
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(answer); });
+    dlg.showModal();
+    go.focus();
+  });
+}
 
 const TIER_SAYS = {
   PUBLIC: "Public — everyone here can find it, and its passages may be sent to the answer " +
@@ -1079,7 +1185,7 @@ function renderDoc(doc) {
   head.append(titles, actions);
   wrap.append(head);
 
-  /* At the top, because uploads start Restricted and this is where they are made Public. */
+  /* At the top, so a wrong answer to the upload question is one click from being corrected. */
   if (mine || admin) {
     const bar = el("div", "access-bar");
     bar.append(el("span", "access-label", "Who can see this"), accessControl(doc),
@@ -1772,7 +1878,9 @@ const UPLOAD_BATCH = 5;
 
 async function uploadMany(files, droppedCount) {
   if (!store.get(TOKEN_KEY)) return showLogin();
-  if (files.length === 1 && !droppedCount) return upload(files[0]);
+  const tiers = await askTier(files);
+  if (!tiers) return;
+  if (files.length === 1 && !droppedCount) return upload(files[0], tiers.get(files[0]));
 
   $("welcome").hidden = true;
   const chat = ensureChat(`${files.length} documents`);
@@ -1813,13 +1921,22 @@ async function uploadMany(files, droppedCount) {
   const queued = [];
   let rejected = 0;
 
-  for (let i = 0; i < files.length; i += UPLOAD_BATCH) {
-    const wave = files.slice(i, i + UPLOAD_BATCH);
-    say(`Uploading ${Math.min(i + wave.length, files.length)} of ${files.length}…`);
+  // One request carries one tier, so a mixed folder goes up as two runs of batches.
+  const waves = [];
+  ["PUBLIC", "RESTRICTED"].forEach((t) => {
+    const group = files.filter((f) => tiers.get(f) === t);
+    for (let i = 0; i < group.length; i += UPLOAD_BATCH) {
+      waves.push({ tier: t, files: group.slice(i, i + UPLOAD_BATCH) });
+    }
+  });
+  let sent = 0;
+  for (const { tier: waveTier, files: wave } of waves) {
+    sent += wave.length;
+    say(`Uploading ${sent} of ${files.length}…`);
 
     const form = new FormData();
     wave.forEach((f) => form.append("files", f));
-    form.append("classification", UPLOAD_TIER);
+    form.append("classification", waveTier);
     try {
       const r = await fetch("/api/v1/documents/upload",
                             { method: "POST", body: form, headers: authed() });
@@ -1886,11 +2003,13 @@ async function uploadMany(files, droppedCount) {
   if (done.failed) parts.push(`${done.failed} could not be read`);
   if (rejected) parts.push(`${rejected} rejected at upload`);
   if (pending.size) parts.push(`${pending.size} still processing in the background`);
-  settle(parts.join(" · ") + " · added as Restricted, open one to make it Public");
+  const nRestricted = files.filter((f) => tiers.get(f) === "RESTRICTED").length;
+  if (nRestricted) parts.push(`${nRestricted} Restricted`);
+  settle(parts.join(" · "));
   refreshDocs();
 }
 
-async function upload(file) {
+async function upload(file, tier) {
   if (!store.get(TOKEN_KEY)) return showLogin();
   $("welcome").hidden = true;
   const chat = ensureChat(file.name);
@@ -1918,7 +2037,7 @@ async function upload(file) {
   try {
     const form = new FormData();
     form.append("files", file);
-    form.append("classification", UPLOAD_TIER);
+    form.append("classification", tier);
     const r = await fetch("/api/v1/documents/upload", { method: "POST", body: form, headers: authed() });
     if (r.status === 401) return sessionExpired(card.box);
     if (!r.ok) {
@@ -1951,8 +2070,7 @@ async function upload(file) {
     markSteps(card.steps, status);
 
     if (status === "LIVE") {
-      settle(el("span", null, "Ready — you can ask about this document now. It was added as " +
-                              "Restricted (only you); open it to make it Public."));
+      settle(el("span", null, "Ready — you can ask about this document now."));
       return;
     }
     if (FAILED[status]) {

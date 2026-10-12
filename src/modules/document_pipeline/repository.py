@@ -299,7 +299,11 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         if orm is None:
             return False
         orm.deleted_at = datetime.now(UTC)
-        self.db.flush()
+        # Committed here, like every other write in this class. It used to flush and leave the
+        # commit to the caller, and the delete endpoint never made one: its audit row commits
+        # first, in its own transaction, so the endpoint answered 200, logged DOCUMENT_DELETED
+        # and then discarded the delete when the session closed (`KNOWN_DEBTS.md` #43).
+        self.db.commit()
         return True
 
     def restore(self, doc_id: uuid.UUID) -> bool:
@@ -313,7 +317,7 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         if orm is None:
             return False
         orm.deleted_at = None
-        self.db.flush()
+        self.db.commit()  # see soft_delete()
         return True
 
     def purge(self, doc_id: uuid.UUID) -> bool:

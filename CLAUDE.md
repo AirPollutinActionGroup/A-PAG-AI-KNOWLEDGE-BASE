@@ -64,8 +64,8 @@ python build_eval_set.py --count 100 --out eval_set.json --with-model   # regene
 python run_ragas.py --count 25          # answer faithfulness; needs a judge with credit
 ```
 
-Interactive endpoints once running: Swagger at `/docs`, health at `/health`, Studio UI at `/`
-(note: Studio UI predates auth/multi-file and still expects a synchronous single-file response —
+Interactive endpoints once running: the knowledge base at `/` (also `/search`), Swagger at `/docs`,
+health at `/health`, and the old developer Studio UI at `/studio` (note: Studio UI predates auth/multi-file and still expects a synchronous single-file response —
 see `KNOWN_DEBTS.md` #7). All `/api/v1/documents/*` endpoints require `Authorization: Bearer <token>`
 — get one via `POST /api/v1/auth/register` then `POST /api/v1/auth/login`.
 
@@ -928,10 +928,11 @@ rationale before "fixing" them:
   gateway started reading that field to decide what may be sent to an external model: a
   confidential document uploaded without ticking the box was *eligible to go to Sarvam*, on a
   value nobody chose. The UI kept that PUBLIC default after the API dropped it (`selected` on
-  PUBLIC plus a `|| "PUBLIC"` fallback). The web UI now asks nothing at upload and sends
-  **RESTRICTED** explicitly — the tier nobody chose has to be the one that fails closed — and the
-  owner or an admin makes a document Public from the bar at the top of the document view (two
-  clicks to widen, one to narrow). The API still has no default; every other caller states one.
+  PUBLIC plus a `|| "PUBLIC"` fallback). The web UI now asks in a popup after files are picked
+  and before anything is sent — Public preselected, Restricted one click; a folder gets one
+  answer plus a per-file list for exceptions, and goes up as one run of batches per tier. A
+  wrong answer is corrected from the bar at the top of the document view (owner or admin; two
+  clicks to widen, one to narrow). The API still has no default; every caller states one.
 - **Delete is reversible by default.** `DELETE /documents/{id}` removes a document from search
   and the listing while keeping its bytes and audit trail; `?permanent=true` erases and is
   **ADMIN only**. Owner-or-admin applies to both. Every delete used to be a purge, which is the

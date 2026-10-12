@@ -81,26 +81,33 @@ if ASSETS_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 
-@app.get("/", response_class=HTMLResponse, tags=["Studio UI"])
-async def root_ui():
-    """Interactive Ingestion Pipeline Testing Studio."""
-    if INDEX_HTML.exists():
-        return HTMLResponse(content=INDEX_HTML.read_text(encoding="utf-8"))
-    return HTMLResponse(content="<h1>A-PAG AI Knowledge Base API Online</h1><p><a href='/docs'>View Swagger Docs</a></p>")
+@app.get("/", response_class=HTMLResponse, tags=["Knowledge Base UI"])
+@app.get("/search", response_class=HTMLResponse, tags=["Knowledge Base UI"])
+async def knowledge_base_ui():
+    """The knowledge base: questions, documents, upload.
 
+    Served at `/` because that is the address people type. It used to be the Studio page, which
+    predates auth and multi-file upload (`KNOWN_DEBTS.md` #7), so a bare IP or `localhost` opened
+    an outdated developer tool and the real application looked missing. `/search` stays as an
+    alias so existing bookmarks and the README's links keep working.
 
-@app.get("/search", response_class=HTMLResponse, tags=["Search UI"])
-async def search_ui():
-    """Semantic search over the ingested corpus.
-
-    Served as a static page rather than through a build step, matching the Studio UI: this is an
-    internal tool for ~50 people, and a toolchain is a thing to maintain. It is a separate page
-    from `/` because the Studio UI is about getting documents *in* and predates auth and
-    multi-file upload (`KNOWN_DEBTS.md` #7); this one is about getting answers out.
+    Served as a static page rather than through a build step: this is an internal tool for ~50
+    people, and a toolchain is a thing to maintain.
     """
     if SEARCH_HTML.exists():
         return HTMLResponse(content=SEARCH_HTML.read_text(encoding="utf-8"))
-    return HTMLResponse(content="<h1>Search UI not found</h1>", status_code=404)
+    return HTMLResponse(content="<h1>Knowledge base UI not found</h1>", status_code=404)
+
+
+@app.get("/studio", response_class=HTMLResponse, tags=["Studio UI"])
+async def studio_ui():
+    """Ingestion Pipeline Testing Studio -- a developer tool, kept for its validation presets.
+
+    Not linked from the application. See `knowledge_base_ui` for why it no longer lives at `/`.
+    """
+    if INDEX_HTML.exists():
+        return HTMLResponse(content=INDEX_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>Studio UI not found</h1>", status_code=404)
 
 
 @app.get("/health", tags=["System"])
