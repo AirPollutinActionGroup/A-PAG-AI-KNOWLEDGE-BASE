@@ -145,8 +145,8 @@ class ScanJobHandler:
         # Applied before the audit write, not after. `_audit` swallows its own failures by
         # design, so writing the record first would make the protective change conditional on
         # something deliberately non-fatal.
+        self.repo.set_classification(canonical.id, new_tier)
         canonical.classification = new_tier
-        self.repo.update_document(canonical)
 
         self._audit(
             canonical.id,

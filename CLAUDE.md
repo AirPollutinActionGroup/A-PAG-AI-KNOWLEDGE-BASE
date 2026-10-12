@@ -64,8 +64,8 @@ python build_eval_set.py --count 100 --out eval_set.json --with-model   # regene
 python run_ragas.py --count 25          # answer faithfulness; needs a judge with credit
 ```
 
-Interactive endpoints once running: Swagger at `/docs`, health at `/health`, Studio UI at `/`
-(note: Studio UI predates auth/multi-file and still expects a synchronous single-file response —
+Interactive endpoints once running: the knowledge base at `/` (also `/search`), Swagger at `/docs`,
+health at `/health`, and the old developer Studio UI at `/studio` (note: Studio UI predates auth/multi-file and still expects a synchronous single-file response —
 see `KNOWN_DEBTS.md` #7). All `/api/v1/documents/*` endpoints require `Authorization: Bearer <token>`
 — get one via `POST /api/v1/auth/register` then `POST /api/v1/auth/login`.
 
@@ -560,6 +560,10 @@ paid a 36-second load for a question that takes 2.5 seconds warm.
   takes a repository via constructor injection — `UploadService` and all five `*JobHandler`
   classes; none reaches for a `Session` directly for document state. Prefer adding new methods to
   the abstract base and both implementations together, not special-casing one.
+  **`update_document()` never writes `classification`**; `set_classification()` is the only way
+  to change a tier. Handlers write back the copy they loaded when their job started, so a full
+  write silently undid a reclassification made mid-pipeline — RESTRICTED back to PUBLIC
+  (`KNOWN_DEBTS.md` #42).
 
 ### Audit trail
 
@@ -923,7 +927,12 @@ rationale before "fixing" them:
   PUBLIC, which was survivable while nothing left the deployment and stopped being so when the
   gateway started reading that field to decide what may be sent to an external model: a
   confidential document uploaded without ticking the box was *eligible to go to Sarvam*, on a
-  value nobody chose.
+  value nobody chose. The UI kept that PUBLIC default after the API dropped it (`selected` on
+  PUBLIC plus a `|| "PUBLIC"` fallback). The web UI now asks in a popup after files are picked
+  and before anything is sent — Public preselected, Restricted one click; a folder gets one
+  answer plus a per-file list for exceptions, and goes up as one run of batches per tier. A
+  wrong answer is corrected from the bar at the top of the document view (owner or admin; two
+  clicks to widen, one to narrow). The API still has no default; every caller states one.
 - **Delete is reversible by default.** `DELETE /documents/{id}` removes a document from search
   and the listing while keeping its bytes and audit trail; `?permanent=true` erases and is
   **ADMIN only**. Owner-or-admin applies to both. Every delete used to be a purge, which is the

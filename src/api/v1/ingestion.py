@@ -295,15 +295,17 @@ async def reclassify_document(
 ):
     """Corrects the tier chosen at upload.
 
-    The tier is set at upload and defaults to PUBLIC, so the pipeline never waits on a human.
-    That makes a forgotten RESTRICTED flag the realistic failure mode, and this is how it gets
-    fixed. Widening PUBLIC -> RESTRICTED is the case that matters: the document may already be
-    visible org-wide, so the change takes effect immediately and is recorded against a named
-    user rather than applied silently.
+    The tier is chosen at upload, so the pipeline never waits on a human. That makes a wrong
+    choice the realistic failure mode, and this is how it gets fixed -- the document view offers
+    it to the owner and to admins. Narrowing PUBLIC -> RESTRICTED is the case that matters: the
+    document may already be visible org-wide, so the change takes effect immediately and is
+    recorded against a named user rather than applied silently.
 
     Does not touch pipeline status. A tier is metadata about who may read a document, not a
     stage in processing it — a document mid-extraction can be reclassified without disturbing
-    the work in flight.
+    the work in flight. That was claimed here before it was true: a stage finishing with the
+    copy it loaded wrote the old tier straight back. `set_classification()` writes the one
+    column, and `update_document()` no longer writes it at all.
     """
     doc = repo.get_by_id(document_id)
     if not doc or not _can_view(doc, current_user):
@@ -349,8 +351,7 @@ async def reclassify_document(
     except Exception:
         logger.exception("AUDIT WRITE FAILED: doc_id=%s event=DOCUMENT_RECLASSIFIED", document_id)
 
-    doc.classification = payload.classification
-    updated = repo.update_document(doc)
+    updated = repo.set_classification(document_id, payload.classification) or doc
 
     logger.info(
         "Document reclassified: doc_id=%s %s -> %s by=%s",

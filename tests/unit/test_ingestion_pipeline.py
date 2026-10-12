@@ -34,7 +34,10 @@ from src.modules.document_pipeline.models import (
     UploadRequest,
 )
 from src.modules.document_pipeline.models import Document as DocumentDTO
-from src.modules.document_pipeline.repository import InMemoryDocumentRepository
+from src.modules.document_pipeline.repository import (
+    InMemoryDocumentRepository,
+    PostgreSQLDocumentRepository,
+)
 from src.modules.document_pipeline.scan_job_handler import ScanJobHandler
 from src.modules.document_pipeline.upload_service import UploadService
 from src.modules.document_pipeline.validation import FileValidator
@@ -967,6 +970,49 @@ def test_a_soft_deleted_document_still_has_its_bytes(purge_stack):
     assert doc.raw_path is not None, "and the bytes are still there"
 
 
+@pytest.mark.parametrize("then_restore", [False, True])
+def test_a_reversible_delete_is_still_there_after_the_request(tmp_path, then_restore):
+    """Through the real endpoint and the real SQL repository, read back from a new session.
+
+    The tests above use the in-memory repository, where a write is visible the moment it is
+    made, so they could not see this: `soft_delete()` flushed and never committed, the endpoint's
+    audit row committed first in its own transaction, and the request answered 200 and logged
+    DOCUMENT_DELETED while the delete itself was discarded when the session closed. Every
+    reversible delete made through the UI since it existed was lost (`KNOWN_DEBTS.md` #43).
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'docs.db'}")
+    Base.metadata.create_all(bind=engine)
+    doc_id = uuid.uuid4()
+    with Session(engine) as s:
+        s.add(DocORM(document_id=doc_id, filename="minutes.pdf", file_size=10,
+                     status="LIVE", classification="PUBLIC", mime_type=PDF_MIME,
+                     uploader_user_id=_test_user.user_id))
+        s.commit()
+
+    def _get_db():
+        with Session(engine) as session:
+            yield session
+
+    saved = dict(app.dependency_overrides)
+    app.dependency_overrides.pop(get_document_repository, None)  # the real, SQL-backed one
+    app.dependency_overrides[get_db] = _get_db
+    try:
+        assert client.delete(f"/api/v1/documents/{doc_id}").status_code == 200
+        if then_restore:
+            with Session(engine) as s:
+                assert PostgreSQLDocumentRepository(s).restore(doc_id)
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved)
+
+    with Session(engine) as fresh:
+        deleted_at = fresh.get(DocORM, doc_id).deleted_at
+    if then_restore:
+        assert deleted_at is None, "a restore must outlive its session too"
+    else:
+        assert deleted_at is not None, "the delete must outlive the request that made it"
+
+
 def test_an_owner_cannot_permanently_erase_only_an_admin_can(purge_stack):
     """Erasing bytes is irreversible. An uploader tidying up gets the recoverable kind;
     destroying the evidence is an administrator's decision."""
@@ -1166,9 +1212,7 @@ def test_a_second_escalation_is_also_recorded(dedup_stack):
     _upload(dedup_stack, "restricted_copy.pdf", Classification.RESTRICTED)
 
     # An ADMIN puts it back through POST /documents/{id}/classify.
-    canonical = dedup_stack.repo.get_by_id(first.document_id)
-    canonical.classification = Classification.PUBLIC
-    dedup_stack.repo.update_document(canonical)
+    dedup_stack.repo.set_classification(first.document_id, Classification.PUBLIC)
 
     _upload(dedup_stack, "restricted_again.pdf", Classification.RESTRICTED)
 
