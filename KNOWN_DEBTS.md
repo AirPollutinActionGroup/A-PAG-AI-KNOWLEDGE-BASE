@@ -809,22 +809,30 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **The lesson worth keeping**: a fake that returns a field the real implementation never sets
   makes a test prove the fake. The bulk-ingest fake returned `was_duplicate=True` on request.
 
-### 41. Re-uploading a soft-deleted document's bytes makes it a hidden DUPLICATE
-- **Status**: Open, on the upload form and `bulk_ingest.py`. The Drive connector avoids it (#40).
-- **What**: `get_by_checksum()` excludes SUPERSEDED and ARCHIVED but not documents with
-  `deleted_at` set, and the `uq_documents_active_sha256` index does not consider `deleted_at`
-  either. So delete a document (the reversible kind), upload the same file again, and the new
-  upload is marked DUPLICATE against the deleted one. The user sees "duplicate" and the document
-  stays hidden — the reversible delete is reversible only by an admin restoring the original row,
-  which no endpoint currently offers.
-- **Why not fixed here**: the right answer is not obvious. Excluding deleted documents from dedup
-  means a re-upload creates a second document while the first's bytes and chunks still exist;
-  treating a re-upload as "undelete" means an upload silently resurrects a row someone removed on
-  purpose, with its old tier and owner. Either is a product decision about what delete means.
-- **Trigger**: the first person who deletes a document, re-uploads it, and reports it missing.
-  The fix will want a `POST /documents/{id}/restore` endpoint either way, now that
-  `DocumentRepository.restore()` exists to back it.
-
+### 41. ✅ A deleted document could not be brought back, and re-uploading it hid it again (Closed)
+- **Status**: Closed by giving delete its other half, not by changing dedup.
+- **What was wrong**: `get_by_checksum()` and `uq_documents_active_sha256` both ignore
+  `deleted_at`, so re-uploading a deleted file was marked DUPLICATE against the hidden original:
+  "already in the knowledge base" about something nobody could find. And no endpoint could
+  restore anything, so "reversible" needed an administrator with a database client.
+- **The decision**: dedup stays as it is. Excluding deleted documents from it would create a
+  second document beside one whose bytes and passages still exist (the unique index would have to
+  change too), and auto-restoring on re-upload would silently resurrect a row someone removed on
+  purpose, with its old owner and tier. Instead the system says what happened and offers the way
+  back:
+  - `POST /documents/{id}/restore` -- owner or ADMIN, audited as `DOCUMENT_RESTORED` with
+    `restored_by`. Refuses a purged document (410), an older version of an edited Drive file
+    (409), and a Drive document whose file is gone from the folder (409, "put it back in the
+    folder"); a Drive document deleted *in the app* is restorable, since its file never left and
+    the sync sees nothing to do.
+  - `GET /documents/deleted` -- your own deleted documents, everyone's for an ADMIN, flagged
+    `from_drive` where the folder is the way back.
+  - The status of a refused re-upload carries `duplicate_of`: which document it matched, whether
+    that is deleted, and whether the caller may restore it. Nothing for a RESTRICTED original the
+    caller cannot see.
+  - In the app: Documents -> Recently deleted, an Undo on the delete notice, and a Restore button
+    on an upload that matched a deleted file.
+- **Pinned by** `tests/unit/test_restore.py`, through the real endpoints and SQL repository.
 
 ### 42. ✅ A tier changed mid-pipeline was silently put back when the stage finished (Closed)
 - **Status**: Closed. Found by testing the document view's access control against the running

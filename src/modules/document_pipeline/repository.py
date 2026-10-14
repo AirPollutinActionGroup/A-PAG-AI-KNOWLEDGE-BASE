@@ -111,6 +111,25 @@ class DocumentRepository(ABC):
         ...
 
     @abstractmethod
+    def list_deleted(
+        self,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+        limit: int = 100,
+    ) -> list[DocumentDTO]:
+        """Documents removed with `soft_delete()` that can still be restored, newest first.
+
+        Owner-scoped regardless of tier: a deleted document is only offered back to the person
+        who added it, and to administrators, because they are the only ones `restore` will
+        accept. A PUBLIC document someone else deleted is not yours to bring back.
+
+        Purged documents are excluded (their bytes are gone), and so are SUPERSEDED rows -- the
+        retired versions of an edited Drive file are deleted too, but they are history, not
+        something anyone removed. DUPLICATE rows were never documents. The viewer arguments
+        have no default for the same reason as `list_paginated`'s."""
+
+    @abstractmethod
     def purge(self, doc_id: uuid.UUID) -> bool:
         """Tombstones a document whose bytes have already been erased from object storage:
         stamps deleted_at/purged_at and nulls sha256 + raw_path. Nulling sha256 is what frees
@@ -320,6 +339,28 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         self.db.commit()  # see soft_delete()
         return True
 
+    def list_deleted(
+        self,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+        limit: int = 100,
+    ) -> list[DocumentDTO]:
+        """See the base class."""
+        stmt = select(DocumentORM).where(
+            DocumentORM.deleted_at.is_not(None),
+            DocumentORM.purged_at.is_(None),
+            DocumentORM.status.not_in(
+                [DocumentStatus.SUPERSEDED.value, DocumentStatus.DUPLICATE.value]
+            ),
+        )
+        if not viewer_is_admin:
+            if viewer_id is None:
+                return []
+            stmt = stmt.where(DocumentORM.uploader_user_id == viewer_id)
+        stmt = stmt.order_by(DocumentORM.deleted_at.desc()).limit(max(1, min(limit, 500)))
+        return [self._to_dto(o) for o in self.db.execute(stmt).scalars().all()]
+
     def purge(self, doc_id: uuid.UUID) -> bool:
         stmt = select(DocumentORM).where(
             DocumentORM.document_id == doc_id, DocumentORM.purged_at.is_(None)
@@ -459,6 +500,24 @@ class InMemoryDocumentRepository(DocumentRepository):
                 return False
             doc.deleted_at = None
             return True
+
+    def list_deleted(
+        self,
+        *,
+        viewer_id: uuid.UUID | None,
+        viewer_is_admin: bool,
+        limit: int = 100,
+    ) -> list[DocumentDTO]:
+        """See the base class."""
+        with self._lock:
+            found = [
+                d for d in self._storage.values()
+                if d.deleted_at is not None and d.purged_at is None
+                and d.status not in (DocumentStatus.SUPERSEDED, DocumentStatus.DUPLICATE)
+                and (viewer_is_admin or (viewer_id is not None and d.owner_id == viewer_id))
+            ]
+            found.sort(key=lambda d: d.deleted_at, reverse=True)
+            return [d.model_copy(deep=True) for d in found[: max(1, min(limit, 500))]]
 
     def purge(self, doc_id: uuid.UUID) -> bool:
         with self._lock:
