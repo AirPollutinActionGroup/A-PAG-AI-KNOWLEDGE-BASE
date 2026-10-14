@@ -103,8 +103,14 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 
 ### 0. Open self-registration (`POST /auth/register` has no gate)
 - **Status**: Deliberate for the 50-person internal-org bootstrap phase.
-- **Context**: Anyone who can reach the API can create an account with any role, including
-  ADMIN. Acceptable only because the API is not internet-exposed yet and the org is small/known.
+- **Context**: Anyone who can reach the API can create an account. Registration is limited to
+  `@a-pag.org` addresses (`ALLOWED_EMAIL_DOMAIN`) and can no longer choose a role (it could create
+  an ADMIN until `UserRegister` lost its `role` field), but **nothing proves the person owns the
+  address**. Since the Drive connector (#40) this matters more: RESTRICTED Drive files are owned
+  by whoever holds the Drive owner's email here, so registering `prince@a-pag.org` before Prince
+  does would receive his RESTRICTED imports from then on. Accepted on 12 Oct 2026 while the app
+  runs on a laptop and an IP-allow-listed VM; invite links (admin creates a one-time link, no
+  mail server needed) were the proposed fix, and Google sign-in waits on HTTPS and a domain.
 - **Trigger to address**: Before any external-network exposure, or before onboarding beyond the
   initial trusted cohort — gate behind an admin invite flow or SSO instead.
 
@@ -741,7 +747,7 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   doing before this is ever pushed to a shared registry. Today images are built on the VM and
   never pushed, which is what kept the exposure local.
 
-### 39. A row-per-record spreadsheet costs 19 minutes to embed
+### 39. A row-per-record spreadsheet costs 8-19 minutes to embed
 - **Status**: Open. The memory half is handled by headroom (`EMBEDDING_MEM_LIMIT` 2500m -> 3g);
   the time half is not addressed.
 - **What happened**: the first document imported from Google Drive was a Faridabad complaint
@@ -768,6 +774,14 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   a 1,800-row operational log: those chunks are near-identical record shapes whose retrieval value
   is low and whose embedding cost is the whole bill. A per-document chunk ceiling, or treating a
   sheet above some row count as data rather than prose, is the shape of the fix.
+- **Measured 12 Oct 2026 -- tighter packing would not help.** The passages are already full:
+  median 387 tokens against a 400 target (p90 434), 635,046 tokens across the 1,815. One complaint
+  row is ~144 tokens (p90 224) because each carries emails, phone numbers and image URLs, so two
+  or three rows fill a passage. The size of the bill is the size of the sheet. The levers left all
+  trade away finding an individual row -- index a profile of a large data sheet (header, row
+  count, value ranges) instead of every row, or embed fewer columns than are stored -- and that
+  is a product decision, not a tuning one. Counting questions over such a sheet ("how many
+  pending in Ward 43") are Text-to-SQL's job either way; passage search cannot count.
 - **Trigger**: when somebody syncs a folder of operational spreadsheets and ingestion stops
   finishing overnight, or when a sheet exceeds ~5,000 rows. Until then this is a known cost on a
   document type that is rare in a policy corpus.
