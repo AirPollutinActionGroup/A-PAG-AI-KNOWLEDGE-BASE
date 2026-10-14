@@ -222,6 +222,15 @@ button { cursor: pointer; background: none; border: 0; }
 .dot-st.bad { background: var(--danger); }
 .dot-st.off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-faint); }
 .rail-note { font-size: 12px; color: var(--ink-faint); padding: 3px 9px 10px; }
+.rail-sub { margin-top: 6px; border-top: 1px solid var(--line); border-radius: 0 0 7px 7px; padding-top: 11px; }
+.del-item {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 5px 9px;
+  font-size: 12.5px; color: var(--ink-faint);
+}
+.del-item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.del-note { font: 400 11px/1 "IBM Plex Mono", monospace; color: var(--ink-faint); cursor: help; }
+.rail-note.restored { color: var(--ok); }
+.del-why { flex-basis: 100%; font-size: 11.5px; color: var(--danger); }
 
 /* ---- the document panel */
 .docview { max-width: 54rem; margin: 0 auto; padding: 22px 20px 48px; }
@@ -832,6 +841,7 @@ function paintDocList() {
       docsError ? "Could not load documents: " + docsError
       : docs.length ? "Nothing matches that."
       : "No documents yet — use “Add documents” above."));
+    appendDeleted(list);
     return;
   }
 
@@ -858,6 +868,115 @@ function paintDocList() {
     note.title = "These were refused as duplicates at upload. The original is in the list above.";
     list.append(note);
   }
+  appendDeleted(list);
+}
+
+/* ---- Recently deleted: the other half of a reversible delete (KNOWN_DEBTS #41). Without it,
+   "the file is kept" was true and useless -- nobody but an administrator with a database
+   client could bring anything back. Loaded on first open, not with the list, since most
+   visits never look. */
+let deletedOpen = false, deletedDocs = null, lastRestored = "";
+
+function appendDeleted(list) {
+  const head = el("button", "rail-sec rail-sub");
+  head.setAttribute("aria-expanded", String(deletedOpen));
+  head.append(el("span", "caret", "›"), el("span", null, "Recently deleted"));
+  if (deletedDocs && deletedDocs.length) head.append(el("span", "count", String(deletedDocs.length)));
+  head.onclick = () => {
+    deletedOpen = !deletedOpen;
+    lastRestored = "";
+    if (deletedOpen && deletedDocs === null) loadDeleted();
+    paintDocList();
+  };
+  list.append(head);
+  if (!deletedOpen) return;
+  /* The restored row leaves this list the moment it refreshes, so the confirmation has to
+     outlive it -- otherwise a successful restore looks like the row simply vanished. */
+  if (lastRestored) {
+    list.append(el("div", "rail-note restored",
+      `“${lastRestored}” restored — it is back in the list above.`));
+  }
+  if (deletedDocs === null) { list.append(el("div", "rail-note", "Loading…")); return; }
+  if (!deletedDocs.length) {
+    list.append(el("div", "rail-note", "Nothing here. Documents you delete wait here until you restore them."));
+    return;
+  }
+  deletedDocs.forEach((d) => list.append(deletedRow(d)));
+}
+
+async function loadDeleted() {
+  try {
+    const r = await fetch("/api/v1/documents/deleted", { headers: authed() });
+    if (r.status === 401) { sessionExpired(); return; }
+    deletedDocs = r.ok ? ((await r.json()).documents || []) : [];
+  } catch { deletedDocs = []; }
+  paintDocList();
+}
+
+function deletedRow(d) {
+  const row = el("div", "del-item");
+  row.title = d.filename + (d.deleted_at ? "\nDeleted " + new Date(d.deleted_at).toLocaleString() : "");
+  row.append(el("span", "nm", baseName(d.filename)));
+  if (d.from_drive) {
+    const note = el("span", "del-note", "in Drive");
+    note.title = "This file was removed from the Google Drive folder. Put it back in the folder " +
+                 "and the next nightly sync restores it.";
+    row.append(note);
+  } else {
+    const b = el("button", "mini", "Restore");
+    b.onclick = () => restoreDoc(idOf(d), d.filename, b);
+    row.append(b);
+  }
+  return row;
+}
+
+/* One restore path for every button that offers it: the deleted list, the Undo after a
+   delete, and an upload that turned out to be a deleted file. The outcome is written onto the
+   button that was pressed, because that is where the person is looking. */
+async function restoreDoc(id, name, button) {
+  button.disabled = true;
+  button.textContent = "Restoring…";
+  const fail = (why) => {
+    button.disabled = false;
+    button.textContent = "Try again";
+    button.title = why;
+    const said = button.nextElementSibling;
+    if (said && said.classList.contains("del-why")) said.textContent = why;
+    else button.insertAdjacentElement("afterend", el("span", "del-why", why));
+  };
+  try {
+    const r = await fetch(`/api/v1/documents/${id}/restore`, { method: "POST", headers: authed() });
+    if (r.status === 401) { sessionExpired(); return; }
+    if (!r.ok) {
+      let why = `Could not restore it (${r.status}).`;
+      try { const j = await r.json(); if (j.detail) why = String(j.detail).replace(/^[A-Z_]+: /, ""); } catch { /* not json */ }
+      return fail(why);
+    }
+    button.textContent = "Restored";
+    lastRestored = baseName(name);
+    button.title = `\u201c${baseName(name)}\u201d is back in search and answers.`;
+    deletedDocs = null;
+    if (deletedOpen) loadDeleted();
+    refreshDocs();
+  } catch {
+    fail("The server could not be reached.");
+  }
+}
+
+/* What an upload card says when the file matched a deleted document, instead of "already in
+   the knowledge base" about something nobody can find. */
+function deletedMatch(info) {
+  const span = el("span", null,
+    `This file was deleted from the knowledge base earlier, as \u201c${baseName(info.filename)}\u201d. `);
+  if (info.can_restore) {
+    const b = el("button", "mini", "Restore it");
+    b.onclick = () => restoreDoc(info.document_id, info.filename, b);
+    span.append(b);
+  } else {
+    span.append(document.createTextNode(
+      "Ask the person who added it, or an administrator, to restore it."));
+  }
+  return span;
 }
 
 function refreshDocs() {
@@ -1062,10 +1181,16 @@ async function doDelete(doc, button) {
     docTotal = Math.max(0, docTotal - 1);
     closeDocView();
     paintDocs();
-    $("thread").prepend(notice(
+    const gone = notice(
       "Removed from the knowledge base",
       ` \u201c${baseName(doc.filename)}\u201d will no longer appear in search or answers. `
-      + `The file itself is kept \u2014 ask an administrator if it needs to be erased entirely.`));
+      + `It stays in Documents \u2192 Recently deleted until you restore it. `);
+    const undo = el("button", "mini", "Undo");
+    undo.onclick = () => restoreDoc(idOf(doc), doc.filename, undo);
+    gone.append(undo);
+    $("thread").prepend(gone);
+    deletedDocs = null;
+    if (deletedOpen) loadDeleted();
   } catch (e) {
     button.disabled = false;
     button.textContent = "Delete";
@@ -1990,6 +2115,9 @@ async function uploadMany(files, droppedCount) {
       } else if (FAILED[st.status]) {
         chip.className = "step bad";
         chip.title = `${chip.title} — ${FAILED[st.status]}`;
+        if (st.status === "DUPLICATE" && st.duplicate_of && st.duplicate_of.deleted) {
+          chip.title += " It was deleted earlier: restore it from Documents → Recently deleted.";
+        }
         pending.delete(id);
         done.failed += 1;
       } else {
@@ -2075,8 +2203,12 @@ async function upload(file, tier) {
     }
     if (FAILED[status]) {
       markSteps(card.steps, null);
-      card.steps.querySelectorAll(".step").forEach((n) => { n.className = "step bad"; });
-      settle(el("span", null, FAILED[status]));
+      // A file that matched a deleted document did not fail anything, so it is not painted red.
+      const wasDeleted = status === "DUPLICATE" && st.duplicate_of && st.duplicate_of.deleted;
+      if (!wasDeleted) {
+        card.steps.querySelectorAll(".step").forEach((n) => { n.className = "step bad"; });
+      }
+      settle(wasDeleted ? deletedMatch(st.duplicate_of) : el("span", null, FAILED[status]));
       return;
     }
   }

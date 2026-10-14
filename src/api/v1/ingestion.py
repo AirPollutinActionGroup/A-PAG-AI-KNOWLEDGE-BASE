@@ -24,9 +24,11 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.db.engine import get_db
-from src.db.enums import AuditEventType, UserRole
+from src.db.enums import AuditEventType, DocumentStatus, UserRole
 from src.db.models import AuditLog as AuditORM
 from src.db.models import DocumentChunk as DocumentChunkORM
+from src.db.models import DriveFile as DriveFileORM
+from src.db.models import DriveFileVersion as DriveFileVersionORM
 from src.db.models import User
 from src.modules.audit.service import AuditService
 from src.modules.auth.access import can_view, is_admin
@@ -102,6 +104,70 @@ def _uploader_emails(db: Session, docs) -> dict[uuid.UUID | None, str]:
         return {}
     rows = db.query(User.user_id, User.email).filter(User.user_id.in_(owner_ids)).all()
     return {row[0]: row[1] for row in rows}
+
+
+def _removed_from_drive(db: Session, document_ids) -> set[uuid.UUID]:
+    """Documents whose Google Drive file is currently gone from the watched folders.
+
+    Those come back by putting the file back: the next sync restores the same document
+    (`DriveSyncService._restore`). Restoring one here instead would bring back a document whose
+    source has been removed, and the sync would have no record of why it is visible again. A
+    Drive document deleted *in the app* is different -- its file is still in the folder, the
+    sync sees nothing to do, and the app is the only place it can be restored from.
+    """
+    ids = list(document_ids)
+    if not ids:
+        return set()
+    rows = (
+        db.query(DriveFileVersionORM.document_id)
+        .join(DriveFileORM, DriveFileORM.drive_file_id == DriveFileVersionORM.drive_file_id)
+        .filter(DriveFileVersionORM.document_id.in_(ids), DriveFileORM.state == "REMOVED")
+        .all()
+    )
+    return {r[0] for r in rows}
+
+
+def _may_change(doc, current_user: User) -> bool:
+    """Owner or ADMIN -- the rule delete, reclassify and restore all apply."""
+    is_owner = doc.owner_id is not None and doc.owner_id == current_user.user_id
+    return is_owner or current_user.role == UserRole.ADMIN.value
+
+
+def _duplicate_of(doc, repo: DocumentRepository, db: Session, current_user: User) -> dict | None:
+    """For a refused re-upload: the document it matched, if the caller may see it.
+
+    Without this an upload of a file that had been deleted reported "already in the knowledge
+    base" while nothing could be found (`KNOWN_DEBTS.md` #41). Dedup still matches deleted
+    documents -- a second copy of the same bytes cannot be promoted while the first exists -- so
+    the answer is to say which document it was and offer to restore it.
+    """
+    if doc.status != DocumentStatus.DUPLICATE:
+        return None
+    row = (
+        db.query(AuditORM)
+        .filter(
+            AuditORM.document_id == doc.id,
+            AuditORM.event_type == AuditEventType.DOCUMENT_REJECTED.value,
+        )
+        .order_by(desc(AuditORM.event_time))
+        .first()
+    )
+    canonical_id = (row.details or {}).get("canonical_document_id") if row else None
+    if not canonical_id:
+        return None
+    canonical = repo.get_by_id(uuid.UUID(str(canonical_id)))
+    if canonical is None or not _can_view(canonical, current_user) or canonical.purged_at:
+        return None
+    deleted = canonical.deleted_at is not None
+    return {
+        "document_id": canonical.id,
+        "filename": canonical.filename,
+        "deleted": deleted,
+        "can_restore": deleted
+        and _may_change(canonical, current_user)
+        and canonical.status != DocumentStatus.SUPERSEDED
+        and canonical.id not in _removed_from_drive(db, [canonical.id]),
+    }
 
 
 def _with_uploader(doc, emails: dict[uuid.UUID | None, str]) -> dict:
@@ -279,6 +345,7 @@ async def get_document_status(
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
         "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
         "latest_event": latest_event,
+        "duplicate_of": _duplicate_of(doc, repo, db, current_user),
     }
 
 
@@ -571,6 +638,100 @@ async def delete_document(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document with ID {document_id} not found.")
 
     return {"document_id": document_id, "status": "DELETED", "permanent": True}
+
+
+@router.post(
+    "/{document_id}/restore",
+    summary="Bring back a deleted document (owner or ADMIN)",
+)
+async def restore_document(
+    document_id: uuid.UUID,
+    repo: DocumentRepository = Depends(get_document_repository),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Undoes a reversible delete: the document returns to search and the list as it was --
+    same tier, same owner, same passages, nothing re-processed.
+
+    The other half of "delete is reversible" (`KNOWN_DEBTS.md` #41). Until this existed the
+    only way back was an administrator editing the database.
+    """
+    doc = repo.get_by_id(document_id)
+    if not doc or not _can_view(doc, current_user):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document with ID {document_id} not found.")
+    if not _may_change(doc, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="FORBIDDEN: Only the uploader or an ADMIN may restore this document.",
+        )
+    if doc.purged_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="GONE: This document was permanently deleted and its content no longer exists.",
+        )
+    if doc.deleted_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="NOT_DELETED: This document is not deleted.",
+        )
+    if doc.status == DocumentStatus.SUPERSEDED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SUPERSEDED: This is an older version, replaced when the file was edited.",
+        )
+    if document_id in _removed_from_drive(db, [document_id]):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="FROM_DRIVE: This file was removed from the Google Drive folder. Put it back "
+                   "in the folder and the next sync restores it.",
+        )
+
+    # Audited before the change, like delete and reclassify.
+    try:
+        AuditService.log_event(
+            db=db,
+            document_id=document_id,
+            event_type=AuditEventType.DOCUMENT_RESTORED,
+            details={
+                "restored_by": str(current_user.user_id),
+                "reason": "restored-in-app",
+                "filename": doc.filename,
+            },
+            user_id=str(current_user.user_id),
+        )
+    except Exception:
+        logger.exception("AUDIT WRITE FAILED: doc_id=%s event=DOCUMENT_RESTORED", document_id)
+
+    if not repo.restore(document_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document with ID {document_id} not found.")
+    logger.info("Document restored: doc_id=%s by=%s", document_id, current_user.user_id)
+    return {"document_id": document_id, "status": doc.status.value, "restored": True}
+
+
+@router.get(
+    "/deleted",
+    summary="Deleted documents you can restore (your own; all of them for an ADMIN)",
+)
+async def list_deleted_documents(
+    limit: int = 100,
+    repo: DocumentRepository = Depends(get_document_repository),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What `restore` would accept, newest deletion first. A document removed from Google Drive
+    is listed with `from_drive: true` and no way to restore it here -- see `_removed_from_drive`."""
+    docs = repo.list_deleted(
+        viewer_id=current_user.user_id,
+        viewer_is_admin=is_admin(current_user.role),
+        limit=limit,
+    )
+    emails = _uploader_emails(db, docs)
+    removed = _removed_from_drive(db, [d.id for d in docs])
+    return {
+        "documents": [
+            {**_with_uploader(d, emails), "from_drive": d.id in removed} for d in docs
+        ],
+    }
 
 
 @router.get(

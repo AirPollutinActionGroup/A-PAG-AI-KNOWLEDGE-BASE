@@ -935,7 +935,10 @@ rationale before "fixing" them:
   clicks to widen, one to narrow). The API still has no default; every caller states one.
 - **Delete is reversible by default.** `DELETE /documents/{id}` removes a document from search
   and the listing while keeping its bytes and audit trail; `?permanent=true` erases and is
-  **ADMIN only**. Owner-or-admin applies to both. Every delete used to be a purge, which is the
+  **ADMIN only**. Owner-or-admin applies to both, and to `POST /documents/{id}/restore`, which
+  brings one back (`GET /documents/deleted` lists them; the UI's "Recently deleted"). Dedup still
+  matches deleted documents, so a re-upload of one is refused as DUPLICATE and its status says so
+  via `duplicate_of` rather than the system quietly resurrecting it (`KNOWN_DEBTS.md` #41). Every delete used to be a purge, which is the
   wrong default when someone may have cited the document in a submission last week.
 - Text extraction is **non-ML** (`pdfplumber`/`python-docx`/`python-pptx`/`openpyxl`), not Docling
   — deliberate given this corpus is typed documents whose structure the file already states, not

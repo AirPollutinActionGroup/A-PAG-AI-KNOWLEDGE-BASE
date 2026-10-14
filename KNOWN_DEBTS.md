@@ -103,8 +103,14 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 
 ### 0. Open self-registration (`POST /auth/register` has no gate)
 - **Status**: Deliberate for the 50-person internal-org bootstrap phase.
-- **Context**: Anyone who can reach the API can create an account with any role, including
-  ADMIN. Acceptable only because the API is not internet-exposed yet and the org is small/known.
+- **Context**: Anyone who can reach the API can create an account. Registration is limited to
+  `@a-pag.org` addresses (`ALLOWED_EMAIL_DOMAIN`) and can no longer choose a role (it could create
+  an ADMIN until `UserRegister` lost its `role` field), but **nothing proves the person owns the
+  address**. Since the Drive connector (#40) this matters more: RESTRICTED Drive files are owned
+  by whoever holds the Drive owner's email here, so registering `prince@a-pag.org` before Prince
+  does would receive his RESTRICTED imports from then on. Accepted on 12 Oct 2026 while the app
+  runs on a laptop and an IP-allow-listed VM; invite links (admin creates a one-time link, no
+  mail server needed) were the proposed fix, and Google sign-in waits on HTTPS and a domain.
 - **Trigger to address**: Before any external-network exposure, or before onboarding beyond the
   initial trusted cohort — gate behind an admin invite flow or SSO instead.
 
@@ -741,7 +747,7 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   doing before this is ever pushed to a shared registry. Today images are built on the VM and
   never pushed, which is what kept the exposure local.
 
-### 39. A row-per-record spreadsheet costs 19 minutes to embed
+### 39. A row-per-record spreadsheet costs 8-19 minutes to embed
 - **Status**: Open. The memory half is handled by headroom (`EMBEDDING_MEM_LIMIT` 2500m -> 3g);
   the time half is not addressed.
 - **What happened**: the first document imported from Google Drive was a Faridabad complaint
@@ -768,6 +774,14 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   a 1,800-row operational log: those chunks are near-identical record shapes whose retrieval value
   is low and whose embedding cost is the whole bill. A per-document chunk ceiling, or treating a
   sheet above some row count as data rather than prose, is the shape of the fix.
+- **Measured 12 Oct 2026 -- tighter packing would not help.** The passages are already full:
+  median 387 tokens against a 400 target (p90 434), 635,046 tokens across the 1,815. One complaint
+  row is ~144 tokens (p90 224) because each carries emails, phone numbers and image URLs, so two
+  or three rows fill a passage. The size of the bill is the size of the sheet. The levers left all
+  trade away finding an individual row -- index a profile of a large data sheet (header, row
+  count, value ranges) instead of every row, or embed fewer columns than are stored -- and that
+  is a product decision, not a tuning one. Counting questions over such a sheet ("how many
+  pending in Ward 43") are Text-to-SQL's job either way; passage search cannot count.
 - **Trigger**: when somebody syncs a folder of operational spreadsheets and ingestion stops
   finishing overnight, or when a sheet exceeds ~5,000 rows. Until then this is a known cost on a
   document type that is rare in a policy corpus.
@@ -795,22 +809,30 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **The lesson worth keeping**: a fake that returns a field the real implementation never sets
   makes a test prove the fake. The bulk-ingest fake returned `was_duplicate=True` on request.
 
-### 41. Re-uploading a soft-deleted document's bytes makes it a hidden DUPLICATE
-- **Status**: Open, on the upload form and `bulk_ingest.py`. The Drive connector avoids it (#40).
-- **What**: `get_by_checksum()` excludes SUPERSEDED and ARCHIVED but not documents with
-  `deleted_at` set, and the `uq_documents_active_sha256` index does not consider `deleted_at`
-  either. So delete a document (the reversible kind), upload the same file again, and the new
-  upload is marked DUPLICATE against the deleted one. The user sees "duplicate" and the document
-  stays hidden — the reversible delete is reversible only by an admin restoring the original row,
-  which no endpoint currently offers.
-- **Why not fixed here**: the right answer is not obvious. Excluding deleted documents from dedup
-  means a re-upload creates a second document while the first's bytes and chunks still exist;
-  treating a re-upload as "undelete" means an upload silently resurrects a row someone removed on
-  purpose, with its old tier and owner. Either is a product decision about what delete means.
-- **Trigger**: the first person who deletes a document, re-uploads it, and reports it missing.
-  The fix will want a `POST /documents/{id}/restore` endpoint either way, now that
-  `DocumentRepository.restore()` exists to back it.
-
+### 41. ✅ A deleted document could not be brought back, and re-uploading it hid it again (Closed)
+- **Status**: Closed by giving delete its other half, not by changing dedup.
+- **What was wrong**: `get_by_checksum()` and `uq_documents_active_sha256` both ignore
+  `deleted_at`, so re-uploading a deleted file was marked DUPLICATE against the hidden original:
+  "already in the knowledge base" about something nobody could find. And no endpoint could
+  restore anything, so "reversible" needed an administrator with a database client.
+- **The decision**: dedup stays as it is. Excluding deleted documents from it would create a
+  second document beside one whose bytes and passages still exist (the unique index would have to
+  change too), and auto-restoring on re-upload would silently resurrect a row someone removed on
+  purpose, with its old owner and tier. Instead the system says what happened and offers the way
+  back:
+  - `POST /documents/{id}/restore` -- owner or ADMIN, audited as `DOCUMENT_RESTORED` with
+    `restored_by`. Refuses a purged document (410), an older version of an edited Drive file
+    (409), and a Drive document whose file is gone from the folder (409, "put it back in the
+    folder"); a Drive document deleted *in the app* is restorable, since its file never left and
+    the sync sees nothing to do.
+  - `GET /documents/deleted` -- your own deleted documents, everyone's for an ADMIN, flagged
+    `from_drive` where the folder is the way back.
+  - The status of a refused re-upload carries `duplicate_of`: which document it matched, whether
+    that is deleted, and whether the caller may restore it. Nothing for a RESTRICTED original the
+    caller cannot see.
+  - In the app: Documents -> Recently deleted, an Undo on the delete notice, and a Restore button
+    on an upload that matched a deleted file.
+- **Pinned by** `tests/unit/test_restore.py`, through the real endpoints and SQL repository.
 
 ### 42. ✅ A tier changed mid-pipeline was silently put back when the stage finished (Closed)
 - **Status**: Closed. Found by testing the document view's access control against the running
