@@ -368,8 +368,12 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   periodic `DELETE FROM jobs WHERE status = 'COMPLETED' AND finished_at < now() - interval '30
   days'` — and is much easier to add before the table is large.
 
-### 19. A table's position within a unit is not recorded
-- **Status**: Worked around honestly; the real fix belongs in extraction.
+### 19. ✅ A table's position within a unit is not recorded (Closed for DOCX, PPTX, XLSX)
+- **Status**: Closed for the Office formats by `ExtractedTable.heading` (#44): Word is now read
+  in document order and each table records the heading in force; a slide's tables carry the
+  slide title; a sheet's table carries the sheet name. The chunker emits a table after its own
+  section's prose and cites it there. PDF still has no heading per table; the fallback below
+  still applies to it.
 - **Context**: `ExtractedTable` carries only a `unit_index` — which page, slide or worksheet the
   table came from — not where inside it the table sat. For PDF, PPTX and XLSX that is usually
   enough, because a unit is one page or slide. For DOCX it is not: Word has no pages until it is
@@ -747,7 +751,7 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   doing before this is ever pushed to a shared registry. Today images are built on the VM and
   never pushed, which is what kept the exposure local.
 
-### 39. A row-per-record spreadsheet costs 8-19 minutes to embed
+### 39. A row-per-record spreadsheet costs 8-19 minutes to embed (halved by #44)
 - **Status**: Open. The memory half is handled by headroom (`EMBEDDING_MEM_LIMIT` 2500m -> 3g);
   the time half is not addressed.
 - **What happened**: the first document imported from Google Drive was a Faridabad complaint
@@ -874,3 +878,41 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   still live. Each was a person's request, so re-apply them deliberately rather than in bulk:
   `SELECT d.document_id, d.filename, a.event_time FROM audit_log a JOIN documents d USING
   (document_id) WHERE a.event_type = 'DOCUMENT_DELETED' AND d.deleted_at IS NULL;`
+
+### 44. ✅ What two reviews of real documents found missing or misfiled (Closed)
+- **Status**: Closed, except pictures of tables (below). Found by external reviews of the Ministry
+  of Power memo of 20 Nov 2024 (a scan) and "TPPs Delhi NCR.pptx", each checked against the file
+  and against fresh OCR runs before anything was changed.
+- **Fixed, with what was measured:**
+  - **OCR dropped whole lines.** Four full-width lines of the memo -- "out of 600 units", "may
+    not be able to comply", "category A, B & C" -- were not near the confidence cut-off: at
+    144 dpi the engine read them as noise ("o.in o n nn nn", 0.67), so lowering the cut-off, as
+    the review proposed, would have indexed noise. At 300 dpi three of the four read at
+    0.98-0.99 (`OCR_RESOLUTION`, 7.4s against 5.3s for two pages). The fourth is unreadable at
+    any resolution and is now **recorded** -- `ocr_unreadable_lines` per page, and a WARNING --
+    instead of vanishing without a trace.
+  - **Scans had no headings.** A scan has no font sizes, so every passage was cited under no
+    section. A "Subject:" line is now the page's heading; the 162-page CPCB set has 26.
+  - **Page furniture** ("Contd...2/-", "-2-", "Page 3 of 10") is stripped as whole lines.
+  - **Slide headings carried across slides.** 8 of the deck's 21 slides were filed under the
+    previous slide's title. Slides and sheets now stand alone; a slide with no title placeholder
+    takes the first line of its topmost text box.
+  - **Grouped shapes were skipped** -- the whole MoEF&CC deadline history on slide 10. Shapes are
+    now read recursively. **Speaker notes** are kept (slide 11's "30 to 45 days" shutdown).
+    **Hidden slides** are skipped without renumbering.
+  - **Title rows became table headers**; the header is now the first of the opening rows that is
+    more than half full, and the rows above it are a caption. **Multi-line cells** stay on one row.
+  - **Spreadsheets were indexed twice** -- as prose and as a table. Measured before re-processing:
+    Faridabad 1,815 -> 953 passages, DD_Biharsharif 11,949 -> 6,122, CEDS 460 -> 116.
+  - **Word**: read in document order (#19), merged cells kept once, text boxes and footnotes read.
+  - **Soft line breaks** (PowerPoint's vertical tab) were deleted, gluing words together.
+- **Two review claims were wrong, and are recorded so nobody acts on them:** the landline
+  011-23063746 *is* masked by the gateway (`_plausible_landline`), and "So2" does not hurt search
+  -- the BM25 index ignores case (SO2, so2 and So2 each find the same 1,034 passages).
+- **Checked before re-processing**: `compare_extraction.py` runs the new code in memory over every
+  affected document and compares it with what is stored. 0 of 21 flipped language or quality
+  verdict -- the risk being a spreadsheet whose cleaner numbers tip it into a wrong non-English
+  detection, which would take it out of meaning-based search.
+- **Still open: pictures of tables.** Slides 9, 15 and 20 of the deck are screenshots of tables
+  (the "1209 mg/Nm3" figure). Reading text and tables out of pictures is separate work from
+  parsing.

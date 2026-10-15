@@ -21,6 +21,13 @@ it again whenever an extractor, a chunking rule or an embedding model changes.
 
     python backfill_jobs.py --stage EXTRACT --status NORMALIZATION_FAILED --reset --dry-run
     python backfill_jobs.py --stage EXTRACT --status NORMALIZATION_FAILED --reset
+
+When only one format's extractor changed, re-run that format and not the whole corpus -- the
+162-page scan alone holds an extraction worker for over ten minutes:
+
+    python backfill_jobs.py --stage EXTRACT --status LIVE --reset --mime pptx --dry-run
+    python backfill_jobs.py --stage EXTRACT --status LIVE --reset --method OCR
+    python backfill_jobs.py --stage EXTRACT --status LIVE --reset --document-id <uuid>
 """
 
 import argparse
@@ -34,6 +41,12 @@ from src.db.engine import SessionLocal
 from src.db.enums import DocumentStatus, JobStage, JobStatus
 from src.db.models import Document as DocumentORM
 from src.db.models import Job as JobORM
+from src.modules.document_pipeline.formats import (
+    DOCX_MIME,
+    PDF_MIME,
+    PPTX_MIME,
+    XLSX_MIME,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("backfill")
@@ -49,9 +62,12 @@ STAGE_ENTRY_STATUS = {
     JobStage.EMBED: DocumentStatus.CHUNKED,
 }
 
+MIME_BY_NAME = {"pdf": PDF_MIME, "docx": DOCX_MIME, "xlsx": XLSX_MIME, "pptx": PPTX_MIME}
+
 
 def backfill(stage: JobStage, status: DocumentStatus, dry_run: bool, limit: int | None,
-             reset: bool = False) -> int:
+             reset: bool = False, mimes: list[str] | None = None,
+             document_ids: list[uuid.UUID] | None = None, method: str | None = None) -> int:
     with SessionLocal() as db:
         # Documents in the target state with no live job for this stage. COMPLETED and FAILED
         # jobs are deliberately not counted as live: a document still sitting in the entry state
@@ -72,6 +88,12 @@ def backfill(stage: JobStage, status: DocumentStatus, dry_run: bool, limit: int 
             )
             .order_by(DocumentORM.created_at)
         )
+        if mimes:
+            query = query.where(DocumentORM.mime_type.in_(mimes))
+        if document_ids:
+            query = query.where(DocumentORM.document_id.in_(document_ids))
+        if method:
+            query = query.where(DocumentORM.extraction_method == method)
         if limit:
             query = query.limit(limit)
 
@@ -125,6 +147,12 @@ def main() -> None:
     )
     parser.add_argument("--dry-run", action="store_true", help="List documents without queueing.")
     parser.add_argument("--limit", type=int, help="Cap how many are queued in one run.")
+    parser.add_argument("--mime", action="append", choices=sorted(MIME_BY_NAME),
+                        help="Only this format. Repeatable.")
+    parser.add_argument("--document-id", action="append", type=uuid.UUID,
+                        help="Only this document. Repeatable.")
+    parser.add_argument("--method", choices=["NATIVE", "OCR", "MIXED"],
+                        help="Only documents read this way, e.g. OCR for the scans.")
     parser.add_argument(
         "--reset", action="store_true",
         help="Move the documents back to the stage's entry status first. For re-running a "
@@ -145,7 +173,11 @@ def main() -> None:
             stage.value, STAGE_ENTRY_STATUS[stage].value, status.value,
         )
 
-    backfill(stage, status, args.dry_run, args.limit, reset=args.reset)
+    backfill(
+        stage, status, args.dry_run, args.limit, reset=args.reset,
+        mimes=[MIME_BY_NAME[m] for m in args.mime] if args.mime else None,
+        document_ids=args.document_id, method=args.method,
+    )
 
 
 if __name__ == "__main__":

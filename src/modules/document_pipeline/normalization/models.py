@@ -18,6 +18,8 @@ class NormalizedUnit(BaseModel):
     index: int
     label: str
     text: str
+    # Carried from extraction: see `ExtractedUnit.text_is_table`.
+    text_is_table: bool = False
 
 
 class QualityCheckResult(BaseModel):

@@ -38,6 +38,7 @@ class ExtractionService:
             tables=content.tables,
             ocr_pages=content.ocr_pages,
             ocr_skipped_pages=content.ocr_skipped_pages,
+            ocr_unreadable_lines=content.ocr_unreadable_lines,
         )
         # Derived from the pages rather than passed in, so the recorded method cannot disagree
         # with the units it describes.
@@ -53,6 +54,12 @@ class ExtractionService:
             logger.warning(
                 "doc_id=%s: %d page(s) past the OCR budget were left unread: %s",
                 document_id, len(content.ocr_skipped_pages), content.ocr_skipped_pages[:20],
+            )
+        if content.ocr_unreadable_lines:
+            logger.warning(
+                "doc_id=%s: %d OCR line(s) could not be read and were left out, by page: %s",
+                document_id, sum(content.ocr_unreadable_lines.values()),
+                content.ocr_unreadable_lines,
             )
         return result
 

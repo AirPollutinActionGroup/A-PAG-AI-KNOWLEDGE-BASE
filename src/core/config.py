@@ -229,9 +229,14 @@ class Settings(BaseSettings):
     # silently becomes an unreadable document is the failure this exists to fix, and a setting
     # nobody turns on fixes nothing.
     OCR_ENABLED: bool = True
-    # 144 dpi (pdfplumber renders at `resolution`). Enough for a 10pt government typeface;
-    # doubling it roughly quadruples the pixels and the time for no measured accuracy gain.
-    OCR_RESOLUTION: int = 144
+    # Rendering resolution for OCR (pdfplumber's `resolution`). Was 144, on the reasoning that it
+    # is enough for a 10pt government typeface. A review of the Ministry of Power memo of 20 Nov
+    # 2024 measured otherwise: at 144 four full-width lines came out as noise and were dropped,
+    # including "Power Plants may not be able to comply with the prescribed timelines" -- the
+    # memo's central claim. At 300, three of the four read at 0.98-0.99 confidence; the fourth
+    # is unreadable at any resolution (a stamp or damage) and is now recorded rather than silent.
+    # Cost: 7.4s against 5.3s for the memo's two pages.
+    OCR_RESOLUTION: int = 300
     # Explicit, because the default is not a tuning detail: unset measured 20.5s per page against
     # 4.0s at 8 intra-op threads. 0 means min(8, cpu_count) rather than "let onnxruntime decide".
     OCR_THREADS: int = 0

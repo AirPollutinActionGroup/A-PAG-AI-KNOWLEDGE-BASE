@@ -64,6 +64,9 @@ class NormalizationService:
                 index=unit.index,
                 label=unit.label,
                 text=self.cleaner.clean(unit.text),
+                # Rebuilt field by field, so a field not copied here is silently lost on the way
+                # to chunking -- which is what would happen to this flag.
+                text_is_table=unit.text_is_table,
             )
             for unit in extraction.units
         ]
@@ -86,7 +89,12 @@ class NormalizationService:
             language=language,
             units=units,
             headings=headings,
-            tables=extraction.tables,
+            tables=[
+                table.model_copy(
+                    update={"heading": self.cleaner.clean(table.heading) or None}
+                ) if table.heading else table
+                for table in extraction.tables
+            ],
             quality=quality,
         )
         logger.info(

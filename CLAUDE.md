@@ -212,7 +212,11 @@ onnxruntime default these pages measured 20.5s each against 3.5s at 8 intra-op t
 `OCR_THREADS` is set explicitly. And **OCR drops word boundaries** (`FGDinexisting plantswere`),
 which costs the lexical arm a term it can never match — BM25 cannot match what was never
 tokenised. Lines below `OCR_MIN_CONFIDENCE` are dropped rather than kept, because an invented
-word inside a passage that will later be cited is worse than a gap.
+word inside a passage that will later be cited is worse than a gap -- but the gap is **recorded**
+(`ocr_unreadable_lines`, per page), because a dropped line can be a real one: the MoP memo lost
+"category A, B & C" that way, silently. **Resolution is 300 dpi**, not 144: at 144 those lines
+read as noise, at 300 they read at 0.99 (`KNOWN_DEBTS.md` #44). A scan has no font sizes, so its
+headings come from "Subject:" lines instead.
 
 ### Chunking: structure-aware, and why chunks live in Postgres
 
@@ -274,6 +278,14 @@ fastembed, no PyTorch); `service.py` batches chunks per inference call.
 Several model families are asymmetric — E5 requires literal `query: `/`passage: ` prefixes, BGE
 v1.5 takes an instruction on the query side only — and feeding both sides the same shape costs
 retrieval quality with **no exception and no warning**. Keeping that inside the provider means the
+Headings carry from page to page in a PDF or Word file, where a section runs on, but **never
+across slides or worksheets**, which stand alone — carrying them filed 8 of 21 slides of one deck
+under the previous slide's title. A worksheet unit is marked `text_is_table`: its text feeds the
+quality gate and language detection but is not chunked as prose, or every sheet is indexed twice.
+Tables carry `ExtractedTable.heading` where the format says which section they sit in, and are
+emitted after that section. `compare_extraction.py` dry-runs any change here against the corpus
+and stops on a language or quality flip.
+
 retrieval endpoint cannot forget it and a model-family change edits one class, not every call site.
 `_is_bge()` deliberately excludes BGE-M3, which is not instruction-tuned the way v1.5 is.
 
