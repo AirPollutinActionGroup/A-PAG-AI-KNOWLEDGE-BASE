@@ -874,3 +874,31 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   still live. Each was a person's request, so re-apply them deliberately rather than in bulk:
   `SELECT d.document_id, d.filename, a.event_time FROM audit_log a JOIN documents d USING
   (document_id) WHERE a.event_type = 'DOCUMENT_DELETED' AND d.deleted_at IS NULL;`
+
+### 45. ✅ Search silently returned the wrong passages once the corpus grew (Closed)
+- **Status**: Closed. Found while running `run_eval.py` after re-processing, not by any test or
+  alert.
+- **What**: semantic-only hit@1 fell from 72% to **38%**, and `hybrid, no rerank` from 80% to 58%,
+  with no error anywhere. The shipped configuration (hybrid + rerank) hid most of it: 83% -> 81%.
+- **Why**: the HNSW index returns at most its `ef_search` nearest neighbours -- **40** by default
+  -- and the permission and deleted-document filters run on *those*. Rows nearer to the question
+  than its answer, that the filters then discard, leave nothing behind. A 6,946-row complaints
+  spreadsheet (near-identical rows) sat among the 40 nearest for most questions: 190 of the top-10
+  slots over 40 questions. At 200 the index matched an exact search (71%); `iterative_scan` did not
+  help. Not caused by the parsing changes -- the corpus reached ~13,900 vectors when the sheet was
+  embedded -- and not visible at 4,459 chunks, which is why the earlier measurements never saw it.
+- **Fix**: `RetrievalService._widen_vector_search` sets `hnsw.ef_search` to at least twice the
+  candidate pool for the vector arm, with `SET LOCAL`, so it ends with the transaction
+  (`SEARCH_HNSW_EF_SEARCH`, 200). Pinned by `tests/integration/test_retrieval_service.py`: 80
+  deleted rows nearer than the one live passage return **nothing** at the default and the passage
+  at 200, forcing the index's own ordering with `enable_sort = off` because on 81 rows Postgres
+  otherwise joins first and never meets the limit. Both tests fail without the fix.
+- **After**: hybrid + rerank 82.0% hit@1 / 94.0% hit@5 / MRR 0.870; semantic 71%. The 3-point
+  hit@5 gap against the earlier 97% is two new misses, both questions generated from
+  `Report on TPPs.xlsx` -- a one-sheet *summary* of reports whose full text is in the corpus. The
+  full reports (NIAS, "Note on FGD installation", Part 7) now outrank the summary. Whether that
+  is a regression in answer quality is unproven, and the earlier baseline predates the corpus
+  growing from 4,459 to 12,100 passages, so it cannot be attributed to parsing either way.
+- **Still to watch**: any single document that contributes thousands of near-identical rows
+  crowds every arm, and a bigger `ef_search` is the cost of finding the answer behind it. Passage
+  search cannot count: "how many pending in Ward 43" over that sheet is Text-to-SQL's job.

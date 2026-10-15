@@ -88,6 +88,23 @@ class RetrievalService:
             predicates.append(DocumentORM.document_id.in_(list(document_ids)))
         return tuple(predicates)
 
+    @staticmethod
+    def _widen_vector_search(db: Session, pool: int) -> None:
+        """Lets the HNSW index consider enough candidates to fill the pool after filtering.
+
+        The index returns at most `hnsw.ef_search` nearest neighbours (40 by default) and the
+        permission and deleted-document filters run *after* that. On 14 Oct 2026 the corpus
+        reached ~13,900 vectors, 6,946 of them near-identical rows of one complaints log, and
+        those rows filled the 40 slots for most questions: the semantic arm fell from 72% to 38%
+        hit@1 with no error anywhere. At 200 it matched an exact search (71%). Set per
+        transaction with SET LOCAL, so nothing else on the connection is affected.
+        """
+        bind = db.get_bind()
+        if getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
+            return
+        ef_search = max(settings.SEARCH_HNSW_EF_SEARCH, pool * 2)
+        db.execute(text(f"SET LOCAL hnsw.ef_search = {int(ef_search)}"))
+
     def _semantic_cte(self, vector, pool, user_id, viewer_is_admin, document_ids=None):
         distance = ChunkORM.embedding.cosine_distance(vector)
         return (
@@ -351,6 +368,8 @@ class RetrievalService:
             .limit(fetch)
         )
 
+        if mode != SearchMode.LEXICAL:
+            self._widen_vector_search(db, pool)
         rows = db.execute(stmt).mappings().all()
 
         # Reranking happens here, on rows the permission predicate has already filtered — a

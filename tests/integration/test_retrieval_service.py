@@ -9,8 +9,10 @@ not the embedding.
 """
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.db.models import Document as DocumentORM
@@ -18,7 +20,7 @@ from src.db.models import DocumentChunk as ChunkORM
 from src.db.models import User as UserORM
 from src.modules.document_pipeline.embedding.provider import EmbeddingProvider
 from src.modules.retrieval.fusion import RRF_K
-from src.modules.retrieval.service import RetrievalService
+from src.modules.retrieval.service import RetrievalService, SearchMode
 
 DIM = 768
 
@@ -291,3 +293,48 @@ def test_a_null_heading_round_trips_as_none(db_session: Session, service):
     assert hit.page_number == 3
 
     db_session.rollback()
+
+
+def test_a_crowd_of_filtered_rows_cannot_hide_a_live_passage(db_session: Session, service):
+    """The semantic arm returned the wrong passages, silently, once the corpus grew.
+
+    The HNSW index hands back only its `ef_search` nearest neighbours -- 40 by default -- and the
+    permission and deleted-document filters run on those. Rows nearer to the query than the
+    answer, that the filters then remove, leave nothing behind: on 14 Oct 2026 a 6,946-row
+    spreadsheet crowded out the real answer for most questions and semantic hit@1 fell from 72%
+    to 38% with no error anywhere. Here, 80 deleted rows sit nearer than the one live passage; at
+    the default the query returns nothing at all.
+
+    Sorting is switched off so the planner takes the index's own ordering, as it does on the real
+    table; on 81 rows it would otherwise join first, filter, and sort the survivors, and never
+    meet the limit this test is about.
+    """
+    gone = _doc(db_session, deleted_at=datetime.now(UTC))
+    for i in range(80):
+        _chunk(db_session, gone, _vec(1.0, i * 1e-4), f"deleted {i}", i)
+    live = _doc(db_session)
+    _chunk(db_session, live, _vec(1.0, 0.5), "the passage that answers", 0)
+    db_session.flush()
+    db_session.execute(text("SET LOCAL enable_sort = off"))
+    db_session.execute(text("SET LOCAL enable_seqscan = off"))
+
+    hits, _ = service.search(
+        db_session, "q", user_id=None, is_admin=True, limit=5,
+        mode=SearchMode.SEMANTIC, rerank=False,
+    )
+
+    assert [h.text for h in hits] == ["the passage that answers"]
+
+    db_session.rollback()
+
+
+def test_the_vector_search_budget_scales_with_the_pool(db_session: Session, service):
+    """`SET LOCAL`, so it ends with the transaction and touches nothing else on the connection."""
+    service.search(db_session, "q", user_id=None, is_admin=True, limit=5, rerank=False)
+
+    budget = int(db_session.execute(text("SHOW hnsw.ef_search")).scalar_one())
+    assert budget >= 200
+
+    db_session.rollback()
+    assert int(db_session.execute(text("SHOW hnsw.ef_search")).scalar_one()) == 40
+
