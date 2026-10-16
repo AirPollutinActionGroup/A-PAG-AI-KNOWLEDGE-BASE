@@ -59,6 +59,14 @@ _INK_GRAY = 110
 _INK_SHARE = 0.01
 # A word the engine scored below this is read a second time from its own crop.
 _DOUBTFUL = 0.9
+# Loose text scored between these was half-read: below the floor it is noise, not text, and is
+# not worth a second pass. At most this many lines are re-read in a picture.
+_DOUBTFUL_FLOOR = 0.3
+_MAX_REREADS = 6
+# The one line of a picture that has no other text stands alone only if it is this sure, and this
+# long: a sign or a caption, not a stray mark.
+_SOLO_LINE_CONFIDENCE = 0.9
+_SOLO_LINE_LETTERS = 8
 # A tall narrow cell is a header written sideways.
 _SIDEWAYS_RATIO = 1.6
 
@@ -212,14 +220,20 @@ class TableImageReader:
                 tables.append(table)
 
         outside = [w for w in words if not any(_inside(w, t.bbox) for t in tables)]
+        self._reread_doubtful_lines(image, outside)
         lines = _group_lines([w for w in outside if w.score >= self._min_confidence])
         for table in tables:
             above = _title_above(lines, table.bbox)
             if above is not None:
                 table.title = above[0]
                 lines.remove(above)
-        texts = [text for text, *_ in lines if len(text.strip()) > 2]
-        if not tables and len(texts) < 2:
+        # A one- or two-character line is usually OCR noise, except a digit: the ticks of a chart's
+        # axis (0, 5, 10) are the numbers that say what its scale is.
+        texts = [text for text, *_ in lines
+                 if len(text.strip()) > 2 or any(ch.isdigit() for ch in text)]
+        # A picture with a few stray words is a photograph with noise on it. One substantial,
+        # confident line is not: it is a sign, a caption or a title, and is kept.
+        if not tables and len(texts) < 2 and not _one_confident_line(lines):
             texts = []
         return ImageReading(tables=tables, lines=texts)
 
@@ -327,6 +341,36 @@ class TableImageReader:
             rows[i] = repair_month_headers(rows[i])
         return ImageTable(rows=rows, bbox=grid.bbox)
 
+    def _reread_doubtful_lines(self, image, words: list[_Word]) -> None:
+        """Loose text the engine half-read is read again from its own crop, enlarged.
+
+        A caption under a chart came back from the whole-picture pass as "Fil ir n nn s n n o s n
+        :n Tnpp" at 0.58 (dropped, correctly) and from its own crop as the full, correct sentence
+        at 0.99: the detector had the line, the recogniser had too little of it to work from.
+        Only a result that clears the confidence floor replaces the original, and only a few
+        lines are tried, since each is a second pass over a crop.
+        """
+        import cv2
+
+        # Horizontal lines only: a sideways label's crop reads no better enlarged, and a chart has
+        # dozens of them.
+        doubtful = [w for w in words if _DOUBTFUL_FLOOR <= w.score < self._min_confidence
+                    and (w.x2 - w.x1) >= 2 * (w.y2 - w.y1)]
+        for word in sorted(doubtful, key=lambda w: -w.score)[:_MAX_REREADS]:
+            x1, y1, x2, y2 = (int(v) for v in (word.x1 - 6, word.y1 - 6, word.x2 + 6, word.y2 + 6))
+            crop = image[max(y1, 0):y2, max(x1, 0):x2]
+            if crop.size == 0:
+                continue
+            crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            crop = cv2.copyMakeBorder(crop, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+            found = self._words(crop)
+            if not found:
+                continue
+            line = _group_lines(found)
+            score = sum(w.score for w in found) / len(found)
+            if len(line) == 1 and score >= self._min_confidence:
+                word.text, word.score = line[0][0], score
+
     def _second_opinion(self, image, words: list[_Word]) -> None:
         """Rereads each word the engine was not sure of from its own crop, and keeps whichever
         reading scored higher. The same pixels read "164" or "1964" depending on how the picture
@@ -406,8 +450,9 @@ def _has_ink(image, box: tuple) -> bool:
     return float((gray < _INK_GRAY).mean()) > _INK_SHARE
 
 
-def _group_lines(words: list[_Word]) -> list[tuple[str, float, float, float]]:
-    """Words into lines: (text, centre y, left, right), top to bottom, words left to right."""
+def _group_lines(words: list[_Word]) -> list[tuple[str, float, float, float, float]]:
+    """Words into lines: (text, centre y, left, right, lowest word score), top to bottom, words
+    left to right."""
     if not words:
         return []
     typical = sorted(w.height for w in words)[len(words) // 2] or 1.0
@@ -421,7 +466,7 @@ def _group_lines(words: list[_Word]) -> list[tuple[str, float, float, float]]:
     for line in lines:
         line.sort(key=lambda w: w.x1)
         out.append((" ".join(w.text for w in line), sum(w.cy for w in line) / len(line),
-                    line[0].x1, line[-1].x2))
+                    line[0].x1, line[-1].x2, min(w.score for w in line)))
     return out
 
 
@@ -433,6 +478,14 @@ def _title_above(lines, bbox: tuple):
         if line[1] < bbox[1] and bbox[1] - line[1] <= reach and line[3] >= bbox[0] and line[2] <= bbox[2]
     ]
     return max(above, key=lambda line: line[1], default=None)
+
+
+def _one_confident_line(lines) -> bool:
+    """Exactly one line, of real words, that the engine was sure of."""
+    if len(lines) != 1:
+        return False
+    text, _cy, _left, _right, score = lines[0]
+    return score >= _SOLO_LINE_CONFIDENCE and sum(ch.isalpha() for ch in text) >= _SOLO_LINE_LETTERS
 
 
 def _drop_empty(rows: list[list[str]]) -> list[list[str]]:

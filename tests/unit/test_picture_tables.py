@@ -48,8 +48,10 @@ class _Engine:
     """Reads back fixed words. A call without the detector (one cell, on its own) takes its answer
     from `line_reads` in order, and is recorded."""
 
-    def __init__(self, words, line_reads=(), label_words=()):
+    def __init__(self, words, line_reads=(), label_words=(), crop_words=()):
         self.words, self.line_reads, self.detector_calls = words, list(line_reads), []
+        # What a crop of one doubtful line reads as when it is run through the detector.
+        self.crop_words = list(crop_words)
         # What the sideways-labels picture reads as once turned a quarter: 1000 rows tall.
         self.label_words = list(label_words)
 
@@ -60,8 +62,10 @@ class _Engine:
                 return _Out()
             text, score = self.line_reads.pop(0)
             return _Out([text], [score]) if text else _Out()
-        if image.shape[0] < 300:  # a crop of one cell: the page's words are not in it
-            return _Out()
+        if image.shape[0] < 300:  # a crop of one cell or line: the page's words are not in it
+            return _Out([w[0] for w in self.crop_words], [w[1] for w in self.crop_words],
+                        [np.array([[w[2], w[3]], [w[4], w[3]], [w[4], w[5]], [w[2], w[5]]])
+                         for w in self.crop_words])
         words = self.label_words if image.shape[0] == 1000 else self.words
         boxes = [np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]]) for *_, x1, y1, x2, y2 in words]
         return _Out([w[0] for w in words], [w[1] for w in words], boxes)
@@ -170,6 +174,53 @@ def test_text_in_a_picture_with_no_table_comes_back_as_lines():
     words = [("OMI SO2 VCD (DU)", 0.99, 100, 500, 400, 520), ("0.00 0.15 0.30", 0.97, 100, 530, 400, 550)]
     reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
     assert reading.lines == ["OMI SO2 VCD (DU)", "0.00 0.15 0.30"]
+
+
+def test_the_digits_on_a_charts_axis_are_kept_but_other_stray_marks_are_not():
+    """The ticks 0, 5, 10 say what a chart's scale is; a lone "ab" is noise."""
+    words = [("Emissions million tonnes", 0.99, 100, 500, 400, 520), ("7", 0.97, 100, 530, 120, 550),
+             ("10", 0.97, 100, 560, 130, 580), ("ab", 0.97, 100, 590, 130, 610)]
+    reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
+    assert reading.lines == ["Emissions million tonnes", "7", "10"]
+
+
+def test_one_confident_line_of_real_words_is_kept_as_a_sign_or_a_caption():
+    words = [("FGD CONTROL ROOM & SWITCHGEAR", 0.97, 100, 500, 500, 520)]
+    reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
+    assert reading.lines == ["FGD CONTROL ROOM & SWITCHGEAR"]
+
+
+def test_a_single_short_or_unsure_line_is_a_photograph_with_noise_on_it():
+    for words in ([("FGD", 0.97, 100, 500, 160, 520)],
+                  [("Some doubtful sentence here", 0.7, 100, 500, 500, 520)]):
+        assert TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image()).lines == []
+
+
+def test_a_half_read_line_is_read_again_from_its_own_crop():
+    """A caption came back from the whole picture as noise at 0.58 and from its own crop as the full
+    sentence at 0.99."""
+    words = [("Months", 0.99, 100, 400, 200, 420), ("Fil ir n nn s n :n Tnpp", 0.58, 100, 500, 600, 520)]
+    crop = [("Fig. J11: Time series of monthly average emission", 0.99, 10, 10, 500, 30)]
+    reading = TableImageReader(engine=_Engine(words, crop_words=crop),
+                               grid_finder=lambda _i: []).read(_image())
+    assert reading.lines == ["Months", "Fig. J11: Time series of monthly average emission"]
+
+
+def test_a_line_that_stays_unreadable_is_dropped_not_kept_as_it_was():
+    words = [("Months", 0.99, 100, 400, 200, 420), ("Fil ir n nn s n :n Tnpp", 0.58, 100, 500, 600, 520),
+             ("Years", 0.99, 100, 440, 200, 460)]
+    reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
+    assert reading.lines == ["Months", "Years"]
+
+
+def test_a_sideways_label_is_not_read_again():
+    """A crop of a tall narrow label reads no better enlarged, and a chart has dozens of them."""
+    words = [("Months", 0.99, 100, 400, 200, 420), ("Jun", 0.55, 300, 300, 320, 380),
+             ("Aug", 0.55, 340, 300, 360, 380)]
+    engine = _Engine(words, crop_words=[("Jun", 0.99, 1, 1, 30, 20)])
+    reading = TableImageReader(engine=engine, grid_finder=lambda _i: []).read(_image())
+    assert reading.lines == []  # one confident short line: "Months" is too short to stand alone
+    assert engine.detector_calls == [True], "no crop was read for the sideways labels"
 
 
 def test_a_guessed_word_outside_a_table_is_dropped():

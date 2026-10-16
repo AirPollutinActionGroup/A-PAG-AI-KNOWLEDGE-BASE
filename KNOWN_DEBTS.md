@@ -990,6 +990,18 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   those overrides**, so the Dockerfile removes every OpenCV wheel and reinstalls the one, then
   asserts `cv2.ximgproc.niBlackThreshold` exists. Without that step three wheels overwrite each
   other in install order.
+- **Pictures that are not tables** (charts, flow diagrams, maps, photographs) give their printed
+  words and nothing else. Measured on seven such pictures with every printed word written down
+  (`figure_score.py`, in the session notes): **97.8% of the printed words came back (221 of 226)**
+  once three things found on those pictures were fixed -- single-digit axis ticks were being
+  dropped as noise (recall 82.7% before), a caption the whole-picture pass half-read is now read
+  again from its own crop (0.58 -> 0.99), and one confident line (a sign on a photograph) is kept
+  instead of being discarded for not having a second line. Words returned that are not printed:
+  a handful ("unf"; a subscript read as "SO" for "SO2"; "FGO" for "FGD" on a sign), each carrying
+  the OCR label. **What a picture shows is not read**: the curve of a line chart, the heights of
+  96 bars, the arrows between the boxes of a flow diagram drawn as an image. An OCR engine
+  returns the printed words, and 99% of *those* is not 99% of what the picture says. Charts and
+  diagrams drawn in the file itself are read exactly instead (#48).
 - **Switches**: `PICTURES_ENABLED=false`, or `OCR_ENABLED=false`, or img2table not installed:
   pictures are not read and a document extracts exactly as before, with one WARNING saying why.
 
