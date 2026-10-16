@@ -880,7 +880,7 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   (document_id) WHERE a.event_type = 'DOCUMENT_DELETED' AND d.deleted_at IS NULL;`
 
 ### 44. ✅ What two reviews of real documents found missing or misfiled (Closed)
-- **Status**: Closed, except pictures of tables (below). Found by external reviews of the Ministry
+- **Status**: Closed, except pictures of tables (#46). Found by external reviews of the Ministry
   of Power memo of 20 Nov 2024 (a scan) and "TPPs Delhi NCR.pptx", each checked against the file
   and against fresh OCR runs before anything was changed.
 - **Fixed, with what was measured:**
@@ -913,6 +913,82 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   affected document and compares it with what is stored. 0 of 21 flipped language or quality
   verdict -- the risk being a spreadsheet whose cleaner numbers tip it into a wrong non-English
   detection, which would take it out of meaning-based search.
-- **Still open: pictures of tables.** Slides 9, 15 and 20 of the deck are screenshots of tables
-  (the "1209 mg/Nm3" figure). Reading text and tables out of pictures is separate work from
-  parsing.
+- **Pictures of tables** (slides 9, 15 and 20 of the deck, the "1209 mg/Nm3" figure) are separate
+  work from parsing, and are #46.
+
+### 46. Tables that are pictures: read with img2table and the OCR already here, not Docling
+- **Status**: Built, and **measured on a small sample** -- 8 tables, 242 cells, transcribed by eye
+  by the person who wrote the reader. Treat the figures below as what it did on those pictures, not
+  as a guarantee about the corpus.
+- **Context**: Slides 9, 15 and 20 of "TPPs Delhi NCR" are screenshots of tables, so "average max
+  SOx 1209 mg/Nm3" was not findable. So are the tables of the Secretary Power presentation, and a
+  dozen pictures across the Word files. A plain OCR engine returns lines with no grid, so a figure
+  loses its row and column.
+- **Docling was built first and then replaced.** Read against the same eight tables:
+
+  | | cells right | figures right | headers right | time per table | cost |
+  |---|---|---|---|---|---|
+  | Docling 2.131 | 78.5% | 75.3% | 84% | 3-14s | PyTorch, 730MB of models, image 2.5 -> 6.2GB |
+  | img2table + rapidocr | **98.8%** | **100%** | **100%** | **1.7-4s** | ~100MB, no PyTorch |
+
+  Docling's failures were *structural*, which is the kind a number in the wrong column makes worse
+  than a missing one: it moved the "Category" column to the end of each row and fused header cells,
+  so slide 15 scored 0 of 15. It also read a "99.0" as "0.66" on one table; img2table's mistake on
+  the same table was two blanks on yellow cells (since fixed). On the "Table 2" picture it found 8
+  rows by 1 column where there are 7 by 5.
+- **How it reads** (`extraction/picture_tables.py`, found with `picture_source.py`):
+  img2table finds the ruled grid with OpenCV (no model; 0.04s) and the OCR reads the words, each
+  placed in the cell that holds it. A merged block is written into every position it covers;
+  a header drawn over two rows becomes one row of full column names (`grid.py`, shared with the
+  PowerPoint extractor). The title above the table and the notes below come back too.
+- **Each safeguard is from a failure measured on the real pictures**: an empty cell with ink in it
+  is read again alone (yellow-highlighted "239.0" came back blank); any word scored under 0.9 is
+  read a second time from its own crop (the same pixels read "164" or "1964" depending on how the
+  picture was resized); sideways month headers are read both ways round, then **rebuilt from the
+  months that did read** (they run in sequence; "APpi-19", "l--19" become April-19, Jul-19), and
+  only when the readable ones agree, so a quarterly header is left alone; a frame round four map
+  panels is not a table (at least six cells, half of them filled).
+- **Marked as what it is.** Every table opens with a caption line "(table read from a picture by
+  OCR; check against the original before citing)", which the chunker keeps above the header in
+  every row group, and every figure's label says "text read from a picture by OCR". OCR dropped
+  word boundaries and misread superscripts here ("31st" became "31a"), so a figure in a submission
+  should be checked.
+- **Vector pictures.** Office writes an EMF when a table is pasted from Excel -- all 13 pictures of
+  the Secretary Power deck, labelled `.wmf` but with an EMF header. They are drawn with `emf2svg`
+  and `rsvg-convert` (29MB with fonts, installed in the image) rather than LibreOffice (about
+  450MB, and its PNG export prints the picture onto an A4 page, leaving a table too small to
+  read). The metafile asks for Calibri; without Carlito installed the renderer falls back to a wide
+  monospaced face and the text runs over its cells. **The converter also draws sideways text too
+  low**, so a table's month labels landed on its first row of figures ("5.9" read as "5.69", and
+  the ruled line under the header was cut, so header and first row were one cell). The SVG is
+  therefore split before it is drawn (`split_rotated_labels`): the table without its sideways
+  text, and that text alone, which is read turned a quarter and given to the columns it stands
+  over by position. Measured on the three vector tables with an answer key: 98.6% of cells, 100%
+  of figures (119/119), 1.4-4.7s a picture, in the Linux image. `split_fused_header` stays as a
+  net for a picture that still arrives with its labels fused to its first row: it keeps the labels
+  and drops that row's figures, because a figure wrong by a digit is worse than a missing one.
+- **What it does not do, and what is still wrong:**
+  - **Tables with no ruling lines** (only a top and bottom rule) are not read as tables.
+    img2table's borderless mode split wrapped lines into rows and merged columns; their text comes
+    back as plain lines instead.
+  - **Row labels in a first column** are the commonest remaining misread ("NLCIL/TPS-II" read as
+    "NLAL/TPSII"; a bold "CO" as "8"). The figures are not.
+  - **Charts and maps are not understood.** A chart saved as a picture yields its axis labels and
+    title, not its values; a map yields its place names and legend. A description of what a map
+    shows needs a vision model, which nothing here uses because nothing may leave the deployment.
+  - **English only**, like the embedding model.
+  - **Cost**: about 2-4s a picture (1.8s at 750px, up to 6s for a 24-row table), capped at 40
+    pictures a document (`PICTURE_MAX_PER_DOCUMENT`); a deck of 15 pictures took 10.6s, and the
+    Secretary Power deck's 13 vector pictures 38s in the Linux image.
+  - **Some cells come back blank rather than wrong**: a cell the OCR cannot read at all (pale text
+    on a tinted cell on the Secretary deck's slide 15, a merged "Not required at present" cell on
+    its slide 20) is left empty. That is the intended failure -- an empty cell cannot mislead --
+    but it means a row can be incomplete.
+- **Dependencies**: `img2table` needs OpenCV 4's contrib build (`cv2.ximgproc`), which OpenCV 5
+  dropped, while rapidocr names `opencv-python`. `pyproject.toml` pins
+  `opencv-contrib-python-headless==4.11.0.86` and overrides the other two for `uv`; **pip ignores
+  those overrides**, so the Dockerfile removes every OpenCV wheel and reinstalls the one, then
+  asserts `cv2.ximgproc.niBlackThreshold` exists. Without that step three wheels overwrite each
+  other in install order.
+- **Switches**: `PICTURES_ENABLED=false`, or `OCR_ENABLED=false`, or img2table not installed:
+  pictures are not read and a document extracts exactly as before, with one WARNING saying why.

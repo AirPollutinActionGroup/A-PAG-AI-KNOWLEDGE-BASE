@@ -62,6 +62,22 @@ class ExtractedTable(BaseModel):
         return len(self.rows)
 
 
+class ExtractedFigure(BaseModel):
+    """The words and numbers read out of a picture: axis labels, a map's legend, a diagram's
+    boxes. A picture of a *table* is not a figure -- its grid is an `ExtractedTable`.
+
+    Carried as its own record, with the section it sits in, rather than appended to the page's
+    text. Appended text lands at the end of its unit, and in a Word file that is the end of the
+    document, so a figure from the introduction would be cited under the last heading: a wrong
+    citation, which is worse than an absent one (#19).
+    """
+
+    unit_index: int
+    text: str
+    caption: str | None = None
+    heading: str | None = None
+
+
 class Heading(BaseModel):
     """A heading the *format itself* identified (a Word style, a slide title, a sheet name), or
     for PDF, one inferred from relative font size — see `PdfTextExtractor`."""
@@ -83,6 +99,7 @@ class ExtractionResult(BaseModel):
     ocr_pages: list[int] = Field(default_factory=list)
     ocr_skipped_pages: list[int] = Field(default_factory=list)
     ocr_unreadable_lines: dict[int, int] = Field(default_factory=dict)
+    figures: list[ExtractedFigure] = Field(default_factory=list)
 
     @computed_field
     @property
@@ -137,6 +154,7 @@ class ExtractedContent(BaseModel):
     # the text, and recorded here so the gap is findable: the Ministry of Power memo lost a line
     # stating that the extension covered categories A, B and C, and nothing said so.
     ocr_unreadable_lines: dict[int, int] = Field(default_factory=dict)
+    figures: list[ExtractedFigure] = Field(default_factory=list)
 
 
 class ExtractionError(Exception):

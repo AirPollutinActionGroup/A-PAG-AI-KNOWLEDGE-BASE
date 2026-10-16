@@ -218,6 +218,20 @@ word inside a passage that will later be cited is worse than a gap -- but the ga
 read as noise, at 300 they read at 0.99 (`KNOWN_DEBTS.md` #44). A scan has no font sizes, so its
 headings come from "Subject:" lines instead.
 
+**Pictures in Word and PowerPoint files are read, and marked as read from pixels**
+(`extraction/pictures.py`, `picture_source.py`, `picture_tables.py`, `KNOWN_DEBTS.md` #46). A table
+saved as a screenshot is pixels. img2table finds its ruled grid with OpenCV and the OCR that reads
+scanned pages reads the words, each placed in the cell that holds it, so "1209" keeps its row and
+column; what comes out is an `ExtractedTable` (or, for other text, an `ExtractedFigure`) filed under
+the slide or Word heading the picture sat under. It was measured against Docling on eight tables
+read by eye -- 98.8% of cells and 100% of figures against 78.5% and 75.3%, at 1.7-4s a table against
+3-14s, without PyTorch -- and replaced it. Every such table opens with a caption line saying it was
+read by OCR and should be checked before citing, and every figure's label says so too. It does not
+read tables with no ruling lines, charts' values, or what a map shows, and it is for PowerPoint and
+Word only: a PDF page's pictures are already seen by the PDF extractor and OCR. An EMF (what Office
+writes for a table pasted from Excel) is drawn with emf2svg and rsvg-convert first, its sideways
+labels apart from the rest, because the converter draws them over the first row of figures.
+
 ### Chunking: structure-aware, and why chunks live in Postgres
 
 `src/modules/document_pipeline/chunking/chunker.py` cuts a document at its own headings rather

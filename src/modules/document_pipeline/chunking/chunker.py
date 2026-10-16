@@ -20,7 +20,11 @@ import re
 
 from src.modules.document_pipeline.chunking.models import SECTION_SCALE, Chunk
 from src.modules.document_pipeline.chunking.sizing import CharacterBudget, SizeBudget
-from src.modules.document_pipeline.extraction.models import ExtractedTable, Heading
+from src.modules.document_pipeline.extraction.models import (
+    ExtractedFigure,
+    ExtractedTable,
+    Heading,
+)
 from src.modules.document_pipeline.formats import PPTX_MIME, XLSX_MIME
 from src.modules.document_pipeline.normalization.models import (
     NormalizationResult,
@@ -45,6 +49,9 @@ class Chunker:
     def chunk(self, result: NormalizationResult) -> list[Chunk]:
         chunks: list[Chunk] = []
         tables_by_unit = self._tables_by_unit(result.tables)
+        figures_by_unit: dict[int, list[ExtractedFigure]] = {}
+        for figure in result.figures:
+            figures_by_unit.setdefault(figure.unit_index, []).append(figure)
         headings_by_unit = self._headings_by_unit(result.headings)
 
         # Carried across units in a PDF or Word file: a section started by a heading on page 3
@@ -68,10 +75,31 @@ class Chunker:
                     )
                 )
 
+        def add_figure(figure: ExtractedFigure, unit_index: int, heading: str | None) -> None:
+            # Said in the passage itself, where the model and the reader both see it: text read
+            # from pixels can be wrong in ways typed text cannot (sideways labels, run-together
+            # words), and a figure in a submission should be checked against the original.
+            label = "[Figure] (text read from a picture by OCR)"
+            if figure.caption:
+                label = f"{label} {figure.caption}"
+            body = f"{label}\n{figure.text}" if figure.text else label
+            for piece in self._split_to_size(body):
+                chunks.append(
+                    Chunk(
+                        index=len(chunks),
+                        text=piece,
+                        page_number=unit_index,
+                        section_heading=heading,
+                        is_table=False,
+                        scale=SECTION_SCALE,
+                    )
+                )
+
         for unit in result.units:
             if units_stand_alone:
                 current_heading = None
             pending = list(tables_by_unit.get(unit.index, []))
+            pending_figures = list(figures_by_unit.get(unit.index, []))
 
             # A worksheet's text is its table written out again; the table is chunked below.
             sections = (
@@ -98,6 +126,11 @@ class Chunker:
                     for table in [t for t in pending if t.heading == heading]:
                         add_table(table, unit.index, heading)
                         pending.remove(table)
+                    # Text read from a picture follows the section the picture sits in, the
+                    # same way.
+                    for figure in [f for f in pending_figures if f.heading == heading]:
+                        add_figure(figure, unit.index, heading)
+                        pending_figures.remove(figure)
 
             # Tables whose section was not found in the text, or that do not know their section.
             # For the second kind the position *within* a unit is unknown, so where a unit
@@ -108,6 +141,8 @@ class Chunker:
             fallback = None if len(unit_headings) > 1 else current_heading
             for table in pending:
                 add_table(table, unit.index, table.heading or fallback)
+            for figure in pending_figures:
+                add_figure(figure, unit.index, figure.heading or fallback)
 
         return chunks
 

@@ -11,11 +11,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # shared object file" that names nothing to do with OCR.
     libgl1 \
     libglib2.0-0 \
+    # Drawing the vector pictures (EMF) that Office writes when a table is pasted from Excel, so
+    # their numbers can be read (`extraction/picture_source.py`): emf2svg turns the metafile into
+    # SVG and rsvg-convert draws it. 29MB with the fonts, in place of LibreOffice at about 450MB
+    # (whose PNG export also prints the picture onto an A4 page, leaving a table too small to
+    # read). Carlito is the metric-compatible Calibri, which is what such a table is set in; with
+    # no Calibri stand-in the renderer falls back to a wide monospaced face and the text runs
+    # over its cells.
+    emf2svg \
+    librsvg2-bin \
+    fonts-liberation \
+    fonts-crosextra-carlito \
     && rm -rf /var/lib/apt/lists/*
 
 # Install python dependencies
 COPY pyproject.toml .
 RUN pip install --no-cache-dir .
+
+# pip does not read the `[tool.uv]` overrides in pyproject.toml, so it has installed three OpenCV
+# wheels: rapidocr asks for opencv-python, img2table for opencv-contrib-python, and we ask for the
+# headless contrib build. All three provide the same `cv2` package, so they overwrite each other
+# in install order. img2table needs OpenCV 4's `cv2.ximgproc` (OpenCV 5 dropped it) and nothing
+# here has a display, so exactly one is wanted: remove them all, then put that one back. Removing
+# first and reinstalling after is deliberate -- uninstalling one wheel deletes files the others
+# share.
+RUN pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless \
+        opencv-contrib-python-headless \
+    && pip install --no-cache-dir --no-deps "opencv-contrib-python-headless==4.11.0.86" \
+    && python -c "import cv2; assert hasattr(cv2.ximgproc, 'niBlackThreshold'), cv2.__version__"
 
 # Pre-download the embedding model into the image.
 #

@@ -21,6 +21,7 @@ from collections import Counter
 from typing import Any, NamedTuple
 
 from src.core.config import settings
+from src.modules.document_pipeline.extraction.grid import flatten_header
 from src.modules.document_pipeline.extraction.models import (
     ExtractedContent,
     ExtractedTable,
@@ -743,27 +744,7 @@ def _pptx_table_rows(table, legend: dict[str, str], labels: dict | None = None) 
             row.append(text)
         rows.append(row)
 
-    # Where the column header starts and how many rows it takes.
-    start = 0
-    while start < n_rows and n_cols > 1 and (b := spans[start][0]) and b[3] == n_cols:
-        start = b[0] + b[2]
-    depth = 1
-    for c in range(n_cols):
-        block = spans[start][c] if start < n_rows else None
-        if block and block[0] == start:
-            depth = max(depth, block[2])
-            if 1 < block[3] < n_cols:
-                depth = max(depth, 2)
-    if 1 < depth <= 3 and start + depth < n_rows:
-        header = []
-        for c in range(n_cols):
-            parts: list[str] = []
-            for r in range(start, start + depth):
-                if rows[r][c] and (not parts or parts[-1] != rows[r][c]):
-                    parts.append(rows[r][c])
-            header.append(" ".join(parts))
-        rows = [*rows[:start], header, *rows[start + depth:]]
-    return rows
+    return flatten_header(rows, spans)
 
 
 # Above this, a workbook is read in openpyxl's streaming mode, which cannot see merged ranges.

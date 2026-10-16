@@ -262,6 +262,18 @@ class Settings(BaseSettings):
     # minutes. Pages past the cap are recorded as unread rather than quietly dropped.
     OCR_MAX_PAGES: int = 500
 
+    # Pictures inside Word and PowerPoint files: a slide that is a screenshot of a table, a chart
+    # saved as an image (`extraction/pictures.py`). Read with the OCR above plus img2table for the
+    # grid, so it needs `OCR_ENABLED` too. Off, a document extracts exactly as it did before.
+    PICTURES_ENABLED: bool = True
+    # A deck of photographs is otherwise unbounded, and each picture is seconds of CPU.
+    PICTURE_MAX_PER_DOCUMENT: int = 40
+    # Smaller than this on either side is an icon, a bullet or a rule, not a figure.
+    PICTURE_MIN_EDGE_PX: int = 80
+    # Inside a ruled table, where the cell is known and a figure is the point, a lower floor than
+    # `OCR_MIN_CONFIDENCE`, which is for loose text where a guessed word is worse than a gap.
+    PICTURE_TABLE_MIN_CONFIDENCE: float = 0.4
+
     # Reranking — read the candidates properly, then keep the best few.
     #
     # Hybrid retrieval is a recall device: both arms score a passage without ever looking at the

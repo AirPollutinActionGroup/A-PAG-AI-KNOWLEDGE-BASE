@@ -367,6 +367,8 @@ services:
       # the VM's core count, not this machine's — 8 threads on a 2-vCPU box is slower than 2.
       OCR_ENABLED: ${OCR_ENABLED:-true}
       OCR_THREADS: ${OCR_THREADS:-0}
+      # Pictures in Word and PowerPoint files (tables read with img2table and the OCR above).
+      PICTURES_ENABLED: ${PICTURES_ENABLED:-true}
       ENVIRONMENT: staging
       WORKER_POLL_INTERVAL_SECONDS: "1.0"
       SCAN_WORKER_LEASE_SECONDS: "60"
