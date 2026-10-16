@@ -18,7 +18,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from collections import Counter
-from typing import Any
+from typing import Any, NamedTuple
 
 from src.core.config import settings
 from src.modules.document_pipeline.extraction.models import (
@@ -449,16 +449,18 @@ class PptxTextExtractor(TextExtractor):
                 texts = [title_shape.text_frame.text.strip()] if title_shape is not None else []
                 slide_tables: list[ExtractedTable] = []
                 title_element = title_shape._element if title_shape is not None else None
-                for shape in _walk_shapes(slide.shapes):
+                placed = list(_placed_shapes(slide.shapes))
+                legend = _colour_legend([p.shape for p in placed if _is_table(p.shape)])
+                labels, consumed = _overlay_labels(placed)
+                body: list[tuple[int | None, str]] = []
+                for item in placed:
+                    shape = item.shape
                     # Compared by XML element: python-pptx builds a new wrapper object on every
                     # iteration, so `shape is title_shape` is never true.
-                    if shape._element is title_element:
+                    if shape._element is title_element or shape._element in consumed:
                         continue
-                    if getattr(shape, "has_table", False):
-                        rows = [
-                            [_clean_cell(cell.text) for cell in row.cells]
-                            for row in shape.table.rows
-                        ]
+                    if _is_table(shape):
+                        rows = _pptx_table_rows(shape.table, legend, labels.get(shape._element))
                         if _table_has_content(rows):
                             slide_tables.append(ExtractedTable(
                                 unit_index=index, rows=rows, heading=title or None,
@@ -466,7 +468,8 @@ class PptxTextExtractor(TextExtractor):
                     elif getattr(shape, "has_text_frame", False):
                         text = shape.text_frame.text.strip()
                         if text:
-                            texts.append(text)
+                            body.append((item.group, text))
+                texts.extend(_timeline_order(body))
 
                 notes = self._notes(slide)
                 if notes:
@@ -529,15 +532,238 @@ class PptxTextExtractor(TextExtractor):
         return frame.text.strip() if frame is not None else ""
 
 
-def _walk_shapes(shapes):
+class _Placed(NamedTuple):
+    """A leaf shape, where it really sits on the slide, and which group it was drawn in."""
+
+    shape: Any
+    # Slide coordinates in EMU: left, top, width, height. A shape inside a group carries
+    # coordinates in the group's own space, so they are mapped out through every enclosing group.
+    frame: tuple[float, float, float, float]
+    group: int | None
+
+
+def _placed_shapes(shapes, chain: tuple = (), counter: list[int] | None = None, group=None):
     """Every shape on a slide, descending into groups, in the slide's own order."""
     from pptx.enum.shapes import MSO_SHAPE_TYPE
 
+    counter = counter if counter is not None else [0]
     for shape in shapes:
         if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
-            yield from _walk_shapes(shape.shapes)
+            counter[0] += 1
+            xfrm = shape._element.grpSpPr.xfrm
+            yield from _placed_shapes(
+                shape.shapes, (*chain, xfrm), counter, group=counter[0],
+            )
+            continue
+        left, top = shape.left or 0, shape.top or 0
+        width, height = shape.width or 0, shape.height or 0
+        for xfrm in reversed(chain):  # innermost group first
+            if xfrm is None or not xfrm.chExt.cx or not xfrm.chExt.cy:
+                continue
+            sx, sy = xfrm.ext.cx / xfrm.chExt.cx, xfrm.ext.cy / xfrm.chExt.cy
+            left = xfrm.off.x + (left - xfrm.chOff.x) * sx
+            top = xfrm.off.y + (top - xfrm.chOff.y) * sy
+            width, height = width * sx, height * sy
+        yield _Placed(shape, (left, top, width, height), group)
+
+
+def _is_table(shape) -> bool:
+    return bool(getattr(shape, "has_table", False))
+
+
+# A year on its own is a timeline's label, and the text drawn beside it is what happened that year.
+_YEAR_LABEL = re.compile(r"^(19|20)\d\d$")
+
+
+def _timeline_order(items: list[tuple[int | None, str]]) -> list[str]:
+    """Text boxes in reading order, with each timeline year put in front of its description.
+
+    A timeline is drawn as one small group per year, holding a label and a text box in whatever
+    order the author created them. Slide 10 of "TPPs Delhi NCR" came out as "2015, <2015>, <2017>,
+    2017, 2021, <2021>", where the year after its own description reads as the label of the next.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(items):
+        j = i + 1
+        while items[i][0] is not None and j < len(items) and items[j][0] == items[i][0]:
+            j += 1
+        block = [text for _, text in items[i:j]]
+        years = [t for t in block if _YEAR_LABEL.match(t)]
+        rest = [t for t in block if not _YEAR_LABEL.match(t)]
+        if len(years) == 1 and rest:
+            out.append(f"{years[0]}: {rest[0]}")
+            out.extend(rest[1:])
         else:
-            yield shape
+            out.extend(block)
+        i = j
+    return out
+
+
+def _cell_fill(cell) -> str | None:
+    """A cell's solid RGB fill as "RRGGBB", or None. Theme colours are left out on purpose: the
+    colour a deck's key refers to is one the author picked, not one the theme supplied."""
+    from pptx.enum.dml import MSO_COLOR_TYPE, MSO_FILL
+
+    try:
+        fill = cell.fill
+        if fill.type != MSO_FILL.SOLID or fill.fore_color.type != MSO_COLOR_TYPE.RGB:
+            return None
+        return str(fill.fore_color.rgb)
+    except Exception:
+        return None
+
+
+def _colour_legend(tables) -> dict[str, str]:
+    """The slide's colour key, as {fill: meaning}.
+
+    "Data from only 5/11 TPPs is listed online" colours a grid green, orange and red and says what
+    they mean in a small second table. The coloured cells hold no text, so the slide's whole answer
+    -- which plant reports which pollutant -- was missing from the index. A key is a small table
+    whose labelled cells each carry their own colour, every colour with one label.
+    """
+    for shape in tables:
+        table = shape.table
+        if len(table.rows) > 8 or len(table.columns) > 3:
+            continue
+        found: dict[str, set[str]] = {}
+        for row in table.rows:
+            for cell in row.cells:
+                text, fill = _clean_cell(cell.text), _cell_fill(cell)
+                if text and fill:
+                    found.setdefault(fill, set()).add(text)
+        labels = [next(iter(v)) for v in found.values() if len(v) == 1]
+        if len(found) >= 2 and len(labels) == len(found) and len(set(labels)) == len(labels):
+            return {fill: next(iter(v)) for fill, v in found.items()}
+    return {}
+
+
+def _grid_spans(table) -> list[list[tuple[int, int, int, int] | None]]:
+    """For every cell, the (row, col, height, width) of the merged block it belongs to."""
+    n_rows, n_cols = len(table.rows), len(table.columns)
+    spans: list[list[tuple[int, int, int, int] | None]] = [[None] * n_cols for _ in range(n_rows)]
+    for r in range(n_rows):
+        for c in range(n_cols):
+            cell = table.cell(r, c)
+            if cell.is_merge_origin:
+                height, width = cell.span_height, cell.span_width
+                for rr in range(r, min(r + height, n_rows)):
+                    for cc in range(c, min(c + width, n_cols)):
+                        spans[rr][cc] = (r, c, height, width)
+    return spans
+
+
+def _overlay_labels(placed: list[_Placed]) -> tuple[dict, set]:
+    """Text boxes laid over a table's merged column, matched to the rows they name.
+
+    Slide 7 draws "State", "Centre" and "Private" as rotated text boxes on top of three empty
+    merged cells, so the table said nothing about who owns which plant and the three words sat
+    loose in the slide's text. Row heights in the file are minimums, so position alone cannot say
+    which block a label is over; the match is by order, and only when it is unambiguous: as many
+    short labels over the column as there are empty merged blocks in it.
+
+    Returns {table element: {(row, col): label}} and the elements of the labels used.
+    """
+    tables = [p for p in placed if _is_table(p.shape)]
+    boxes = [
+        p for p in placed
+        if not _is_table(p.shape) and getattr(p.shape, "has_text_frame", False)
+        and 0 < len(p.shape.text_frame.text.strip()) <= 40
+        and len(p.shape.text_frame.text.split()) <= 3
+    ]
+    labels: dict = {}
+    consumed: set = set()
+    for item in tables:
+        table = item.shape.table
+        left, top, _, _ = item.frame
+        spans = _grid_spans(table)
+        x = left
+        for c, column in enumerate(table.columns):
+            right = x + column.width
+            slots = [
+                (r, c) for r in range(len(table.rows))
+                if (b := spans[r][c]) and b[:2] == (r, c) and b[2] >= 2 and b[3] == 1
+                and not _clean_cell(table.cell(r, c).text)
+            ]
+            x = right
+            if not slots:
+                continue
+            over = sorted(
+                (p for p in boxes
+                 if p.shape._element not in consumed
+                 and right - column.width - 91440 <= p.frame[0] + p.frame[2] / 2 <= right + 91440
+                 and top - 91440 <= p.frame[1] + p.frame[3] / 2
+                 <= top + 2 * sum(row.height for row in table.rows)),
+                key=lambda p: p.frame[1] + p.frame[3] / 2,
+            )
+            if len(over) != len(slots):
+                continue
+            for slot, p in zip(slots, over, strict=True):
+                labels.setdefault(item.shape._element, {})[slot] = _clean_cell(p.shape.text_frame.text)
+                consumed.add(p.shape._element)
+    return labels, consumed
+
+
+def _pptx_table_rows(table, legend: dict[str, str], labels: dict | None = None) -> list[list[str]]:
+    """A slide table as a full grid of cell text.
+
+    python-pptx hands back the text of a merged block in its top-left cell and an empty string in
+    the rest, so "Total | (blank) | 35" lost what the row is a total *of*, and an "Unlisted" spread
+    over four columns was filled in one. A merged block's text is written into every cell it
+    covers, so each cell can be read on its own, except a title spanning the table's whole width,
+    which stays a single caption cell for the chunker to recognise.
+
+    A header drawn over two rows -- a group name above its columns, or a label spanning both --
+    becomes one row: "SO2 (mg/NM3)" over ">= 500 MW" is the column "SO2 (mg/NM3) >= 500 MW". Left
+    as two rows, the column over "200" had no name.
+
+    A cell with no text but a colour from the slide's key is read as what the key says, in
+    brackets so it is plain that the colour said it.
+    """
+    n_rows, n_cols = len(table.rows), len(table.columns)
+    spans = _grid_spans(table)
+    own = [[_clean_cell(table.cell(r, c).text) for c in range(n_cols)] for r in range(n_rows)]
+    for (r, c), label in (labels or {}).items():
+        own[r][c] = label
+
+    rows: list[list[str]] = []
+    for r in range(n_rows):
+        row = []
+        for c in range(n_cols):
+            block = spans[r][c]
+            if block is None:
+                text = own[r][c]
+            else:
+                top, left, _, width = block
+                text = own[top][left]
+                if n_cols > 1 and width == n_cols and (r, c) != (top, left):
+                    text = ""
+            if not text and (fill := _cell_fill(table.cell(r, c))) in legend:
+                text = f"({legend[fill]})"
+            row.append(text)
+        rows.append(row)
+
+    # Where the column header starts and how many rows it takes.
+    start = 0
+    while start < n_rows and n_cols > 1 and (b := spans[start][0]) and b[3] == n_cols:
+        start = b[0] + b[2]
+    depth = 1
+    for c in range(n_cols):
+        block = spans[start][c] if start < n_rows else None
+        if block and block[0] == start:
+            depth = max(depth, block[2])
+            if 1 < block[3] < n_cols:
+                depth = max(depth, 2)
+    if 1 < depth <= 3 and start + depth < n_rows:
+        header = []
+        for c in range(n_cols):
+            parts: list[str] = []
+            for r in range(start, start + depth):
+                if rows[r][c] and (not parts or parts[-1] != rows[r][c]):
+                    parts.append(rows[r][c])
+            header.append(" ".join(parts))
+        rows = [*rows[:start], header, *rows[start + depth:]]
+    return rows
 
 
 # Above this, a workbook is read in openpyxl's streaming mode, which cannot see merged ranges.

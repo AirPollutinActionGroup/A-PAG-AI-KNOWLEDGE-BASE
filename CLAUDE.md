@@ -286,6 +286,17 @@ Tables carry `ExtractedTable.heading` where the format says which section they s
 emitted after that section. `compare_extraction.py` dry-runs any change here against the corpus
 and stops on a language or quality flip.
 
+**A slide table is read as a grid, not as python-pptx hands it back** (`_pptx_table_rows`). A
+merged block's text is written into every cell it covers (`Total | Total | 35`), except a title
+across the whole width, which stays one caption cell. A header drawn over two rows becomes one row
+of full column names (`SO2 (mg/NM3) >= 500 MW`). Two things a deck says without a word of text are
+read too: a **colour key** (an empty cell filled with a colour the slide's legend table explains
+becomes `(Pollutant data available)`, in brackets so it is plain the colour said it), and **labels
+laid over a merged column** (rotated "State / Centre / Private" boxes), matched by order and only
+when there are exactly as many labels as empty merged blocks. A decorative fill with no key, or a
+label count that does not match, is left alone rather than guessed. A timeline's year is put in
+front of its description, since a group's text boxes come out in the order they were created.
+
 retrieval endpoint cannot forget it and a model-family change edits one class, not every call site.
 `_is_bge()` deliberately excludes BGE-M3, which is not instruction-tuned the way v1.5 is.
 

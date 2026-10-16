@@ -241,6 +241,166 @@ def test_a_slide_table_carries_its_slides_title():
     assert lines == ["State-Owned TPPs", "Plant | Age", "Panipat | 1 : 27 yrs; 2 : 26 yrs"]
 
 
+def _table_deck(rows: int, cols: int, build, widths=None):
+    """One slide holding a rows x cols table, which `build(slide, table)` then fills in."""
+    def make(prs):
+        slide = _title_slide(prs, "Slide with a table")
+        table = slide.shapes.add_table(
+            rows, cols, Inches(1), Inches(2), Inches(6), Inches(rows * 0.4),
+        ).table
+        for c, width in enumerate(widths or []):
+            table.columns[c].width = Inches(width)
+        build(slide, table)
+    return _deck(make)
+
+
+def _fill(cell, hex_rgb: str):
+    from pptx.dml.color import RGBColor
+
+    cell.fill.solid()
+    cell.fill.fore_color.rgb = RGBColor.from_string(hex_rgb)
+
+
+def test_a_merged_cell_is_written_into_every_cell_it_covers():
+    """"Total | (blank) | 35" lost what the row totals, and "Unlisted" spread over four columns
+    sat in one of them. A title across the whole table stays one caption cell."""
+    def build(slide, table):
+        table.cell(0, 0).merge(table.cell(0, 2))
+        table.cell(0, 0).text = "Centre-Owned TPPs"
+        for c, value in enumerate(["Sector", "Units", "Installed"]):
+            table.cell(1, c).text = value
+        table.cell(2, 0).merge(table.cell(2, 1))
+        table.cell(2, 0).text = "Total"
+        table.cell(2, 2).text = "35"
+
+    [table] = PptxTextExtractor().extract(_table_deck(3, 3, build)).tables
+    assert table.rows == [
+        ["Centre-Owned TPPs", "", ""],
+        ["Sector", "Units", "Installed"],
+        ["Total", "Total", "35"],
+    ]
+
+
+def test_a_two_row_header_becomes_one_row_of_full_column_names():
+    """"SO2 (mg/NM3)" over "< 500 MW" and ">= 500 MW": the column holding 200 had no name."""
+    def build(slide, table):
+        table.cell(0, 0).text = "Parameter"
+        table.cell(0, 1).merge(table.cell(0, 2))
+        table.cell(0, 1).text = "SO2 (mg/NM3)"
+        for c, value in enumerate(["Size", "< 500 MW", ">= 500 MW"]):
+            table.cell(1, c).text = value
+        for r, row in enumerate([["Before 2003", "600", "200"], ["2004-16", "600", "200"]], 2):
+            for c, value in enumerate(row):
+                table.cell(r, c).text = value
+
+    [table] = PptxTextExtractor().extract(_table_deck(4, 3, build)).tables
+    assert table.rows[0] == ["Parameter Size", "SO2 (mg/NM3) < 500 MW", "SO2 (mg/NM3) >= 500 MW"]
+    assert len(table.rows) == 3
+
+
+def test_a_header_spanning_two_rows_is_not_repeated_in_its_own_name():
+    def build(slide, table):
+        table.cell(0, 0).merge(table.cell(1, 0))
+        table.cell(0, 0).text = "Owned by"
+        table.cell(0, 1).merge(table.cell(0, 2))
+        table.cell(0, 1).text = "Emission"
+        table.cell(1, 1).text = "SOx"
+        table.cell(1, 2).text = "NOx"
+        for c, value in enumerate(["State", "1193", "283"]):
+            table.cell(2, c).text = value
+
+    [table] = PptxTextExtractor().extract(_table_deck(3, 3, build)).tables
+    assert table.rows == [["Owned by", "Emission SOx", "Emission NOx"], ["State", "1193", "283"]]
+
+
+def test_an_empty_coloured_cell_is_read_as_the_slides_colour_key_says():
+    """Slide 7 says which plant reports which pollutant by colour alone, in cells with no text."""
+    def make(prs):
+        slide = _title_slide(prs, "Data from only 5/11 TPPs is listed online")
+        grid = slide.shapes.add_table(3, 2, Inches(1), Inches(2), Inches(4), Inches(1.2)).table
+        grid.cell(0, 0).text, grid.cell(0, 1).text = "Plant", "SOx"
+        grid.cell(1, 0).text, grid.cell(2, 0).text = "Panipat", "Hisar"
+        _fill(grid.cell(1, 1), "B6D7A8")
+        _fill(grid.cell(2, 1), "FF9900")
+        key = slide.shapes.add_table(2, 2, Inches(6), Inches(2), Inches(3), Inches(0.8)).table
+        key.cell(0, 0).text, key.cell(0, 1).text = "Legend", "Data available"
+        key.cell(1, 1).text = "Not reported"
+        _fill(key.cell(0, 1), "B6D7A8")
+        _fill(key.cell(1, 1), "FF9900")
+
+    tables = PptxTextExtractor().extract(_deck(make)).tables
+    assert tables[0].rows == [
+        ["Plant", "SOx"], ["Panipat", "(Data available)"], ["Hisar", "(Not reported)"],
+    ]
+
+
+def test_a_coloured_cell_with_no_key_on_the_slide_is_left_empty():
+    """Only a colour the slide explains means anything. A decorative fill must not become text."""
+    def build(slide, table):
+        table.cell(0, 0).text = "Plant"
+        table.cell(1, 0).text = "Panipat"
+        _fill(table.cell(1, 1), "B6D7A8")
+
+    [table] = PptxTextExtractor().extract(_table_deck(2, 2, build)).tables
+    assert table.rows[1] == ["Panipat", ""]
+
+
+def test_labels_drawn_over_a_merged_column_are_attached_to_its_rows():
+    """"State", "Centre" and "Private" were rotated text boxes lying on three empty merged cells."""
+    def build(slide, table):
+        table.cell(0, 0).text, table.cell(0, 1).text = "Owned by", "Plant"
+        table.cell(1, 0).merge(table.cell(3, 0))
+        table.cell(4, 0).merge(table.cell(5, 0))
+        for r, plant in enumerate(["Panipat", "Hisar", "Yamunanagar", "Jhajjar", "Dadri"], 1):
+            table.cell(r, 1).text = plant
+        group = slide.shapes.add_group_shape()
+        for top, label in [(2.6, "State"), (4.0, "Centre")]:
+            box = group.shapes.add_textbox(Inches(1.1), Inches(top), Inches(0.3), Inches(0.4))
+            box.text_frame.text = label
+
+    content = PptxTextExtractor().extract(
+        _table_deck(6, 2, build, widths=[1.5, 4.5])
+    )
+    [table] = content.tables
+    assert [row[0] for row in table.rows] == [
+        "Owned by", "State", "State", "State", "Centre", "Centre",
+    ]
+    # They are part of the table now, not loose words in the slide's text.
+    assert "State" not in content.units[0].text.split()
+
+
+def test_labels_are_not_guessed_when_they_do_not_match_the_merged_blocks():
+    def build(slide, table):
+        table.cell(1, 0).merge(table.cell(2, 0))
+        box = slide.shapes.add_textbox(Inches(1.1), Inches(2.6), Inches(0.3), Inches(0.4))
+        box.text_frame.text = "State"
+        box = slide.shapes.add_textbox(Inches(1.1), Inches(3.0), Inches(0.3), Inches(0.4))
+        box.text_frame.text = "Centre"
+
+    content = PptxTextExtractor().extract(_table_deck(3, 2, build, widths=[1.5, 4.5]))
+    assert content.tables == [] or all(row[0] == "" for row in content.tables[0].rows)
+    assert "State" in content.units[0].text
+
+
+def test_a_timeline_year_leads_its_own_description():
+    """Slide 10 read "2015, <2015>, <2017>, 2017, 2021": a year after its description is the
+    label of the next one."""
+    def make(prs):
+        slide = _title_slide(prs, "Deadline for FGD installation extended")
+        for first, second in [("Supreme Court granted 5 more years", "2017"),
+                              ("2021", "April notification, phased installation")]:
+            group = slide.shapes.add_group_shape()
+            for top, text in [(2.0, first), (3.0, second)]:
+                box = group.shapes.add_textbox(Inches(1), Inches(top), Inches(3), Inches(0.5))
+                box.text_frame.text = text
+
+    text = PptxTextExtractor().extract(_deck(make)).units[0].text
+    assert text.splitlines()[1:] == [
+        "2017: Supreme Court granted 5 more years",
+        "2021: April notification, phased installation",
+    ]
+
+
 # ==============================================================================
 # Word: reading order, merges, text boxes, footnotes
 # ==============================================================================
