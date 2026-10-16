@@ -153,8 +153,8 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Context**: Queue depth, job duration, lease renewals, and dead-letter counts are logged at INFO/DEBUG levels, but no Prometheus metrics endpoint is exposed yet.
 - **Trigger to address**: Prior to user-facing production release.
 
-### 7. Studio UI expects synchronous upload response
-- **Status**: Fast-follow UI task.
+### 7. ✅ Studio UI expects synchronous upload response (Removed, #47)
+- **Status**: Resolved by deleting the page (#47): it was not linked from anywhere and had no users.
 - **Context**: The testing Studio UI (now at `/studio`; `/` serves the knowledge base) was written for the synchronous pipeline and expects terminal `AWAITING_CLASSIFICATION` immediately from `POST /upload`. It needs to be updated to poll `GET /api/v1/documents/{id}/status` every 500ms until terminal state.
 - **Trigger to address**: Before internal user onboarding.
 
@@ -241,8 +241,8 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   content inside the XML parts — is unaffected and still open; these caps only bound the
   container's declared size, they don't inspect what's in it.
 
-### 12. Studio UI test presets are PDF-only
-- **Status**: Not addressed — noted while fixing unrelated format-validation bugs.
+### 12. ✅ Studio UI test presets are PDF-only (Removed, #47)
+- **Status**: Moot: the Studio page and the preset endpoint were removed (#47).
 - **Context**: `GET /documents/test-preset/{preset_name}` and the Studio UI's preset buttons only
   serve PDF fixtures (`tests/fixtures/pdfs/`). There's no one-click way to exercise DOCX/XLSX/PPTX
   validation (e.g. a macro-enabled or path-traversal fixture) from the UI the way PDF has.
@@ -992,3 +992,31 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   other in install order.
 - **Switches**: `PICTURES_ENABLED=false`, or `OCR_ENABLED=false`, or img2table not installed:
   pictures are not read and a document extracts exactly as before, with one WARNING saying why.
+
+### 47. Dead code removed (Closed)
+- **How it was found**: `vulture` over the application and every script, then every candidate
+  checked by counting references across source, tests, scripts and docs. Most of what it flags is
+  not dead -- route handlers, Alembic's `upgrade`/`downgrade`, ORM columns and fields read through
+  other names -- so nothing was removed on the tool's say-so.
+- **Removed**:
+  - **The Studio page** (`/studio`, 70KB) and **`GET /documents/test-preset/{name}`**, the endpoint
+    that served `tests/fixtures/pdfs/` to it. The page expected a synchronous upload response that
+    no longer exists (#7), was linked from nowhere, and its one endpoint handed fixtures named
+    `disguised_malware.pdf` out of the production app (#34). The fixtures stay: the tests generate
+    them.
+  - **Six settings nothing read** -- `ENVIRONMENT` and `POSTGRES_HOST/PORT/DB/USER/PASSWORD` -- and
+    the same variables passed to every application container in both compose files. The application
+    connects through `DATABASE_URL` alone, so changing `POSTGRES_HOST` silently did nothing.
+    `POSTGRES_PASSWORD` stays where compose reads it for the database container.
+  - **Three Drive client methods** -- `get_file` and the two change-feed calls for an incremental
+    sync that was never built (`get_start_page_token`, `list_changes`). Restorable from git when
+    Phase B is; the `drive_sync_state` table that was to hold the page token is kept, since it is a
+    migration.
+  - `FormatSpec.unit_label` (a field no code read), `SUPPORTED_EXTENSIONS`, and
+    `UploadValidator.MAX_PAGE_COUNT` (a copy of `MAX_PDF_PAGES` that nothing used).
+- **Looked at and kept**: `DocumentStatus`/`AuditEventType` values with no emitter
+  (`DOCUMENT_UPLOADED`, `DOCUMENT_ARCHIVED`, job `COMPLETED`) because database CHECK constraints
+  list them and dropping one needs a migration; methods used only by tests (`load_result`,
+  `load_chunks`, `row_count`, `unextractable_formats`); and columns the schema defines but nothing
+  yet writes (`jobs.priority`, `scheduled_at`, `documents.scan_flags`), which a migration, not a
+  tidy-up, would remove.

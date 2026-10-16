@@ -75,9 +75,6 @@ class FormatSpec:
     # Entry-name prefix counted to produce unit_count, e.g. slides or worksheets. None where the
     # format has no meaningful count.
     unit_prefix: str | None
-    # What unit_count means, for display. DOCX is None: Word text reflows, so a page count does not
-    # exist until the document is rendered, and app.xml's <Pages> is a stale authoring artifact.
-    unit_label: str | None
     # Cheap identity check: are these bytes plausibly this container at all? Runs before the threat
     # scan, so a disguised binary is reported as corrupt rather than handed to a parser.
     container_check: Callable[[bytes, "FormatSpec"], StructuralResult]
@@ -255,7 +252,6 @@ FORMATS: dict[str, FormatSpec] = {
         label="PDF",
         zip_marker=None,
         unit_prefix=None,
-        unit_label="pages",
         container_check=_pdf_container,
         structural_check=_pdf_structure,
     ),
@@ -265,7 +261,6 @@ FORMATS: dict[str, FormatSpec] = {
         label="Word document (.docx)",
         zip_marker="word/document.xml",
         unit_prefix=None,
-        unit_label=None,
         container_check=_ooxml_container,
         structural_check=_ooxml_structure,
     ),
@@ -275,7 +270,6 @@ FORMATS: dict[str, FormatSpec] = {
         label="Excel workbook (.xlsx)",
         zip_marker="xl/workbook.xml",
         unit_prefix="xl/worksheets/sheet",
-        unit_label="sheets",
         container_check=_ooxml_container,
         structural_check=_ooxml_structure,
     ),
@@ -285,7 +279,6 @@ FORMATS: dict[str, FormatSpec] = {
         label="PowerPoint deck (.pptx)",
         zip_marker="ppt/presentation.xml",
         unit_prefix="ppt/slides/slide",
-        unit_label="slides",
         container_check=_ooxml_container,
         structural_check=_ooxml_structure,
     ),
@@ -294,7 +287,6 @@ FORMATS: dict[str, FormatSpec] = {
 _OOXML_SPECS = [spec for spec in FORMATS.values() if spec.zip_marker is not None]
 
 SUPPORTED_LABELS = ", ".join(spec.label for spec in FORMATS.values())
-SUPPORTED_EXTENSIONS = [spec.extension for spec in FORMATS.values()]
 _OOXML_EXTENSIONS = ", ".join(spec.extension for spec in _OOXML_SPECS)
 
 

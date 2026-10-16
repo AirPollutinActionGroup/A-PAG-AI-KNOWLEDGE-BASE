@@ -134,7 +134,7 @@ Upload ──► FastAPI (POST /upload) ──► Quarantine Storage + Postgres 
 | Path | What it is |
 |---|---|
 | `/search` | **Knowledge Base UI** — sign in, ask questions, upload documents inline, preview documents, scope a question to one document ("Ask about this"), and open **"What happened"** on any answer to see what was masked and what was sent where. Conversations stay in your own browser. |
-| `/` | Studio UI — upload and watch the pipeline (predates auth and multi-file; see `KNOWN_DEBTS.md` #7). |
+| `/` | The same page as `/search`. |
 | `/docs` | Swagger. |
 
 The sign-in page can show a shared **demo login** beneath the form. It is off unless `DEMO_LOGIN_EMAIL` and `DEMO_LOGIN_PASSWORD` are set in a deployment's `.env`, is never stored in the repository, and refuses to reveal an `ADMIN` account.

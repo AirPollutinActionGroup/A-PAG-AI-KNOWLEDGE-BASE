@@ -5,14 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    ENVIRONMENT: str = "development"
-
-    # Database
-    POSTGRES_HOST: str = "localhost"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str = "apag_knowledge_base"
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "apag_secure_password_2026"
+    # Database. DATABASE_URL is the one setting the application connects with; there used to be
+    # five POSTGRES_* settings beside it that nothing read, so changing POSTGRES_HOST did nothing.
     DATABASE_URL: str = (
         "postgresql://postgres:apag_secure_password_2026@localhost:5432/apag_knowledge_base"
     )

@@ -156,11 +156,6 @@ class DriveClient:
                 frontier.append((child.file_id, depth + 1))
         return depths
 
-    def get_file(self, file_id: str) -> DriveFile:
-        params = {"fields": FILE_FIELDS, **self._shared_drive_params()}
-        payload = self._request("GET", f"{API_ROOT}/files/{file_id}", params=params).json()
-        return DriveFile.from_api(payload)
-
     # ---------------------------------------------------------------- content
 
     def download(self, file_id: str) -> bytes:
@@ -172,32 +167,3 @@ class DriveClient:
         """A Google-native document converted to `target_mime`. See `export_map.py`."""
         params = {"mimeType": target_mime, **self._shared_drive_params()}
         return self._request("GET", f"{API_ROOT}/files/{file_id}/export", params=params).content
-
-    # ------------------------------------------------- Phase B: incremental sync
-
-    def get_start_page_token(self) -> str:
-        """A bookmark in Drive's change feed, for the worker that replaces full listings."""
-        params = self._shared_drive_params()
-        return self._request("GET", f"{API_ROOT}/changes/startPageToken", params=params).json()[
-            "startPageToken"
-        ]
-
-    def list_changes(self, page_token: str) -> tuple[list[dict], str | None, str | None]:
-        """Changes since `page_token`.
-
-        Returns (changes, next_page_token, new_start_page_token). The caller must persist the new
-        start token **only after** the changes it was given are durably queued — advancing it
-        first loses every change in that page permanently, with nothing to replay from.
-        """
-        params = {
-            "pageToken": page_token,
-            "fields": f"changes(fileId,removed,file({FILE_FIELDS})),nextPageToken,newStartPageToken",
-            "pageSize": PAGE_SIZE,
-            **self._shared_drive_params(),
-        }
-        payload = self._request("GET", f"{API_ROOT}/changes", params=params).json()
-        return (
-            payload.get("changes", []),
-            payload.get("nextPageToken"),
-            payload.get("newStartPageToken"),
-        )

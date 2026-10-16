@@ -24,5 +24,6 @@ def test_search_still_opens_it_for_existing_bookmarks():
     assert _title("/search") == _title("/")
 
 
-def test_the_studio_page_moved_rather_than_vanished():
-    assert "Ingestion Pipeline Studio" in _title("/studio")
+def test_the_studio_page_is_gone():
+    """The old developer page was removed (KNOWN_DEBTS #47); nothing should answer at its address."""
+    assert client.get("/studio").status_code == 404
