@@ -231,6 +231,16 @@ Word only: a PDF page's pictures are already seen by the PDF extractor and OCR. 
 writes for a table pasted from Excel) is drawn with emf2svg and rsvg-convert first, its sideways
 labels apart from the rest, because the converter draws them over the first row of figures.
 
+**Charts and diagrams that a file draws, rather than pastes as a picture, are read exactly**
+(`extraction/charts.py`, `KNOWN_DEBTS.md` #48). A chart's categories, series and every value are
+stored in the chart part, so a PowerPoint, Word or Excel chart becomes a table of those values with
+no OCR and no guessing; when a spreadsheet chart stores only cell references (Google Sheets and
+openpyxl do, with an empty cache) they are resolved from the workbook's cells. A flow diagram built
+from shapes and connectors records which two shapes each connector joins and which end has the
+arrowhead, so its arrows come back as "A -> B" lines; a connector with a free end says nothing,
+and one with no arrowhead is a plain link, not a guessed direction. SmartArt keeps its text in a
+data model, not in shapes, so it was invisible before: its nodes are now read in order.
+
 ### Chunking: structure-aware, and why chunks live in Postgres
 
 `src/modules/document_pipeline/chunking/chunker.py` cuts a document at its own headings rather

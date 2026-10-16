@@ -21,6 +21,15 @@ from collections import Counter
 from typing import Any, NamedTuple
 
 from src.core.config import settings
+from src.modules.document_pipeline.extraction.charts import (
+    chart_rids,
+    chart_rows,
+    slide_connections,
+    smartart_lines,
+    smartart_rids,
+    workbook_resolver,
+    xlsx_chart_parts,
+)
 from src.modules.document_pipeline.extraction.grid import flatten_header
 from src.modules.document_pipeline.extraction.models import (
     ExtractedContent,
@@ -316,7 +325,18 @@ class DocxTextExtractor(TextExtractor):
         try:
             document = DocxDocument(io.BytesIO(data))
             current: str | None = None
+            related = document.part.related_parts
             for block in document.iter_inner_content():
+                element = block._tbl if isinstance(block, DocxTable) else block._p
+                # Drawn charts and SmartArt are stored apart from the text, so a paragraph or table
+                # that holds one says so only through a relationship id.
+                for rid in chart_rids(element):
+                    rows = chart_rows(related[rid].blob) if rid in related else None
+                    if rows:
+                        tables.append(ExtractedTable(unit_index=1, rows=rows, heading=current))
+                for rid in smartart_rids(element):
+                    if rid in related:
+                        paragraphs.extend(smartart_lines(related[rid].blob))
                 if isinstance(block, DocxTable):
                     rows = _docx_rows(block)
                     if _table_has_content(rows):
@@ -466,11 +486,25 @@ class PptxTextExtractor(TextExtractor):
                             slide_tables.append(ExtractedTable(
                                 unit_index=index, rows=rows, heading=title or None,
                             ))
+                    elif getattr(shape, "has_chart", False):
+                        rows = chart_rows(shape.chart.part.blob)
+                        if rows:
+                            slide_tables.append(ExtractedTable(
+                                unit_index=index, rows=rows, heading=title or None,
+                            ))
                     elif getattr(shape, "has_text_frame", False):
                         text = shape.text_frame.text.strip()
                         if text:
                             body.append((item.group, text))
+                    else:
+                        # SmartArt keeps its text in a data model, not in shapes: unseen until read.
+                        for rid in smartart_rids(shape._element):
+                            for line in smartart_lines(slide.part.related_part(rid).blob):
+                                body.append((None, line))
                 texts.extend(_timeline_order(body))
+                connections = slide_connections(slide._element)
+                if connections:
+                    texts.append("Diagram connections:\n" + "\n".join(connections))
 
                 notes = self._notes(slide)
                 if notes:
@@ -774,6 +808,8 @@ class XlsxTextExtractor(TextExtractor):
         workbook = None
         try:
             workbook = load_workbook(io.BytesIO(data), read_only=not full, data_only=True)
+            charts = self._charts(data)
+            resolver = workbook_resolver(workbook) if full else None
             for index, worksheet in enumerate(workbook.worksheets, start=1):
                 fills = _vertical_merge_fills(worksheet) if full else {}
                 rows = []
@@ -790,6 +826,14 @@ class XlsxTextExtractor(TextExtractor):
                     tables.append(
                         ExtractedTable(unit_index=index, rows=rows, heading=worksheet.title)
                     )
+
+                # A drawn chart's values are stored with it; the sheet's own cells are not them.
+                for chart_xml in charts.get(worksheet.title, []):
+                    chart = chart_rows(chart_xml, resolve=resolver)
+                    if chart:
+                        tables.append(
+                            ExtractedTable(unit_index=index, rows=chart, heading=worksheet.title)
+                        )
 
                 text = "\n".join("\t".join(row).rstrip() for row in rows)
                 units.append(
@@ -808,6 +852,19 @@ class XlsxTextExtractor(TextExtractor):
                     logger.debug("Workbook close failed; read-only handle will be collected")
 
         return ExtractedContent(units=units, headings=headings, tables=tables)
+
+    @staticmethod
+    def _charts(data: bytes) -> dict[str, list[bytes]]:
+        """The workbook's chart parts by sheet. A chart that cannot be located costs the sheet
+        nothing: its cells are read either way."""
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                return xlsx_chart_parts(archive)
+        except Exception as e:
+            logger.warning("Could not look for charts in the workbook: %s", e)
+            return {}
 
 
 def _xlsx_cell(cell) -> str:

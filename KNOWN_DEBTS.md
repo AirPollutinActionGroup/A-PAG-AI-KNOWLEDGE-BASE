@@ -1020,3 +1020,32 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   `load_chunks`, `row_count`, `unextractable_formats`); and columns the schema defines but nothing
   yet writes (`jobs.priority`, `scheduled_at`, `documents.scan_flags`), which a migration, not a
   tidy-up, would remove.
+
+### 48. Charts, connectors and SmartArt are read from the file, exactly (Built)
+- **Context**: a chart *picture* is pixels and its bars cannot be read, but a chart drawn in an
+  Office file is not: its categories, series and values are stored in the chart part. The same is
+  true of a flow diagram built from shapes and connectors (each connector records the shapes it
+  joins) and of SmartArt (a data model of nodes and links). None of the three was read: the
+  extractors took a slide's text boxes and a document's paragraphs, so the values, the arrows and
+  the SmartArt text were missing, with nothing to say so.
+- **What is read, on the real corpus**: all 9 charts of the spreadsheets and the Secretary Power
+  deck, with their values (the CEDS emissions by country, the generation-capacity series, the
+  fuel-mix pies); and the arrows of slide 16 of "TPP & CEMS" ("Non-compliance with emission
+  standards -- Environmental compensation", "-- Legal proceedings"). Values are exact because they
+  are copied, not recognised.
+- **Details that mattered, each found on a real file**: Google Sheets and openpyxl store a chart as
+  cell references with an *empty* cache, so values and series names are resolved from the
+  workbook; a chart omits empty points and numbers the rest by index, so a gap stays a gap; a date
+  axis is stored as Excel serial numbers (44105 is 2020-10-01); a percent-formatted value is
+  shown as the chart shows it.
+- **Not guessed**: a series with no stored name is "Series n" and not a name; a chart with no
+  stored values and no resolvable references produces nothing; a connector with a free end, or to
+  a shape with no text, produces nothing -- an arrow is not matched to a shape it only passes
+  near. Connectors with no arrowhead read as a plain link ("A -- B"), because the file does not
+  say which way the process runs.
+- **Limits**: SmartArt is built to the format and tested on constructed files only -- **the corpus
+  has none**, so it has not met a real one. A PowerPoint chart stores its own copy of the values;
+  if that cache is empty nothing is read, since the embedded workbook is not opened. A Word flow
+  diagram drawn with shape connectors (`wps:cxnSp`) is not read; the corpus's one Word drawing
+  has no connectors. **A chart or diagram saved as a picture is not covered here**: it gets the
+  OCR of its printed labels (`extraction/pictures.py`) and nothing about its bars or arrows.
