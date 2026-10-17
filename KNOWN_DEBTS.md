@@ -991,12 +991,17 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   asserts `cv2.ximgproc.niBlackThreshold` exists. Without that step three wheels overwrite each
   other in install order.
 - **Pictures that are not tables** (charts, flow diagrams, maps, photographs) give their printed
-  words and nothing else. Measured on seven such pictures with every printed word written down
-  (`figure_score.py`, in the session notes): **97.8% of the printed words came back (221 of 226)**
+  words and nothing else. Measured on seven such pictures from the corpus with every printed word
+  written down (a throwaway script; the pictures and the answer key are not in the repository):
+  **97.8% of the printed words came back (221 of 226)**
   once three things found on those pictures were fixed -- single-digit axis ticks were being
   dropped as noise (recall 82.7% before), a caption the whole-picture pass half-read is now read
   again from its own crop (0.58 -> 0.99), and one confident line (a sign on a photograph) is kept
-  instead of being discarded for not having a second line. Words returned that are not printed:
+  instead of being discarded for not having a second line. Loose text is also returned as
+  **blocks** (a wide gap on a row starts a new piece; pieces stacked under one another and lined
+  up are one block), because joining a whole row ran the boxes of a flow diagram together --
+  "Raw Boiler ESP Stack" over "coal Zeta" -- and "Raw coal" and "Stack Zeta" existed nowhere in
+  the passage. Words returned that are not printed:
   a handful ("unf"; a subscript read as "SO" for "SO2"; "FGO" for "FGD" on a sign), each carrying
   the OCR label. **What a picture shows is not read**: the curve of a line chart, the heights of
   96 bars, the arrows between the boxes of a flow diagram drawn as an image. An OCR engine

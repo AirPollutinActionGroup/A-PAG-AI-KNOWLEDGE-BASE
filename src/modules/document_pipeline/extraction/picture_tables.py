@@ -67,6 +67,8 @@ _MAX_REREADS = 6
 # long: a sign or a caption, not a stray mark.
 _SOLO_LINE_CONFIDENCE = 0.9
 _SOLO_LINE_LETTERS = 8
+# A word of one or two letters is kept only if the engine is this sure of it.
+_SHORT_WORD_CONFIDENCE = 0.95
 # A tall narrow cell is a header written sideways.
 _SIDEWAYS_RATIO = 1.6
 
@@ -221,16 +223,18 @@ class TableImageReader:
 
         outside = [w for w in words if not any(_inside(w, t.bbox) for t in tables)]
         self._reread_doubtful_lines(image, outside)
-        lines = _group_lines([w for w in outside if w.score >= self._min_confidence])
+        # A one- or two-character word is usually OCR noise -- unless it is a digit (the ticks of a
+        # chart's axis, 0, 5, 10, say what its scale is) or the engine is very sure of it ("MW").
+        sure = [w for w in outside if w.score >= self._min_confidence
+                and (len(w.text.strip()) > 2 or any(ch.isdigit() for ch in w.text)
+                     or w.score >= _SHORT_WORD_CONFIDENCE)]
+        lines = _text_blocks(sure)
         for table in tables:
             above = _title_above(lines, table.bbox)
             if above is not None:
                 table.title = above[0]
                 lines.remove(above)
-        # A one- or two-character line is usually OCR noise, except a digit: the ticks of a chart's
-        # axis (0, 5, 10) are the numbers that say what its scale is.
-        texts = [text for text, *_ in lines
-                 if len(text.strip()) > 2 or any(ch.isdigit() for ch in text)]
+        texts = [text for text, *_ in lines]
         # A picture with a few stray words is a photograph with noise on it. One substantial,
         # confident line is not: it is a sign, a caption or a title, and is kept.
         if not tables and len(texts) < 2 and not _one_confident_line(lines):
@@ -468,6 +472,66 @@ def _group_lines(words: list[_Word]) -> list[tuple[str, float, float, float, flo
         out.append((" ".join(w.text for w in line), sum(w.cy for w in line) / len(line),
                     line[0].x1, line[-1].x2, min(w.score for w in line)))
     return out
+
+
+# A gap wider than this many text heights between two words on one row separates two pieces of
+# text (two boxes of a diagram, two columns), not two words of one sentence.
+_COLUMN_GAP = 2.0
+# Text stacked closer than this many heights, and lined up, is one block: a box's lines, a
+# paragraph, a list.
+_STACK_GAP = 1.8
+
+
+def _text_blocks(words: list[_Word]) -> list[tuple[str, float, float, float, float]]:
+    """Loose text as blocks, in reading order: (text, bottom y, left, right, lowest score).
+
+    Joining everything on one row of a picture ran the boxes of a flow diagram together --
+    "Raw Boiler ESP Stack" over "coal Zeta" -- so "Raw coal" and "Stack Zeta" existed nowhere in the
+    passage. A row is cut where there is a wide gap, and the pieces that sit directly under one
+    another and line up (a box's lines, a paragraph, a list of ticks) are one block, kept
+    together, one line to a row.
+    """
+    if not words:
+        return []
+    typical = sorted(w.height for w in words)[len(words) // 2] or 1.0
+    rows: list[list[_Word]] = []
+    for word in sorted(words, key=lambda w: (w.cy, w.x1)):
+        if rows and abs(word.cy - sum(w.cy for w in rows[-1]) / len(rows[-1])) <= 0.6 * typical:
+            rows[-1].append(word)
+        else:
+            rows.append([word])
+
+    blocks: list[dict] = []
+    for row in rows:
+        row.sort(key=lambda w: w.x1)
+        pieces = [[row[0]]]
+        for word in row[1:]:
+            if word.x1 - pieces[-1][-1].x2 > _COLUMN_GAP * typical:
+                pieces.append([word])
+            else:
+                pieces[-1].append(word)
+        for piece in pieces:
+            left, right = piece[0].x1, piece[-1].x2
+            cy = sum(w.cy for w in piece) / len(piece)
+            text = " ".join(w.text for w in piece)
+            target = next((
+                b for b in reversed(blocks)
+                if 0 < cy - b["bottom"] <= _STACK_GAP * typical
+                and (min(right, b["right"]) - max(left, b["left"])
+                     >= 0.3 * min(right - left, b["right"] - b["left"])
+                     or abs(left - b["left"]) <= 1.5 * typical)
+            ), None)
+            score = min(w.score for w in piece)
+            if target is None:
+                blocks.append({"parts": [text], "top": cy, "bottom": cy, "left": left, "right": right,
+                               "score": score})
+            else:
+                target["parts"].append(text)
+                target["bottom"], target["score"] = cy, min(target["score"], score)
+                target["left"], target["right"] = min(target["left"], left), max(target["right"], right)
+
+    blocks.sort(key=lambda b: (round(b["top"] / (3 * typical)), b["left"]))
+    return [("\n".join(b["parts"]), b["bottom"], b["left"], b["right"], b["score"]) for b in blocks]
 
 
 def _title_above(lines, bbox: tuple):

@@ -173,15 +173,26 @@ def test_a_grid_that_is_mostly_empty_is_not_a_table():
 def test_text_in_a_picture_with_no_table_comes_back_as_lines():
     words = [("OMI SO2 VCD (DU)", 0.99, 100, 500, 400, 520), ("0.00 0.15 0.30", 0.97, 100, 530, 400, 550)]
     reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
-    assert reading.lines == ["OMI SO2 VCD (DU)", "0.00 0.15 0.30"]
+    assert reading.lines == ["OMI SO2 VCD (DU)\n0.00 0.15 0.30"]  # two stacked lines: one block
 
 
 def test_the_digits_on_a_charts_axis_are_kept_but_other_stray_marks_are_not():
-    """The ticks 0, 5, 10 say what a chart's scale is; a lone "ab" is noise."""
+    """The ticks 0, 5, 10 say what a chart's scale is and "MW" is a unit; an unsure "ab" is noise."""
     words = [("Emissions million tonnes", 0.99, 100, 500, 400, 520), ("7", 0.97, 100, 530, 120, 550),
-             ("10", 0.97, 100, 560, 130, 580), ("ab", 0.97, 100, 590, 130, 610)]
+             ("10", 0.97, 100, 560, 130, 580), ("ab", 0.85, 100, 590, 130, 610),
+             ("MW", 0.99, 100, 620, 140, 640)]
     reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
-    assert reading.lines == ["Emissions million tonnes", "7", "10"]
+    assert reading.lines == ["Emissions million tonnes\n7\n10", "MW"]
+
+
+def test_the_boxes_of_a_flow_diagram_are_separate_blocks_and_keep_their_own_words():
+    """"Raw Boiler ESP Stack" over "coal Zeta" lost "Raw coal" and "Stack Zeta" from the passage."""
+    words = [("Raw", 0.99, 100, 100, 160, 120), ("Boiler", 0.99, 400, 100, 480, 120),
+             ("ESP", 0.99, 700, 100, 760, 120), ("coal", 0.99, 100, 130, 160, 150),
+             ("Stack", 0.99, 1000, 100, 1080, 120), ("Zeta", 0.99, 1000, 130, 1080, 150)]
+    reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(
+        np.full((600, 1200, 3), 255, dtype=np.uint8))
+    assert reading.lines == ["Raw\ncoal", "Boiler", "ESP", "Stack\nZeta"]
 
 
 def test_one_confident_line_of_real_words_is_kept_as_a_sign_or_a_caption():
