@@ -1144,7 +1144,7 @@ async function setTier(doc, next, box) {
 function confirmDelete(doc, button) {
   if (button.dataset.armed !== "1") {
     button.dataset.armed = "1";
-    button.textContent = "Really delete?";
+    button.textContent = "Delete permanently?";
     button.classList.add("armed");
     setTimeout(() => {
       if (button.dataset.armed === "1") {
@@ -1175,20 +1175,17 @@ async function doDelete(doc, button) {
       $("docview").prepend(notice("Could not delete", " " + why, true));
       return;
     }
-    /* Gone from search immediately, bytes retained. Saying both is the point: "deleted" alone
-       would leave someone unsure whether a document they cited last week still exists. */
+    /* Erased, all of it: the file, the text read out of it and its passages. Saying so is the
+       point -- and saying that it can be uploaded again, since that is what someone deleting a
+       file to re-add it is about to try. */
     docs = docs.filter((d) => idOf(d) !== idOf(doc));
     docTotal = Math.max(0, docTotal - 1);
     closeDocView();
     paintDocs();
-    const gone = notice(
-      "Removed from the knowledge base",
-      ` \u201c${baseName(doc.filename)}\u201d will no longer appear in search or answers. `
-      + `It stays in Documents \u2192 Recently deleted until you restore it. `);
-    const undo = el("button", "mini", "Undo");
-    undo.onclick = () => restoreDoc(idOf(doc), doc.filename, undo);
-    gone.append(undo);
-    $("thread").prepend(gone);
+    $("thread").prepend(notice(
+      "Deleted",
+      ` \u201c${baseName(doc.filename)}\u201d and everything read from it were erased. `
+      + `Uploading it again adds it as a new document.`));
     deletedDocs = null;
     if (deletedOpen) loadDeleted();
   } catch (e) {

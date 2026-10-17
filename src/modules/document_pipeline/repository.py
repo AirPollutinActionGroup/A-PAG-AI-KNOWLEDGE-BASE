@@ -30,7 +30,10 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     def get_by_checksum(self, checksum: str) -> DocumentDTO | None:
-        """Retrieves document by SHA-256 checksum (ignoring SUPERSEDED and ARCHIVED)."""
+        """The document a new upload with this SHA-256 is a copy of: ignoring SUPERSEDED and
+        ARCHIVED versions, REJECTED files, and DUPLICATE rows, which are refused uploads and were
+        never documents. Counting a DUPLICATE row meant that once the original was erased, the
+        next upload of the same file was refused again -- as a copy of a refused copy."""
 
     @abstractmethod
     def update_document(self, doc: DocumentDTO) -> DocumentDTO:
@@ -139,6 +142,13 @@ class DocumentRepository(ABC):
         Callers must delete the object from storage *before* calling this — a failed storage
         delete must leave the row un-tombstoned so the operation stays retryable."""
 
+    @abstractmethod
+    def purge_duplicates_of(self, checksum: str) -> int:
+        """Tombstones the refused re-uploads of a file being erased (DUPLICATE rows with this
+        SHA-256): stamps deleted_at/purged_at and nulls their sha256. Erasing a file erases every
+        trace of it, and those rows are traces -- its name, and who tried to add it again.
+        Returns how many there were."""
+
 
 def _to_dto(orm: DocumentORM) -> DocumentDTO:
     return DocumentDTO(
@@ -214,7 +224,10 @@ class PostgreSQLDocumentRepository(DocumentRepository):
     def get_by_checksum(self, checksum: str) -> DocumentDTO | None:
         stmt = select(DocumentORM).where(
             DocumentORM.sha256 == checksum,
-            DocumentORM.status.not_in([DocumentStatus.SUPERSEDED.value, DocumentStatus.ARCHIVED.value]),
+            DocumentORM.status.not_in([
+                DocumentStatus.SUPERSEDED.value, DocumentStatus.ARCHIVED.value,
+                DocumentStatus.REJECTED.value, DocumentStatus.DUPLICATE.value,
+            ]),
         )
         orm = self.db.execute(stmt).scalars().first()
         return self._to_dto(orm) if orm else None
@@ -378,6 +391,23 @@ class PostgreSQLDocumentRepository(DocumentRepository):
         self.db.commit()
         return True
 
+    def purge_duplicates_of(self, checksum: str) -> int:
+        now = datetime.now(UTC)
+        rows = self.db.execute(
+            select(DocumentORM).where(
+                DocumentORM.sha256 == checksum,
+                DocumentORM.status == DocumentStatus.DUPLICATE.value,
+            )
+        ).scalars().all()
+        for orm in rows:
+            orm.sha256 = None
+            orm.quarantine_path = None
+            orm.purged_at = now
+            if orm.deleted_at is None:
+                orm.deleted_at = now
+        self.db.commit()
+        return len(rows)
+
 
 class InMemoryDocumentRepository(DocumentRepository):
     """In-memory repository implementation for unit and concurrency tests."""
@@ -532,3 +562,16 @@ class InMemoryDocumentRepository(DocumentRepository):
             doc.raw_path = None
             doc.quarantine_path = None
             return True
+
+    def purge_duplicates_of(self, checksum: str) -> int:
+        with self._lock:
+            now = datetime.now(UTC)
+            hits = [d for d in self._storage.values()
+                    if d.checksum == checksum and d.status == DocumentStatus.DUPLICATE]
+            for doc in hits:
+                doc.checksum = None
+                doc.quarantine_path = None
+                doc.purged_at = now
+                if doc.deleted_at is None:
+                    doc.deleted_at = now
+            return len(hits)

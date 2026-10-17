@@ -1094,3 +1094,32 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   diagram drawn with shape connectors (`wps:cxnSp`) is not read; the corpus's one Word drawing
   has no connectors. **A chart or diagram saved as a picture is not covered here**: it gets the
   OCR of its printed labels (`extraction/pictures.py`) and nothing about its bars or arrows.
+
+### 49. Delete erases everything, at once (Closed)
+- **Status**: Closed. Asked for after a delete-then-re-upload: the file was deleted, gone from the
+  list, and uploading it again was refused as "already there".
+- **Why that happened**: delete was reversible by default (#41). The bytes, text and passages
+  stayed so the delete could be undone, and dedup still matched the hidden copy, so a re-upload
+  was refused and offered a Restore. Working as designed, and read as broken. In this case it
+  also changed the document: the re-upload was marked Restricted, the stricter tier won (#36),
+  and the restored original came back Restricted.
+- **Now**: `DELETE /documents/{id}` erases, for the owner or an ADMIN alike (`erasure.py`): the
+  stored file, the extracted and normalized text, the passages and their vectors, the refused
+  re-uploads of it (DUPLICATE rows: its name, and who tried again), and its queued jobs, which
+  would otherwise rebuild the passages. Uploading the same file afterwards adds it as new.
+- **A bug the in-memory tests could not see**: the SQL repository's `get_by_checksum` counted
+  DUPLICATE rows, the in-memory one did not. So the existing test "an erased file can be uploaded
+  again" passed, while in Postgres the next upload matched a refused copy and was refused again.
+  The SQL lookup now ignores DUPLICATE and REJECTED rows, as the in-memory one always did, and a
+  test runs it against the real repository.
+- **Kept, on purpose**: the audit entry recording the delete (who, when, the file's name and
+  hash). The log is append-only at the database level (migration `0003`) and holds no content; an
+  erasure that erased the record of itself could not be shown to have happened. The row stays as
+  a tombstone with its content fields cleared, because version chains refer to it.
+- **Refused, on purpose**: a delete while a worker is processing the document (409, "try again in
+  a few seconds"). Erasing under a running job would let it write the passages straight back.
+- **Not changed**: the Drive connector still hides, rather than erases, a document whose file
+  left the folder, and restores it when the file comes back (#41) -- removing a file from a shared
+  folder is not a decision to destroy it. "Recently deleted" and restore serve only that now.
+- **What this gives up**: an accidental delete cannot be undone. That was the reason for the old
+  default; the trade was made deliberately, for a delete that means what it says.
