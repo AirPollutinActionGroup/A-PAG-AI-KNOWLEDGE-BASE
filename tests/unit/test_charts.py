@@ -305,3 +305,34 @@ def test_a_chart_in_a_word_file_is_filed_under_the_heading_it_sits_beneath():
     [table] = [t for t in DocxTextExtractor().extract(buf.getvalue()).tables]
     assert table.heading == "Emissions"
     assert table.rows[2:] == [["2021", "10"], ["2022", "12"]]
+
+
+def test_a_heading_with_only_its_own_table_is_not_also_a_passage_by_itself():
+    """"Zorbia monthly load Mar 341" found the slide's title instead of the 341: a title-only
+    passage outranks the table for any question that repeats the title."""
+    def build(prs):
+        slide = _titled(prs, "Zorbia monthly load")
+        data = CategoryChartData()
+        data.categories = ["Jan", "Mar"]
+        data.add_series("Load GWh", (318, 341))
+        slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(2), Inches(6), Inches(3), data)
+
+    content = PptxTextExtractor().extract(_deck(build))
+    result = ExtractionResult(document_id=uuid.uuid4(), mime_type=PPTX_MIME, units=content.units,
+                              headings=content.headings, tables=content.tables)
+    from src.modules.document_pipeline.chunking.chunker import Chunker
+    chunks = Chunker().chunk(NormalizationService().normalize(result))
+    assert [c.is_table for c in chunks] == [True]
+    assert chunks[0].section_heading == "Zorbia monthly load"
+
+
+def test_a_title_slide_with_nothing_attached_is_still_a_passage():
+    def build(prs):
+        _titled(prs, "TPP details and emission profile")
+
+    content = PptxTextExtractor().extract(_deck(build))
+    result = ExtractionResult(document_id=uuid.uuid4(), mime_type=PPTX_MIME, units=content.units,
+                              headings=content.headings, tables=content.tables)
+    from src.modules.document_pipeline.chunking.chunker import Chunker
+    [chunk] = Chunker().chunk(NormalizationService().normalize(result))
+    assert chunk.text == "TPP details and emission profile"

@@ -109,7 +109,19 @@ class Chunker:
             for heading, body in sections:
                 if heading is not None:
                     current_heading = heading
-                for piece in self._split_to_size(body):
+                # A heading with nothing under it but its own table or figure is not a passage: the
+                # title says nothing the table's passage does not already carry as its section, and
+                # on its own it outranks the table for any question that repeats the title ("Zorbia
+                # monthly load Mar 341" found the title, not the 341). A heading with nothing
+                # attached stays, so a title slide can still be found.
+                if heading is not None and " ".join(body.split()) == " ".join(heading.split()) and (
+                    any(t.heading == heading for t in pending)
+                    or any(f.heading == heading for f in pending_figures)
+                ):
+                    pieces: list[str] = []
+                else:
+                    pieces = self._split_to_size(body)
+                for piece in pieces:
                     chunks.append(
                         Chunk(
                             index=len(chunks),
