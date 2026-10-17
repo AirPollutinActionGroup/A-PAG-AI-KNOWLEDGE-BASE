@@ -933,13 +933,16 @@ rationale before "fixing" them:
   answer plus a per-file list for exceptions, and goes up as one run of batches per tier. A
   wrong answer is corrected from the bar at the top of the document view (owner or admin; two
   clicks to widen, one to narrow). The API still has no default; every caller states one.
-- **Delete is reversible by default.** `DELETE /documents/{id}` removes a document from search
-  and the listing while keeping its bytes and audit trail; `?permanent=true` erases and is
-  **ADMIN only**. Owner-or-admin applies to both, and to `POST /documents/{id}/restore`, which
-  brings one back (`GET /documents/deleted` lists them; the UI's "Recently deleted"). Dedup still
-  matches deleted documents, so a re-upload of one is refused as DUPLICATE and its status says so
-  via `duplicate_of` rather than the system quietly resurrecting it (`KNOWN_DEBTS.md` #41). Every delete used to be a purge, which is the
-  wrong default when someone may have cited the document in a submission last week.
+- **Delete erases everything, at once.** `DELETE /documents/{id}` (owner or ADMIN) removes the
+  stored file, the text read out of it (`extracted/`, `normalized/`), its passages and vectors,
+  the refused re-uploads of it, and its queued jobs (`erasure.py`), and leaves the row as a
+  tombstone; uploading the same file afterwards adds it as a new document. A document a worker is
+  processing at that moment is refused with 409 rather than erased under the worker, which would
+  write the passages back. The audit entry for the delete is kept -- the log is append-only by
+  design and holds no content. This replaced a reversible default that read as broken: the file
+  vanished, yet a re-upload was refused as "already there" (`KNOWN_DEBTS.md` #49). Restore
+  (`POST /documents/{id}/restore`, the UI's "Recently deleted") remains only for what the Drive
+  connector hides when a file leaves its folder, which is reversible on purpose.
 - Text extraction is **non-ML** (`pdfplumber`/`python-docx`/`python-pptx`/`openpyxl`), not Docling
   — deliberate given this corpus is typed documents whose structure the file already states, not
   scanned/complex-layout PDFs Docling's layout inference exists for. See `KNOWN_DEBTS.md` #13

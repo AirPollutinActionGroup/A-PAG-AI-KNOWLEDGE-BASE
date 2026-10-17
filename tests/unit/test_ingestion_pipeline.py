@@ -942,51 +942,127 @@ def test_delete_forbidden_for_non_owner_non_admin(purge_stack):
         "Object was erased despite a 403."
 
 
-def test_delete_allowed_for_owner_who_is_not_admin(purge_stack):
-    """An uploader may remove their own upload from the knowledge base.
+def test_an_owner_deleting_their_own_document_erases_it(purge_stack):
+    """A delete erases, whoever makes it (owner or admin). It used to be the reversible kind for
+    an owner, which read as broken: the file was gone from the list, but uploading it again was
+    refused as "already there", matching the hidden copy."""
+    owner = _FakeUser(role=UserRole.USER.value)
+    resp = _promote_fixture(purge_stack, owner_id=owner.user_id)
+    previous = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: owner
+    try:
+        res = client.delete(f"/api/v1/documents/{resp.document_id}")
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_current_user] = previous
 
-    Reversible, because that is the default now: the document leaves search immediately and its
-    bytes survive. Erasing the bytes is a stronger, separate act — the permanent tests above
-    cover it, and the next test shows an owner is refused it.
-    """
-    resp = _promote_fixture(purge_stack, owner_id=_test_user.user_id)
+    assert res.status_code == 200 and res.json()["permanent"] is True
+    assert not purge_stack.storage.object_exists(purge_stack.buckets.raw, f"{resp.checksum}.pdf")
+    assert purge_stack.repo.get_by_id(resp.document_id).purged_at is not None
+
+
+def test_a_delete_erases_the_text_read_out_of_the_file_and_its_passages(purge_stack):
+    """Everything derived from the file goes with it: the extracted and normalized text, which
+    hold its full text, and its passages with their vectors."""
+    from src.db.models import DocumentChunk as ChunkORM
+    from src.modules.document_pipeline.storage_keys import (
+        extraction_key_for,
+        normalized_key_for,
+    )
+
+    resp = _promote_fixture(purge_stack)
+    doc_id = resp.document_id
+    buckets, storage = purge_stack.buckets, purge_stack.storage
+    storage.put_object(buckets.extracted, extraction_key_for(doc_id), b'{"text": "secret"}')
+    storage.put_object(buckets.normalized, normalized_key_for(doc_id), b'{"text": "secret"}')
+    with Session(purge_stack.engine) as s:
+        s.add(ChunkORM(document_id=doc_id, chunk_index=0, text="secret passage", scale="section",
+                       char_count=14))
+        s.commit()
+
+    assert client.delete(f"/api/v1/documents/{doc_id}").status_code == 200
+
+    assert not storage.object_exists(buckets.extracted, extraction_key_for(doc_id))
+    assert not storage.object_exists(buckets.normalized, normalized_key_for(doc_id))
+    with Session(purge_stack.engine) as s:
+        assert s.query(ChunkORM).filter(ChunkORM.document_id == doc_id).count() == 0
+
+
+def test_a_delete_cancels_the_documents_queued_jobs(purge_stack):
+    """A job still queued would rebuild the passages of a file that was just erased."""
+    resp = _promote_fixture(purge_stack)
+    with Session(purge_stack.engine) as s:
+        s.add(JobORM(document_id=resp.document_id, stage=JobStage.EXTRACT.value,
+                     status=JobStatus.PENDING.value))
+        s.commit()
+
+    assert client.delete(f"/api/v1/documents/{resp.document_id}").status_code == 200
+
+    with Session(purge_stack.engine) as s:
+        [job] = s.query(JobORM).filter(JobORM.document_id == resp.document_id).all()
+        assert job.status == JobStatus.FAILED.value
+        assert job.error_details == {"reason": "document deleted"}
+
+
+def test_a_document_being_processed_right_now_is_not_erased_under_the_worker(purge_stack):
+    """The worker would write the passages back a moment later. The caller is told to try again,
+    and nothing at all is destroyed or recorded."""
+    resp = _promote_fixture(purge_stack)
+    with Session(purge_stack.engine) as s:
+        s.add(JobORM(document_id=resp.document_id, stage=JobStage.EMBED.value,
+                     status=JobStatus.RUNNING.value))
+        s.commit()
 
     res = client.delete(f"/api/v1/documents/{resp.document_id}")
 
-    assert res.status_code == 200
-    assert res.json()["permanent"] is False
+    assert res.status_code == 409 and "BUSY" in res.json()["detail"]
+    assert purge_stack.storage.object_exists(purge_stack.buckets.raw, f"{resp.checksum}.pdf")
+    assert purge_stack.repo.get_by_id(resp.document_id).purged_at is None
+    with Session(purge_stack.engine) as s:
+        assert s.query(AuditLog).filter(
+            AuditLog.document_id == resp.document_id,
+            AuditLog.event_type == AuditEventType.DOCUMENT_DELETED.value,
+        ).count() == 0, "a delete that did not happen must not be recorded as one"
 
 
-def test_a_soft_deleted_document_still_has_its_bytes(purge_stack):
-    """The point of the reversible kind. Someone may have cited this in a submission last week,
-    and an accidental delete should be a mistake rather than a loss."""
-    resp = _promote_fixture(purge_stack, owner_id=_test_user.user_id)
+def test_refused_reuploads_of_an_erased_file_are_erased_too_and_never_block_a_new_upload(tmp_path):
+    """The real SQL repository, where the bug lived. Its lookup counted DUPLICATE rows -- the
+    refused re-uploads -- so after the original was erased, uploading the file again was refused
+    once more, as a copy of a refused copy. The in-memory repository never had the bug, which is
+    why the tests that use it could not see it."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'docs.db'}")
+    Base.metadata.create_all(bind=engine)
+    sha = "b" * 64
+    original, refused = uuid.uuid4(), uuid.uuid4()
+    with Session(engine) as s:
+        s.add(DocORM(document_id=original, filename="memo.pdf", file_size=10, status="LIVE",
+                     classification="PUBLIC", mime_type=PDF_MIME, sha256=sha))
+        s.add(DocORM(document_id=refused, filename="memo.pdf", file_size=10, status="DUPLICATE",
+                     classification="PUBLIC", mime_type=PDF_MIME, sha256=sha))
+        s.commit()
+        repo = PostgreSQLDocumentRepository(s)
+        assert repo.get_by_checksum(sha).id == original, "a refused copy is never what matches"
 
-    client.delete(f"/api/v1/documents/{resp.document_id}")
+        assert repo.purge(original)
+        assert repo.purge_duplicates_of(sha) == 1
+        assert repo.get_by_checksum(sha) is None, "the same file can now be uploaded as new"
 
-    doc = purge_stack.repo.get_by_id(resp.document_id)
-    assert doc.deleted_at is not None, "removed from the knowledge base"
-    assert doc.purged_at is None, "but not erased"
-    assert doc.raw_path is not None, "and the bytes are still there"
+    with Session(engine) as fresh:
+        assert fresh.get(DocORM, refused).sha256 is None
+        assert fresh.get(DocORM, refused).purged_at is not None
 
 
-@pytest.mark.parametrize("then_restore", [False, True])
-def test_a_reversible_delete_is_still_there_after_the_request(tmp_path, then_restore):
-    """Through the real endpoint and the real SQL repository, read back from a new session.
-
-    The tests above use the in-memory repository, where a write is visible the moment it is
-    made, so they could not see this: `soft_delete()` flushed and never committed, the endpoint's
-    audit row committed first in its own transaction, and the request answered 200 and logged
-    DOCUMENT_DELETED while the delete itself was discarded when the session closed. Every
-    reversible delete made through the UI since it existed was lost (`KNOWN_DEBTS.md` #43).
-    """
+def test_an_erase_is_still_there_after_the_request(tmp_path):
+    """Through the real endpoint and the real SQL repository, read back from a new session --
+    an earlier version of delete answered 200 and was discarded when the session closed
+    (`KNOWN_DEBTS.md` #43)."""
     engine = create_engine(f"sqlite:///{tmp_path / 'docs.db'}")
     Base.metadata.create_all(bind=engine)
     doc_id = uuid.uuid4()
     with Session(engine) as s:
         s.add(DocORM(document_id=doc_id, filename="minutes.pdf", file_size=10,
                      status="LIVE", classification="PUBLIC", mime_type=PDF_MIME,
-                     uploader_user_id=_test_user.user_id))
+                     uploader_user_id=_test_user.user_id, sha256="c" * 64))
         s.commit()
 
     def _get_db():
@@ -998,36 +1074,13 @@ def test_a_reversible_delete_is_still_there_after_the_request(tmp_path, then_res
     app.dependency_overrides[get_db] = _get_db
     try:
         assert client.delete(f"/api/v1/documents/{doc_id}").status_code == 200
-        if then_restore:
-            with Session(engine) as s:
-                assert PostgreSQLDocumentRepository(s).restore(doc_id)
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(saved)
 
     with Session(engine) as fresh:
-        deleted_at = fresh.get(DocORM, doc_id).deleted_at
-    if then_restore:
-        assert deleted_at is None, "a restore must outlive its session too"
-    else:
-        assert deleted_at is not None, "the delete must outlive the request that made it"
-
-
-def test_an_owner_cannot_permanently_erase_only_an_admin_can(purge_stack):
-    """Erasing bytes is irreversible. An uploader tidying up gets the recoverable kind;
-    destroying the evidence is an administrator's decision."""
-    owner = _FakeUser(role=UserRole.USER.value)
-    previous = app.dependency_overrides.get(get_current_user)
-    resp = _promote_fixture(purge_stack, owner_id=owner.user_id)
-    app.dependency_overrides[get_current_user] = lambda: owner
-    try:
-        res = client.delete(f"/api/v1/documents/{resp.document_id}?permanent=true")
-    finally:
-        if previous is not None:
-            app.dependency_overrides[get_current_user] = previous
-
-    assert res.status_code == 403
-    assert "ADMIN" in res.json()["detail"]
+        row = fresh.get(DocORM, doc_id)
+    assert row.purged_at is not None and row.sha256 is None, "the erase must outlive the request"
 
 
 def test_delete_allowed_for_admin_who_is_not_owner(purge_stack):
