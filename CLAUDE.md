@@ -861,13 +861,22 @@ to compare two commits. Measured:
 
 | configuration | hit@1 | hit@5 | hit@10 | MRR | median |
 |---|---|---|---|---|---|
-| hybrid + rerank (shipped) | **83.0%** | **97.0%** | 97.0% | 0.894 | 6.05s |
-| hybrid, no rerank | 80.0% | 91.0% | 96.0% | 0.853 | 0.36s |
-| semantic only | 72.0% | 90.0% | 91.0% | 0.801 | 0.33s |
-| lexical only (BM25) | 66.0% | 89.0% | 94.0% | 0.751 | 0.03s |
+| hybrid + rerank (shipped) | **82.0%** | **94.0%** | 95.0% | 0.870 | 2.08s |
+| hybrid, no rerank | 76.0% | 86.0% | 93.0% | 0.812 | 0.12s |
+| semantic only | 71.0% | 83.0% | 85.0% | 0.764 | 0.07s |
+| lexical only (BM25) | 70.0% | 91.0% | 95.0% | 0.792 | 0.04s |
 
-Read bottom-up, every layer earns its place. Reranking is worth 3 points of hit@1 and 6 of
-hit@5, which is a trade-off someone can now decide rather than one that was asserted.
+Measured 14 Oct 2026 on 12,100 passages, after the parsing fixes and the HNSW fix below. The
+previous figures (83 / 97 / 0.894, on 4,459 passages) are not comparable: the corpus grew by 2.7x,
+mostly one 6,946-row spreadsheet, and **that growth is what broke semantic search** -- the HNSW
+index considered 40 neighbours, the filters ran after it, and near-identical rows from one
+document crowded the answer out (semantic hit@1 38%, `KNOWN_DEBTS.md` #45). `SEARCH_HNSW_EF_SEARCH`
+is the fix. A figure that silently halves with no error is the reason to run this after any large
+ingest, not only after a code change.
+
+Read bottom-up, every layer earns its place. Reranking is worth 6 points of hit@1 and 8 of
+hit@5 over hybrid alone, which is a trade-off someone can now decide rather than one that was
+asserted.
 
 Two things to read carefully rather than quote flat:
 
@@ -880,7 +889,7 @@ this day. `DEPLOY.md` sets `RERANK_CANDIDATES=25` on a 2-vCPU VM for exactly thi
 
 **The remaining failures are no longer table lookups.** They were, when there were four of them
 and the lexical arm was being swamped by function words; trimming those (`lexical_query.py`)
-fixed that shape of failure. The 3 that miss out of 100 are now prose:
+fixed that shape of failure. The 5 that miss out of 100 are now prose or summaries:
 
 | question | expected document |
 |---|---|
@@ -913,6 +922,13 @@ figures, so every number in an answer is checked against the passages it was bui
 Measured over 30 answers: **100% numeric fidelity (73/73)**, 90% citation coverage. Normalising
 `31st December 2024` to `31 December 2024`, `1,02,040` to `102040` and `Rs. 0.20` to `0.20` is
 what keeps this measuring truth rather than formatting — a check that reports hallucination
+| the gap between commissioned and required FGD capacity | `Report on TPPs.xlsx` |
+| additional environmental impacts of FGD (CO2, coal use) | `Report on TPPs.xlsx` |
+
+The last two are new, and are questions generated from a one-sheet *summary* of reports whose full
+text is itself in the corpus: lexical search ranks the sheet first, and the reranker prefers the
+full reports (the NIAS study, "Note on FGD installation"). Whether that is a miss or a better
+answer is a judgement the eval set cannot make -- it records one expected document per question.
 where there is none gets switched off. It cannot see a claim that is wrong without being
 numerically wrong, and says so in its own docstring.
 

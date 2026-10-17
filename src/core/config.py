@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # re-measuring on a model change, not carrying over.
     SEARCH_MIN_SIMILARITY: float = 0.55
 
+    # How many nearest neighbours the vector index considers per search, before the permission
+    # and deleted-document filters (pgvector's `hnsw.ef_search`, default 40). Too low and the
+    # semantic arm silently returns the wrong passages: measured 38% hit@1 at 40 against 71% at
+    # 200, equal to an exact search. Raised to at least twice the candidate pool per query.
+    SEARCH_HNSW_EF_SEARCH: int = 200
+
     # ---- Answer generation (Sarvam) -------------------------------------------------------
     # The one place text leaves the deployment. Sarvam was chosen over OpenAI/Anthropic because
     # it is an Indian provider with data staying in India, which is the nearest thing to the
