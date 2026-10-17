@@ -23,8 +23,8 @@ dependencies = [
     # no tables — they are prose notifications. Their cost is ~500MB of models plus
     # torch/transformers, in an image that already carries a 640MB embedding model. LlamaParse
     # is a cloud API, which would send every document out of the deployment at ingestion.
-    # See KNOWN_DEBTS.md for the trigger to revisit — scanned tables would be it, and Docling
-    # takes RapidOCR as its own OCR backend, so this is a layer under that, not a dead end.
+    # Docling was tried again later for tables in pictures, and lost to img2table + rapidocr on
+    # accuracy as well as weight (KNOWN_DEBTS.md #46); it is not a dependency.
     "pdfplumber>=0.11.0",
     "python-docx>=1.1.0",
     "python-pptx>=1.0.0",

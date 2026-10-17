@@ -19,8 +19,10 @@ document out of the deployment at ingestion — the opposite of what the boundar
 system and an external model exists to enforce.
 
 That reasoning is corpus-specific and may not survive the rest of the drive. If scanned budget
-sheets or emission tables turn up, revisit it: Docling accepts RapidOCR as its own OCR backend,
-so adding layout recovery later is a layer on top of this, not a replacement for it.
+sheets or emission tables turn up, the reader for tables in pictures (`picture_tables.py`:
+img2table finds the ruled grid, this engine reads the cells) is the layer to put on top of this --
+it already does exactly that for screenshots of tables in Word and PowerPoint files, and replaced
+Docling there after scoring 98.8% of cells against Docling's 78.5%.
 
 **Why the model is loaded lazily.** Unlike the embedding model, which every EMBED job needs, OCR
 is needed only by the small minority of documents that are scans. Loading on first use means an

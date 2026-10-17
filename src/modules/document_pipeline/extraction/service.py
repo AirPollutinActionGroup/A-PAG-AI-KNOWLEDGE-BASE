@@ -32,7 +32,7 @@ class ExtractionService:
     ):
         self.extractors = extractors if extractors is not None else EXTRACTORS
         # An explicit reader is for tests. In production it is resolved lazily on the first
-        # document with pictures, so a worker that never meets one never loads Docling.
+        # document with pictures, so a worker that never meets one never loads the picture reader.
         self._picture_reader = picture_reader
 
     def extract(self, document_id: uuid.UUID, data: bytes, mime_type: str) -> ExtractionResult:
