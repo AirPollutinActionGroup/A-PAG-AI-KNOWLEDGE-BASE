@@ -32,7 +32,12 @@ from src.modules.document_pipeline.extraction.pictures import (
     OfficePictureReader,
 )
 from src.modules.document_pipeline.extraction.service import ExtractionService
-from src.modules.document_pipeline.formats import DOCX_MIME, PPTX_MIME
+from src.modules.document_pipeline.formats import (
+    DOCX_MIME,
+    PDF_MIME,
+    PPTX_MIME,
+    XLSX_MIME,
+)
 
 # ==============================================================================
 # A fake engine and grid finder
@@ -435,6 +440,60 @@ def test_a_word_picture_is_found_under_the_heading_it_sits_beneath():
     ]
 
 
+def _report(pages) -> bytes:
+    """A PDF whose pages are ("typed" | "scan", [picture sizes in points]). A typed page has a
+    text layer; a scan has none, which is what makes OCR, and not this, read it."""
+    import pypdfium2 as pdfium
+
+    from tests.unit.test_ocr_extraction import _typed_pdf
+
+    doc = pdfium.PdfDocument.new()
+    for kind, sizes in pages:
+        if kind == "typed":
+            typed = pdfium.PdfDocument(_typed_pdf(["Table 4 below gives the emission norms."],
+                                                  width=600, height=800))
+            doc.import_pages(typed, [0], index=len(doc))
+            page = doc[len(doc) - 1]
+        else:
+            page = doc.new_page(600, 800)
+        for size in sizes:
+            obj = pdfium.PdfImage.new(doc)
+            obj.set_bitmap(pdfium.PdfBitmap.from_pil(Image.new("RGB", (size * 2, size * 2), "red")))
+            obj.set_matrix(pdfium.PdfMatrix().scale(size, size).translate(50, 50))
+            page.insert_obj(obj)
+        page.gen_content()
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_a_typed_pdfs_pictures_are_found_on_their_page_and_only_for_their_tables():
+    """Its charts' captions are already in its text; a pasted table is the thing it does not say."""
+    found = find_pictures(_report([("typed", []), ("typed", [300])]), PDF_MIME)
+    assert [(p.unit_index, p.extension, p.tables_only) for p in found] == [(2, "png", True)]
+    assert picture_source.decode_picture(found[0].blob).shape[:2] == (600, 600)
+
+
+def test_a_scanned_pages_picture_is_left_to_ocr_and_a_logo_sized_one_is_not_read():
+    found = find_pictures(_report([("scan", [300]), ("typed", [60])]), PDF_MIME)
+    assert found == []
+
+
+def test_a_spreadsheets_pictures_are_found_on_the_sheet_they_are_placed_on():
+    from openpyxl import Workbook
+    from openpyxl.drawing.image import Image as SheetImage
+
+    wb = Workbook()
+    wb.active.title = "Summary"
+    data = wb.create_sheet("Plants")
+    data.add_image(SheetImage(io.BytesIO(_png("red"))), "B2")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    found = find_pictures(buf.getvalue(), XLSX_MIME)
+    assert [(p.unit_index, p.heading, p.extension) for p in found] == [(2, "Plants", "png")]
+
+
 # ==============================================================================
 # What the reader sends on
 # ==============================================================================
@@ -540,6 +599,81 @@ def test_vector_pictures_are_read_once_rendered(monkeypatch):
     [picture] = OfficePictureReader(tables).read(b"", PPTX_MIME)
     assert picture.unit_index == 2 and len(tables.shown) == 1
     assert tables.labels_shown == [True], "the sideways labels reach the reader with the picture"
+
+
+def test_a_picture_marked_tables_only_is_asked_for_its_tables_only(monkeypatch):
+    class _Asked(_Tables):
+        def read(self, image, labels_image=None, tables_only=False):
+            self.asked = getattr(self, "asked", []) + [tables_only]
+            return super().read(image, labels_image)
+
+    monkeypatch.setattr(picture_source, "find_pictures", lambda data, mime: [
+        picture_source.FoundPicture(1, None, _big("red"), "png", tables_only=True),
+        picture_source.FoundPicture(2, None, _big("blue"), "png"),
+    ])
+    tables = _Asked()
+    OfficePictureReader(tables).read(b"", PDF_MIME)
+    assert tables.asked == [True, False]
+
+
+def test_a_picture_with_lines_left_out_says_so_in_its_text():
+    tables = _Tables(ImageReading(lines=["Received with thanks"], unreadable=2))
+    [picture] = OfficePictureReader(tables).read(_deck([_big("red")]), PPTX_MIME)
+    assert picture.text == ("Received with thanks\n"
+                            "[2 lines in this picture could not be read reliably by OCR; check the original]")
+
+
+# ==============================================================================
+# Reading only what is a table
+# ==============================================================================
+
+def test_tables_only_spends_no_ocr_on_a_picture_with_no_table():
+    engine = _Engine([("Figure 3: SO2 trend", 0.99, 100, 500, 400, 520)])
+    reading = TableImageReader(engine=engine, grid_finder=lambda _i: []).read(_image(), tables_only=True)
+    assert reading == ImageReading() and engine.detector_calls == []
+
+
+def test_tables_only_does_not_count_a_frame_round_a_few_cells_as_a_table():
+    engine = _Engine([("Boxed note", 0.99, 120, 120, 280, 140)])
+    frame = _grid([100, 200], [100, 300, 500])
+    reading = _reader(engine, frame).read(_image(), tables_only=True)
+    assert reading == ImageReading() and engine.detector_calls == []
+
+
+def test_tables_only_reads_a_picture_that_is_a_table():
+    grid = _grid(ROWS, COLS)
+    words = [_word(grid, r, c, f"r{r}c{c}") for r in range(3) for c in range(3)]
+    reading = _reader(_Engine(words), grid).read(_image(), tables_only=True)
+    assert reading.tables and reading.tables[0].rows[0] == ["r0c0", "r0c1", "r0c2"]
+
+
+# ==============================================================================
+# Lines that could not be read are counted, so the passage can say so
+# ==============================================================================
+
+def test_lines_too_uncertain_to_keep_are_counted():
+    """Handwriting: found, and read as something nobody wrote. Left out, but not silently."""
+    words = [("Received with thanks", 0.99, 100, 400, 500, 420),
+             ("Rs. 4,500 only", 0.99, 100, 440, 500, 460),
+             ("Kumvr Ssngh", 0.45, 100, 500, 400, 520)]
+    reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
+    assert reading.unreadable == 1
+    assert "Kumvr" not in "\n".join(reading.lines)
+
+
+def test_specks_and_marks_the_engine_barely_saw_are_not_counted_as_lines():
+    words = [("Received with thanks", 0.99, 100, 400, 500, 420),
+             ("Rs. 4,500 only", 0.99, 100, 440, 500, 460),
+             ("~", 0.45, 100, 500, 120, 520), ("ijl", 0.1, 300, 500, 340, 520)]
+    reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
+    assert reading.unreadable == 0
+
+
+def test_a_photograph_with_nothing_readable_reports_nothing_missing():
+    """A photo of a site is not a document with gaps; saying so would be noise on every picture."""
+    words = [("Kumvr Ssngh", 0.45, 100, 500, 400, 520)]
+    reading = TableImageReader(engine=_Engine(words), grid_finder=lambda _i: []).read(_image())
+    assert reading == ImageReading()
 
 
 # ==============================================================================

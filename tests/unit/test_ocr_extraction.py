@@ -331,3 +331,92 @@ def test_low_confidence_lines_are_dropped():
     lines = engine.read(Image.new("RGB", (10, 10), "white"))
 
     assert [ln.text for ln in lines] == ["Clear line.", "Also clear."]
+
+
+# ==============================================================================
+# What a page could not say, and a scanned page that is a table
+# ==============================================================================
+
+class _GappyOcr(FakeOcr):
+    """Keeps some lines and reports others found but too uncertain to keep: a handwritten receipt."""
+
+    def __init__(self, reply: str, unreadable: int):
+        super().__init__(reply=reply)
+        self.unreadable = unreadable
+
+    def read_page(self, image):
+        from src.modules.document_pipeline.extraction.ocr import OcrPage
+
+        return OcrPage(lines=self.read(image), unreadable=self.unreadable)
+
+
+def test_a_page_with_lines_left_out_says_so_in_its_text(scanned_pdf):
+    """The receipt read "Received with thanks" and nothing of the handwritten amount, and a
+    passage that stops there reads as if that were all it said."""
+    content = PdfTextExtractor(ocr=_GappyOcr("Received with thanks", unreadable=3)).extract(scanned_pdf)
+    assert content.units[0].text.splitlines() == [
+        "Received with thanks",
+        "[3 lines on this page could not be read reliably by OCR; check the original]",
+    ]
+    assert content.ocr_unreadable_lines == {1: 3}
+
+
+def test_a_page_with_nothing_readable_gets_no_notice_to_pass_the_quality_gate_on(scanned_pdf):
+    content = PdfTextExtractor(ocr=_GappyOcr("", unreadable=5)).extract(scanned_pdf)
+    assert content.units[0].text == ""
+
+
+class _ScanTables:
+    """Stands in for the picture-table reader on a scanned page."""
+
+    def __init__(self, tables=()):
+        from src.modules.document_pipeline.extraction.picture_tables import (
+            ImageReading,
+            ImageTable,
+        )
+
+        self.reading = ImageReading(
+            tables=[ImageTable(rows=rows, bbox=(0, 0, 1, 1), title=title) for title, rows in tables],
+            lines=["Annexure II", "Source: CEA"] if tables else [],
+        )
+        self.asked = []
+
+    def read(self, image, labels_image=None, tables_only=False):
+        self.asked.append(tables_only)
+        return self.reading
+
+
+def test_a_scanned_page_that_is_a_table_is_read_as_one(scanned_pdf):
+    """Plain OCR returns a scanned table's cells as loose lines; the grid keeps each figure in
+    its row and column. The text outside the table stays the page's, and the cells are not
+    indexed twice."""
+    from src.modules.document_pipeline.extraction.pictures import TABLE_NOTICE
+
+    rows = [["Plant", "SO2"], ["Dadri", "1209"]]
+    reader = _ScanTables([("Table 2: Emissions", rows)])
+    engine = FakeOcr(reply="Annexure II\nPlant SO2\nDadri 1209\nSource: CEA")
+
+    content = PdfTextExtractor(ocr=engine, table_reader=reader).extract(scanned_pdf)
+
+    assert reader.asked == [True]
+    assert content.units[0].text == "Annexure II\nSource: CEA"
+    [table] = content.tables
+    assert table.unit_index == 1
+    assert table.rows[0][0] == f"Table 2: Emissions ({TABLE_NOTICE})"
+    assert table.rows[1:] == rows
+
+
+def test_a_scanned_page_with_no_table_keeps_its_ocr_text(scanned_pdf):
+    engine = FakeOcr(reply="Directions under Section 5.")
+    content = PdfTextExtractor(ocr=engine, table_reader=_ScanTables()).extract(scanned_pdf)
+    assert content.units[0].text == "Directions under Section 5."
+    assert content.tables == []
+
+
+def test_a_table_reader_that_fails_costs_the_page_nothing(scanned_pdf):
+    class _Broken:
+        def read(self, image, labels_image=None, tables_only=False):
+            raise RuntimeError("grid finder crashed")
+
+    content = PdfTextExtractor(ocr=FakeOcr(reply="Directions."), table_reader=_Broken()).extract(scanned_pdf)
+    assert content.units[0].text == "Directions."

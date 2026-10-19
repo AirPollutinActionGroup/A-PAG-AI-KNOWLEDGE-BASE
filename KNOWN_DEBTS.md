@@ -1066,3 +1066,54 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   diagram drawn with shape connectors (`wps:cxnSp`) is not read; the corpus's one Word drawing
   has no connectors. **A chart or diagram saved as a picture is not covered here**: it gets the
   OCR of its printed labels (`extraction/pictures.py`) and nothing about its bars or arrows.
+
+### 50. Pictures in PDFs and spreadsheets, tables on scanned pages, and lines OCR could not read (Built)
+- **Status**: Built and run over the whole live corpus (28 PDFs, 19 Office files): no document
+  changes language or quality verdict (`compare_extraction.py`).
+- **Context**: #46 read pictures in Word and PowerPoint only, on the reasoning that a PDF page's
+  pictures are seen by OCR. That holds for a scanned page and not for a typed one: a typed report
+  with a table pasted in as a picture has a text layer, so OCR never runs on it, and the table's
+  figures were not in the index at all. A scanned page that *is* a ruled table had the opposite
+  problem -- OCR read it, as loose lines with no rows or columns. And OCR drops lines it cannot
+  read with confidence, which is right, but the passage then read as complete: a handwritten
+  receipt came back as "Received with thanks" with no sign that the amount was missing.
+- **What was built**:
+  - **Typed PDF pages** (`picture_source._pdf_pictures`): pictures of at least 1.5 inches on a
+    page with a text layer, drawn as the page shows them, read **only if they are tables**
+    (`tables_only`): the grid finder decides before any OCR is spent, because a report's charts
+    and photographs carry captions in its text already, and one report has 217 pictures.
+  - **Spreadsheets** (`_xlsx_pictures`): pictures placed on a sheet, filed under the sheet's name,
+    found through the workbook's own relationships (sheet -> drawing -> media).
+  - **Scanned pages** (`PdfTextExtractor._scan_tables`): after OCR, the same grid check; a page
+    that is a ruled table becomes an `ExtractedTable` with the OCR notice as its caption, and the
+    page's text becomes only what lies outside the table, so the cells are not indexed twice.
+  - **Unreadable lines are said** in the passage: "[n lines on this page could not be read
+    reliably by OCR; check the original]" on a scanned page, "... in this picture" on a picture.
+    Counted only for words with at least three letters or digits and a score between 0.3 and the
+    keep threshold, so specks are not lines; and **only where there is other text**, so a notice
+    never carries an unreadable page through the quality gate.
+- **Measured on the corpus**:
+  - **10 new tables in 3 PDFs.** The IITD 2022 report's monthly dispersion results, with and
+    without FGD (`JAN | 17812 | 20.91,85.21 | 23.84 | 3783 ...`, 7 tables), and its emission-norms
+    table; the NOx-control table of 261-MP-2022 (twice, on pages 17 and 41). Read by eye against
+    the pages, they are right. **One is wrong**: a chart on page 53 of the NEERI study came back as
+    a two-row "table" (`PM10 | 9 19 24 32 15 2`). It carries the OCR notice; a filter for it would
+    be a guess, so it is recorded here instead.
+  - **Spreadsheets: none.** No live workbook has a picture on a sheet.
+  - **Scanned pages: no tables found** in the corpus -- its scans are prose, as #13 measured. The
+    check is for the scanned annexure that is a table, which this corpus does not have yet.
+  - **Unreadable-line notices**: 70 of the 162 pages of `Part_7_21.12.2017.pdf` (87 lines, mostly
+    signatures and stamps), the MoP OM (4), the WhatsApp receipt (4, the handwriting), NEERI (1).
+- **Cost**, in the extraction worker's image:
+  - Typed PDFs: 0-5s more for most; 36s more for the 246-page IITD report (17s -> 53s), 9s for
+    the CSE SOx report, 7s for the IIT Bombay deck.
+  - Scanned pages: the grid check is about **1s a page at 300 dpi** (OCR is about 4s). The
+    162-page scan took 811s against 630s, for no table. An earlier measurement of 3,120s for the
+    same run was the development machine, not the code: rerun, it was 811s.
+- **Not done, and why**:
+  - **Handwriting is still not read.** PP-OCRv6 medium, PP-OCRv5 server, Tesseract, EasyOCR and
+    TrOCR were tried on the receipt and all either missed it or invented words. Only a vision
+    model reads it, and none may be used here; the notice is what is possible.
+  - **A chart in a PDF gives nothing** unless it is drawn as a ruled table. Its labels are usually
+    in the page's text already.
+  - **Tables with no ruling lines** are not found in PDFs either, as in #46.

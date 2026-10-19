@@ -35,7 +35,12 @@ from src.modules.document_pipeline.extraction.pictures import (
     reset_picture_reader,
 )
 from src.modules.document_pipeline.extraction.service import ExtractionService
-from src.modules.document_pipeline.formats import DOCX_MIME, PDF_MIME, PPTX_MIME
+from src.modules.document_pipeline.formats import (
+    DOCX_MIME,
+    PDF_MIME,
+    PPTX_MIME,
+    XLSX_MIME,
+)
 from src.modules.document_pipeline.normalization.service import NormalizationService
 
 
@@ -192,8 +197,14 @@ def test_a_reader_that_fails_costs_the_document_nothing():
     assert result.figures == [] and reader.calls == [PPTX_MIME]
 
 
-def test_only_word_and_powerpoint_files_are_sent_to_the_reader():
-    """PDF pages are read by the PDF extractor and OCR, which already sees a picture on the page."""
+def test_every_supported_format_is_sent_to_the_reader():
+    """A PDF reaches it too: a table pasted into a typed report as a picture is pixels, and the
+    page's text layer says nothing of it. Which of its pictures are read is the source's decision
+    (`picture_source._pdf_pictures`), not this one's."""
+    from openpyxl import Workbook
+
+    from tests.unit.test_ocr_extraction import _pdf
+
     reader = _Reader()
     service = ExtractionService(picture_reader=reader)
     d = DocxDocument()
@@ -201,12 +212,15 @@ def test_only_word_and_powerpoint_files_are_sent_to_the_reader():
     buf = io.BytesIO()
     d.save(buf)
     service.extract(uuid.uuid4(), buf.getvalue(), DOCX_MIME)
-    assert reader.calls == [DOCX_MIME]
 
-    from tests.unit.test_ocr_extraction import _pdf
+    wb = Workbook()
+    wb.active["A1"] = "x"
+    sheet = io.BytesIO()
+    wb.save(sheet)
+    service.extract(uuid.uuid4(), sheet.getvalue(), XLSX_MIME)
+    service.extract(uuid.uuid4(), _pdf(["text"]), PDF_MIME)
 
-    service.extract(uuid.uuid4(), _pdf(["typed"]), PDF_MIME)
-    assert reader.calls == [DOCX_MIME], "a PDF must not reach the picture reader"
+    assert reader.calls == [DOCX_MIME, XLSX_MIME, PDF_MIME]
 
 
 def test_a_picture_that_said_nothing_adds_nothing():

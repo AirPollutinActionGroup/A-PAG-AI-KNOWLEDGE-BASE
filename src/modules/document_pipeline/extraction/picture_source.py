@@ -1,10 +1,10 @@
-"""Finding the pictures in a Word or PowerPoint file, and which section each one sits in.
+"""Finding the pictures in a document, and which section each one sits in.
 
 Only *finding*: what is in a picture is `picture_tables.py`'s business. A picture is wanted with
-three things -- the bytes, the unit it is on (a slide number; Word has one unit), and for Word the
-heading it sits under, because a picture cited under the wrong section is worse than one not found
-(#19). Headings are read with the same rule as `DocxTextExtractor`, so the text matches the
-chunker's section by its exact string.
+three things -- the bytes, the unit it is on (a slide, page or sheet number; Word has one unit),
+and for Word the heading it sits under, because a picture cited under the wrong section is worse
+than one not found (#19). Headings are read with the same rule as `DocxTextExtractor`, so the text
+matches the chunker's section by its exact string.
 """
 
 import io
@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 from typing import NamedTuple
 
-from src.modules.document_pipeline.formats import PPTX_MIME
+from src.modules.document_pipeline.formats import PDF_MIME, PPTX_MIME, XLSX_MIME
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +32,106 @@ class FoundPicture(NamedTuple):
     heading: str | None
     blob: bytes
     extension: str
+    # Read only if it turns out to be a table. A typed PDF's pictures are mostly charts and
+    # photographs whose captions are already in its text, and reading all of them is minutes a
+    # report (217 in one); a cheap grid check picks out the few that are tables (7 of the 217).
+    tables_only: bool = False
 
 
 def find_pictures(data: bytes, mime_type: str) -> list[FoundPicture]:
     """Every picture in the file, in reading order. Raises if the file cannot be opened."""
     if mime_type == PPTX_MIME:
         return _pptx_pictures(data)
+    if mime_type == PDF_MIME:
+        return _pdf_pictures(data)
+    if mime_type == XLSX_MIME:
+        return _xlsx_pictures(data)
     return _docx_pictures(data)
+
+
+# A picture smaller than this on the page, in points, is a logo, an icon or a signature.
+_PDF_MIN_PICTURE_PT = 108  # 1.5 inches
+
+
+def _pdf_pictures(data: bytes) -> list[FoundPicture]:
+    """The pictures on a PDF's typed pages, as drawn (masks and transforms applied).
+
+    Pages with no text layer are skipped: they are scans, and OCR reads the whole page already.
+    """
+    import cv2
+    import numpy as np
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
+
+    from src.core.config import settings
+
+    found: list[FoundPicture] = []
+    pdf = pdfium.PdfDocument(data)
+    try:
+        for index in range(len(pdf)):
+            page = pdf[index]
+            if page.get_textpage().count_chars() < settings.OCR_MIN_NATIVE_CHARS:
+                continue
+            for obj in page.get_objects(filter=(pdfium_c.FPDF_PAGEOBJ_IMAGE,), max_depth=3):
+                left, bottom, right, top = obj.get_bounds()
+                if right - left < _PDF_MIN_PICTURE_PT or top - bottom < _PDF_MIN_PICTURE_PT:
+                    continue
+                try:
+                    image = np.asarray(obj.get_bitmap(render=True).to_pil().convert("RGB"))
+                except Exception as e:
+                    logger.debug("page %d: a picture could not be drawn: %s", index + 1, e)
+                    continue
+                ok, png = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+                if ok:
+                    found.append(FoundPicture(index + 1, None, png.tobytes(), "png", tables_only=True))
+    finally:
+        pdf.close()
+    return found
+
+
+def _xlsx_pictures(data: bytes) -> list[FoundPicture]:
+    """The pictures placed on each worksheet, filed under the sheet, by following the workbook's
+    own relationships: a sheet points at a drawing, and a drawing at its pictures."""
+    import posixpath
+    import zipfile
+
+    from lxml import etree
+
+    rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    found: list[FoundPicture] = []
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = set(zf.namelist())
+
+        def rels(part: str) -> dict[str, str]:
+            folder, name = posixpath.split(part)
+            path = posixpath.join(folder, "_rels", name + ".rels")
+            if path not in names:
+                return {}
+            out = {}
+            for rel in etree.fromstring(zf.read(path), parser=parser):
+                target = rel.get("Target", "")
+                out[rel.get("Id")] = (target.lstrip("/") if target.startswith("/")
+                                      else posixpath.normpath(posixpath.join(folder, target)))
+            return out
+
+        if "xl/workbook.xml" not in names:
+            return []
+        workbook = etree.fromstring(zf.read("xl/workbook.xml"), parser=parser)
+        book_rels = rels("xl/workbook.xml")
+        for index, sheet in enumerate(workbook.iter(f"{{{main}}}sheet"), start=1):
+            sheet_part = book_rels.get(sheet.get(f"{{{rel_ns}}}id"))
+            if not sheet_part or sheet_part not in names:
+                continue
+            for drawing in rels(sheet_part).values():
+                if "/drawings/" not in drawing or drawing not in names:
+                    continue
+                for target in rels(drawing).values():
+                    if "/media/" in target and target in names:
+                        extension = posixpath.splitext(target)[1].lstrip(".").lower()
+                        found.append(FoundPicture(index, sheet.get("name"), zf.read(target), extension))
+    return found
 
 
 def _pptx_pictures(data: bytes) -> list[FoundPicture]:

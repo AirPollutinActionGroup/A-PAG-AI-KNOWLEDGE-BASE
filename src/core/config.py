@@ -256,8 +256,8 @@ class Settings(BaseSettings):
     # minutes. Pages past the cap are recorded as unread rather than quietly dropped.
     OCR_MAX_PAGES: int = 500
 
-    # Pictures inside Word and PowerPoint files: a slide that is a screenshot of a table, a chart
-    # saved as an image (`extraction/pictures.py`). Read with the OCR above plus img2table for the
+    # Pictures inside Word, PowerPoint, Excel and typed PDF files: a slide that is a screenshot of
+    # a table, a chart saved as an image (`extraction/pictures.py`). Read with the OCR above plus img2table for the
     # grid, so it needs `OCR_ENABLED` too. Off, a document extracts exactly as it did before.
     PICTURES_ENABLED: bool = True
     # A deck of photographs is otherwise unbounded, and each picture is seconds of CPU.
