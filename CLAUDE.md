@@ -287,20 +287,6 @@ cannot be located it falls back to the full provider, then to the character budg
 `document_chunks` is the one pipeline artifact that lives in Postgres instead of object storage.
 That's deliberate: chunks are queried, not merely stored — the embedding stage adds a vector
 column to the same row, and a similarity search cannot join against JSON in a bucket.
-`page_number`, `section_heading` and `is_table` are the citation contract, and the `scale` column
-ships holding one value so a second granularity later is an INSERT rather than a migration plus a
-backfill (`KNOWN_DEBTS.md` #17).
-
-### Embedding: the model is a configuration decision, the dimension is not
-
-`src/modules/document_pipeline/embedding/` mirrors `chunking/`'s shape — pure logic, no storage or
-DB awareness. `provider.py` holds the `EmbeddingProvider` ABC and `FastEmbedProvider` (ONNX via
-fastembed, no PyTorch); `service.py` batches chunks per inference call.
-
-`embed_passages()` and `embed_query()` are **separate methods**, and that split is load-bearing.
-Several model families are asymmetric — E5 requires literal `query: `/`passage: ` prefixes, BGE
-v1.5 takes an instruction on the query side only — and feeding both sides the same shape costs
-retrieval quality with **no exception and no warning**. Keeping that inside the provider means the
 Headings carry from page to page in a PDF or Word file, where a section runs on, but **never
 across slides or worksheets**, which stand alone — carrying them filed 8 of 21 slides of one deck
 under the previous slide's title. A worksheet unit is marked `text_is_table`: its text feeds the
@@ -320,6 +306,20 @@ when there are exactly as many labels as empty merged blocks. A decorative fill 
 label count that does not match, is left alone rather than guessed. A timeline's year is put in
 front of its description, since a group's text boxes come out in the order they were created.
 
+`page_number`, `section_heading` and `is_table` are the citation contract, and the `scale` column
+ships holding one value so a second granularity later is an INSERT rather than a migration plus a
+backfill (`KNOWN_DEBTS.md` #17).
+
+### Embedding: the model is a configuration decision, the dimension is not
+
+`src/modules/document_pipeline/embedding/` mirrors `chunking/`'s shape — pure logic, no storage or
+DB awareness. `provider.py` holds the `EmbeddingProvider` ABC and `FastEmbedProvider` (ONNX via
+fastembed, no PyTorch); `service.py` batches chunks per inference call.
+
+`embed_passages()` and `embed_query()` are **separate methods**, and that split is load-bearing.
+Several model families are asymmetric — E5 requires literal `query: `/`passage: ` prefixes, BGE
+v1.5 takes an instruction on the query side only — and feeding both sides the same shape costs
+retrieval quality with **no exception and no warning**. Keeping that inside the provider means the
 retrieval endpoint cannot forget it and a model-family change edits one class, not every call site.
 `_is_bge()` deliberately excludes BGE-M3, which is not instruction-tuned the way v1.5 is.
 
@@ -896,6 +896,13 @@ fixed that shape of failure. The 5 that miss out of 100 are now prose or summari
 | why FGD is considered unnecessary for certain plants | `TPP FGD_Comparative Note_May 2026.docx` |
 | whether Section 7 of the Electricity Act 2003 requires … | `_annex_266_AS212_IjMmVN (2).docx` |
 | percentage change in CFPP-SO2 emissions 2021→2023 | `s44407-026-00075-4.pdf` |
+| the gap between commissioned and required FGD capacity | `Report on TPPs.xlsx` |
+| additional environmental impacts of FGD (CO2, coal use) | `Report on TPPs.xlsx` |
+
+The last two are new, and are questions generated from a one-sheet *summary* of reports whose full
+text is itself in the corpus: lexical search ranks the sheet first, and the reranker prefers the
+full reports (the NIAS study, "Note on FGD installation"). Whether that is a miss or a better
+answer is a judgement the eval set cannot make -- it records one expected document per question.
 
 Two are arguing a position rather than stating a fact, which is the harder retrieval problem:
 the passage that answers "why is X considered unnecessary" rarely contains those words. Do not
@@ -922,13 +929,6 @@ figures, so every number in an answer is checked against the passages it was bui
 Measured over 30 answers: **100% numeric fidelity (73/73)**, 90% citation coverage. Normalising
 `31st December 2024` to `31 December 2024`, `1,02,040` to `102040` and `Rs. 0.20` to `0.20` is
 what keeps this measuring truth rather than formatting — a check that reports hallucination
-| the gap between commissioned and required FGD capacity | `Report on TPPs.xlsx` |
-| additional environmental impacts of FGD (CO2, coal use) | `Report on TPPs.xlsx` |
-
-The last two are new, and are questions generated from a one-sheet *summary* of reports whose full
-text is itself in the corpus: lexical search ranks the sheet first, and the reranker prefers the
-full reports (the NIAS study, "Note on FGD installation"). Whether that is a miss or a better
-answer is a judgement the eval set cannot make -- it records one expected document per question.
 where there is none gets switched off. It cannot see a claim that is wrong without being
 numerically wrong, and says so in its own docstring.
 
