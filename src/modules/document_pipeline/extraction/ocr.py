@@ -18,11 +18,11 @@ model. LlamaParse and unstructured's hosted tier are cloud services, which would
 document out of the deployment at ingestion — the opposite of what the boundary between this
 system and an external model exists to enforce.
 
-That reasoning is corpus-specific and may not survive the rest of the drive. If scanned budget
-sheets or emission tables turn up, the reader for tables in pictures (`picture_tables.py`:
-img2table finds the ruled grid, this engine reads the cells) is the layer to put on top of this --
-it already does exactly that for screenshots of tables in Word and PowerPoint files, and replaced
-Docling there after scoring 98.8% of cells against Docling's 78.5%.
+That reasoning is corpus-specific and may not survive the rest of the drive, so a scanned page
+that *is* a ruled table is now read as one, by the reader for tables in pictures
+(`picture_tables.py`: img2table finds the ruled grid, this engine reads the cells), which replaced
+Docling for screenshots of tables after scoring 98.8% of cells against Docling's 78.5%. See
+`PdfTextExtractor._scan_tables`.
 
 **Why the model is loaded lazily.** Unlike the embedding model, which every EMBED job needs, OCR
 is needed only by the small minority of documents that are scans. Loading on first use means an

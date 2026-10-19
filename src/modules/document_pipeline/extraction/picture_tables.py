@@ -116,6 +116,9 @@ class ImageReading:
     tables: list[ImageTable] = field(default_factory=list)
     # Text outside any table, in reading order: a table's notes, or all of a picture that has none.
     lines: list[str] = field(default_factory=list)
+    # Lines the engine found but could not read with confidence, and that were therefore left
+    # out. Handwriting is the usual cause. Counted so the passage can say something is missing.
+    unreadable: int = 0
 
 
 class TableImageReader:
@@ -199,13 +202,20 @@ class TableImageReader:
     # One picture
     # ------------------------------------------------------------------
 
-    def read(self, image, labels_image=None) -> ImageReading:
+    def read(self, image, labels_image=None, tables_only: bool = False) -> ImageReading:
         """`image` is a BGR array as OpenCV loads it. `labels_image` is the same picture holding
-        only its sideways text (see `picture_source.split_rotated_labels`), same size."""
+        only its sideways text (see `picture_source.split_rotated_labels`), same size.
+
+        `tables_only` reads the picture only if it holds a ruled table, which the grid finder
+        answers before any OCR is spent (a fraction of a second for a picture, about a second for
+        a whole page scanned at 300 dpi): a typed PDF's pictures are
+        mostly charts and photographs whose captions are already in its text."""
         import cv2
 
         height, width = image.shape[:2]
         if min(height, width) < 40:
+            return ImageReading()
+        if tables_only and not any(_is_table_grid(g) for g in self._grid_finder(image)):
             return ImageReading()
         if max(height, width) < _UPSCALE_BELOW_PX:
             image = cv2.resize(image, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
@@ -239,7 +249,11 @@ class TableImageReader:
         # confident line is not: it is a sign, a caption or a title, and is kept.
         if not tables and len(texts) < 2 and not _one_confident_line(lines):
             texts = []
-        return ImageReading(tables=tables, lines=texts)
+        unreadable = sum(
+            1 for w in outside
+            if _DOUBTFUL_FLOOR <= w.score < self._min_confidence and sum(ch.isalnum() for ch in w.text) >= 3
+        )
+        return ImageReading(tables=tables, lines=texts, unreadable=unreadable if texts or tables else 0)
 
     # ------------------------------------------------------------------
     # One table
@@ -542,6 +556,13 @@ def _title_above(lines, bbox: tuple):
         if line[1] < bbox[1] and bbox[1] - line[1] <= reach and line[3] >= bbox[0] and line[2] <= bbox[2]
     ]
     return max(above, key=lambda line: line[1], default=None)
+
+
+def _is_table_grid(grid: _Grid) -> bool:
+    """A grid worth reading as a table: at least two rows, two columns and six cells."""
+    rows = len(grid.cells)
+    cols = max((len(r) for r in grid.cells), default=0)
+    return rows >= 2 and cols >= 2 and rows * cols >= _MIN_CELLS
 
 
 def _one_confident_line(lines) -> bool:

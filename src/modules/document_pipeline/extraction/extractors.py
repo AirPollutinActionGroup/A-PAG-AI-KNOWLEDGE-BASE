@@ -94,10 +94,13 @@ class PdfTextExtractor(TextExtractor):
     was produced.
     """
 
-    def __init__(self, ocr: OcrEngine | None = None):
+    def __init__(self, ocr: OcrEngine | None = None, table_reader=None):
         # An explicit engine is for tests. In production it is resolved lazily on the first page
         # that needs it, so an extraction worker that never meets a scan never loads a model.
         self._ocr = ocr
+        # The reader of tables in pictures (`picture_tables.py`), for a scanned page that is a
+        # ruled table. Injected in tests; otherwise the picture reader's, when pictures are on.
+        self._table_reader = table_reader
 
     def _engine(self) -> OcrEngine | None:
         # The setting is authoritative even over an injected engine. Otherwise OCR_ENABLED=false
@@ -138,7 +141,8 @@ class PdfTextExtractor(TextExtractor):
                                 settings.OCR_MAX_PAGES, index,
                             )
                         else:
-                            read, unreadable = self._ocr_page(page, index)
+                            read, unreadable, scan_tables = self._ocr_page(page, index)
+                            tables.extend(scan_tables)
                             if unreadable:
                                 unreadable_lines[index] = unreadable
                             if read:
@@ -223,26 +227,80 @@ class PdfTextExtractor(TextExtractor):
         except Exception:
             return False
 
-    def _ocr_page(self, page, index: int) -> tuple[str, int]:
-        """Renders one page and reads it: (text, lines found but too uncertain to keep).
+    def _ocr_page(self, page, index: int) -> tuple[str, int, list[ExtractedTable]]:
+        """Renders one page and reads it: (text, lines found but too uncertain to keep, tables).
 
         The text is "" if OCR is off, unavailable, or found nothing — in every one of those
         cases the page keeps its (empty) native text, and the normalization quality gate decides
-        what an empty document means. That judgement belongs there, not here."""
+        what an empty document means. That judgement belongs there, not here.
+
+        A scanned page that is a ruled table is read as one, with its rows and columns -- a plain
+        OCR pass returns its cells as loose lines with no grid -- and its text outside the table
+        stays the page's text, so the cells are not indexed twice. The grid check costs about a
+        second on a 300 dpi page (162 pages of prose: 811s against 630s), and no more OCR is run
+        on a page where it finds no table.
+
+        Lines that were found but could not be read (handwriting, mostly) are said to be missing
+        at the end of the page's text, so a passage does not read as complete when it is not.
+        Only on a page that has other text: a notice must never be what lets an unreadable scan
+        through the quality gate."""
         engine = self._engine()
         if engine is None:
-            return "", 0
+            return "", 0, []
         try:
             image = page.to_image(resolution=settings.OCR_RESOLUTION).original
             read = engine.read_page(image)
         except OcrUnavailable as e:
             logger.error("OCR failed on page %d: %s", index, e)
-            return "", 0
+            return "", 0, []
         except Exception as e:
             # Rendering can fail on a malformed page. One bad page must not lose the other 161.
             logger.warning("Could not render page %d for OCR: %s", index, e)
-            return "", 0
-        return "\n".join(line.text for line in read.lines), read.unreadable
+            return "", 0, []
+        text = "\n".join(line.text for line in read.lines)
+        tables = self._scan_tables(image, index) if text else ([], None)
+        found, rest = tables
+        if found:
+            text = rest
+        if text and read.unreadable:
+            from src.modules.document_pipeline.extraction.pictures import (
+                unreadable_notice,
+            )
+
+            text += "\n" + unreadable_notice(read.unreadable, "on this page")
+        return text, read.unreadable, found
+
+    def _scan_tables(self, image, index: int) -> tuple[list[ExtractedTable], str | None]:
+        """The ruled tables on a scanned page, and the page's text outside them."""
+        reader = self._table_reader
+        if reader is None:
+            from src.modules.document_pipeline.extraction.pictures import (
+                get_picture_reader,
+            )
+
+            pictures = get_picture_reader()
+            reader = pictures.table_reader() if pictures is not None else None
+        if reader is None:
+            return [], None
+        try:
+            import cv2
+            import numpy as np
+
+            reading = reader.read(
+                cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR), tables_only=True,
+            )
+        except Exception as e:
+            logger.warning("Could not look for tables on scanned page %d: %s", index, e)
+            return [], None
+        if not reading.tables:
+            return [], None
+        from src.modules.document_pipeline.extraction.pictures import with_ocr_notice
+
+        tables = [
+            ExtractedTable(unit_index=index, rows=with_ocr_notice(t.rows, t.title))
+            for t in reading.tables
+        ]
+        return tables, "\n".join(reading.lines)
 
     @staticmethod
     def _page_lines(page, page_index: int) -> list[tuple[str, float, int]]:

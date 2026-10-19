@@ -213,11 +213,17 @@ which costs the lexical arm a term it can never match — BM25 cannot match what
 tokenised. Lines below `OCR_MIN_CONFIDENCE` are dropped rather than kept, because an invented
 word inside a passage that will later be cited is worse than a gap -- but the gap is **recorded**
 (`ocr_unreadable_lines`, per page), because a dropped line can be a real one: the MoP memo lost
-"category A, B & C" that way, silently. **Resolution is 300 dpi**, not 144: at 144 those lines
-read as noise, at 300 they read at 0.99 (`KNOWN_DEBTS.md` #44). A scan has no font sizes, so its
-headings come from "Subject:" lines instead.
+"category A, B & C" that way, silently. The passage says so too: a page with lines left out ends
+with "[n lines on this page could not be read reliably by OCR; check the original]" -- but only a
+page that has other text, so a notice is never what carries an unreadable scan through the quality
+gate. Handwriting is the usual cause and no local OCR reads it (`KNOWN_DEBTS.md` #50). **Resolution
+is 300 dpi**, not 144: at 144 those lines read as noise, at 300 they read at 0.99 (`KNOWN_DEBTS.md`
+#44). A scan has no font sizes, so its headings come from "Subject:" lines instead. **A scanned
+page that is a ruled table is read as one** (`PdfTextExtractor._scan_tables`), by the same reader
+as pictures below: plain OCR returns its cells as loose lines, so a figure lost its row and column.
+The page's text outside the table stays its text, so the cells are not indexed twice.
 
-**Pictures in Word and PowerPoint files are read, and marked as read from pixels**
+**Pictures in Word, PowerPoint, Excel and typed PDF files are read, and marked as read from pixels**
 (`extraction/pictures.py`, `picture_source.py`, `picture_tables.py`, `KNOWN_DEBTS.md` #46). A table
 saved as a screenshot is pixels. img2table finds its ruled grid with OpenCV and the OCR that reads
 scanned pages reads the words, each placed in the cell that holds it, so "1209" keeps its row and
@@ -226,8 +232,13 @@ the slide or Word heading the picture sat under. It was measured against Docling
 read by eye -- 98.8% of cells and 100% of figures against 78.5% and 75.3%, at 1.7-4s a table against
 3-14s, without PyTorch -- and replaced it. Every such table opens with a caption line saying it was
 read by OCR and should be checked before citing, and every figure's label says so too. It does not
-read tables with no ruling lines, charts' values, or what a map shows, and it is for PowerPoint and
-Word only: a PDF page's pictures are already seen by the PDF extractor and OCR. An EMF (what Office
+read tables with no ruling lines, charts' values, or what a map shows. **A typed PDF's pictures are
+read only when they are tables** (`FoundPicture.tables_only`): the grid finder answers that before
+any OCR is spent, and a report's charts and photographs have their captions in its text already --
+reading all of them would be minutes a document. Across the 28 live PDFs this found 10 tables in 3
+documents (7 in the IITD report's dispersion results) and one false one, a chart; it costs 0-36s a
+typed document and about 1s a scanned page (`KNOWN_DEBTS.md` #50). A scanned page's pictures are
+not looked at separately, since OCR reads the whole page. An EMF (what Office
 writes for a table pasted from Excel) is drawn with emf2svg and rsvg-convert first, its sideways
 labels apart from the rest, because the converter draws them over the first row of figures.
 
@@ -1013,8 +1024,9 @@ rationale before "fixing" them:
   wholesale rewrite, if a real document proves the trade-off wrong.
 - **OCR exists, for scanned PDF pages only** (`rapidocr`, ONNX, no PyTorch). It was added
   because debt #14's stated trigger fired: three real documents arrived with no text layer. It is
-  a *fallback*, not a parser — it returns text lines, not table grids, so a scanned table would
-  come out as ungrouped numbers. `OCR_ENABLED=false` switches it off entirely and is
+  a *fallback*, not a parser — it returns text lines, and a scanned page keeps rows and columns
+  only when it is a ruled table, which the picture-table reader finds (#50); an unruled scanned
+  table still comes out as ungrouped numbers. `OCR_ENABLED=false` switches it off entirely and is
   authoritative even over an injected engine. See `KNOWN_DEBTS.md` #13/#14.
 - The Postgres image is **`paradedb/paradedb:0.25.10-pg16`**, not `pgvector/pgvector:pg16`. It
   carries pgvector *and* `pg_search` on the same Postgres 16.15, so the switch was not a version

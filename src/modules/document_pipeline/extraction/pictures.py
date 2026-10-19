@@ -1,4 +1,4 @@
-"""Reading the words and numbers inside pictures in Word and PowerPoint files.
+"""Reading the words and numbers inside pictures in Word, PowerPoint, Excel and PDF files.
 
 A deck's table is often a screenshot: the numbers are pixels, and without reading them "average max
 SOx 1209 mg/Nm3" on slide 9 of "TPPs Delhi NCR" cannot be found by anyone who asks for it. Our own
@@ -31,13 +31,20 @@ from src.modules.document_pipeline.extraction.models import (
     ExtractedFigure,
     ExtractedTable,
 )
-from src.modules.document_pipeline.formats import DOCX_MIME, PPTX_MIME
+from src.modules.document_pipeline.formats import (
+    DOCX_MIME,
+    PDF_MIME,
+    PPTX_MIME,
+    XLSX_MIME,
+)
 
 logger = logging.getLogger(__name__)
 
-# Formats whose pictures are read. PDF is deliberately not here: its pages are read by the PDF
-# extractor and OCR, and a picture inside a PDF page is already part of what OCR sees.
-PICTURE_FORMATS = (PPTX_MIME, DOCX_MIME)
+# Formats whose pictures are read. Word, PowerPoint and Excel pictures are read in full; a typed
+# PDF's only when they are tables (`FoundPicture.tables_only`), because its charts' captions are
+# already in its text and reading all 217 pictures of one report would be minutes. A scanned PDF
+# page is not here at all: OCR reads the whole page.
+PICTURE_FORMATS = (PPTX_MIME, DOCX_MIME, XLSX_MIME, PDF_MIME)
 
 # A picture repeated on this many slides or pages is a logo or a template ornament.
 _REPEATED = 3
@@ -73,7 +80,7 @@ class PictureReader(ABC):
 
 
 class OfficePictureReader(PictureReader):
-    """Finds the pictures in a Word or PowerPoint file and reads each with `TableImageReader`."""
+    """Finds the pictures in a file and reads each with `TableImageReader`."""
 
     def __init__(self, table_reader=None):
         self._table_reader = table_reader
@@ -82,6 +89,10 @@ class OfficePictureReader(PictureReader):
     @property
     def name(self) -> str:
         return "img2table+rapidocr"
+
+    def table_reader(self):
+        """The reader of one picture, shared with the PDF extractor for tables on scanned pages."""
+        return self._reader()
 
     def _reader(self):
         if self._table_reader is not None:
@@ -153,13 +164,17 @@ class OfficePictureReader(PictureReader):
                 continue
             labels = decode_picture(labels_blob) if labels_blob else None
             try:
-                reading = (self._reader().read(image, labels_image=labels) if labels is not None
-                           else self._reader().read(image))
+                options = {"tables_only": True} if picture.tables_only else {}
+                if labels is not None:
+                    options["labels_image"] = labels
+                reading = self._reader().read(image, **options)
             except Exception as e:
                 logger.warning("Could not read a picture on unit %s: %s", picture.unit_index, e)
                 continue
-            tables = [_with_notice(t.rows, t.title) for t in reading.tables]
+            tables = [with_ocr_notice(t.rows, t.title) for t in reading.tables]
             text = "\n".join(reading.lines)
+            if text and reading.unreadable:
+                text += "\n" + unreadable_notice(reading.unreadable, "in this picture")
             if not tables and not text:
                 continue
             results.append(PictureText(
@@ -174,7 +189,15 @@ class OfficePictureReader(PictureReader):
         return results
 
 
-def _with_notice(rows: list[list[str]], title: str) -> list[list[str]]:
+def unreadable_notice(count: int, where: str) -> str:
+    """Said in the passage where lines were left out: handwriting, or print too faint to read.
+    Without it a reader cannot tell a page that said nothing more from one that said something
+    the OCR could not read -- the amount on a handwritten receipt, for instance."""
+    lines = "line" if count == 1 else "lines"
+    return f"[{count} {lines} {where} could not be read reliably by OCR; check the original]"
+
+
+def with_ocr_notice(rows: list[list[str]], title: str) -> list[list[str]]:
     """The table with a first line naming it and saying where it came from. One filled cell on a
     row of several is what the chunker reads as a title, so it stays the caption, above the real
     header and repeated with it in every row group."""
@@ -244,7 +267,7 @@ def get_picture_reader() -> PictureReader | None:
             import rapidocr  # noqa: F401
         except ImportError as e:
             logger.warning(
-                "Pictures in Word and PowerPoint files are not read: %s is not installed. Set "
+                "Pictures in documents are not read: %s is not installed. Set "
                 "PICTURES_ENABLED=false to silence this.", e.name,
             )
             _reader_failed = True
