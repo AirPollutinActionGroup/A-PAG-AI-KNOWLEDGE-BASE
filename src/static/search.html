@@ -160,7 +160,9 @@ button { cursor: pointer; background: none; border: 0; }
    they read as one family -- but the placeholder is a warning and the marker is a link, so
    only one of them carries the accent. */
 .answer .mk {
-  font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--ink);
+  /* Fixed dark text: the yellow is the same in both themes, and --ink turns pale in dark mode,
+     which made every citation number unreadable there. */
+  font: 500 11.5px/1 "IBM Plex Mono", monospace; color: #14130F;
   background: var(--yellow); border-radius: 4px; padding: 2px 4px; vertical-align: 1px;
 }
 .answer .masked {
@@ -464,20 +466,192 @@ details.detail > summary:hover { color: var(--ink); }
   .thread, .composer, .welcome { padding-left: 14px; padding-right: 14px; }
 }
 @media (min-width: 821px) { .topbar { display: none; } }
+
+/* ==========================================================================
+   Polish. One face for the interface (IBM Plex Sans), Archivo for headings, and
+   mono only where the text is a code or a number to compare: citation markers,
+   ranks, table passages. Labels and metadata in mono read as a developer tool.
+   One icon set (the sprite at the top of <body>), stroked in currentColor.
+   ========================================================================== */
+:root { --brand-panel: #14130F; --shadow: 0 1px 2px rgb(20 19 15 / .05), 0 10px 28px -14px rgb(20 19 15 / .18); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --brand-panel: #0B0A09; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 12px 30px -14px rgb(0 0 0 / .6); }
+}
+:root[data-theme="dark"] { --brand-panel: #0B0A09; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 12px 30px -14px rgb(0 0 0 / .6); }
+
+.i { width: 17px; height: 17px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8;
+     stroke-linecap: round; stroke-linejoin: round; }
+
+/* The brand name was grey: ".brand span" meant the subtitle but also matched its wrapper. */
+.brand > span { color: var(--ink); }
+.brand > span > span { display: block; font-size: 12px; color: var(--ink-faint); margin-top: 1px; }
+
+/* ---- sign in: the A-PAG panel beside the form */
+#login { grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); place-items: stretch; padding: 0; }
+.login-brand {
+  position: relative; overflow: hidden; display: flex; flex-direction: column;
+  justify-content: space-between; gap: 40px; padding: 40px 52px;
+  background: var(--brand-panel); color: #F5F2EA; border-right: 1px solid var(--line);
+}
+.login-brand::after {
+  content: ""; position: absolute; right: -160px; bottom: -160px; width: 420px; height: 420px;
+  border-radius: 50%; background: radial-gradient(circle, rgb(255 196 0 / .20), transparent 66%);
+  pointer-events: none;
+}
+.brand-inv > span { color: #FFFFFF; }
+.brand-inv > span > span { color: #9C968A; }
+.lb-copy { position: relative; max-width: 30rem; }
+.eyebrow {
+  display: flex; align-items: center; gap: 12px; margin: 0 0 18px;
+  font: 600 11.5px/1 "IBM Plex Sans", sans-serif; letter-spacing: .14em; text-transform: uppercase;
+  color: #FFC400;
+}
+.eyebrow::before { content: ""; width: 28px; height: 2px; background: #FFC400; }
+.lb-copy h2 {
+  margin: 0 0 26px; font: 600 clamp(30px, 3.3vw, 44px)/1.08 "Archivo", sans-serif;
+  letter-spacing: -.025em; color: #FFFFFF;
+}
+.lb-copy h2 em { font-style: normal; color: #FFC400; white-space: nowrap; }
+.lb-points { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.lb-points li { display: flex; gap: 11px; align-items: flex-start; font-size: 14.5px; color: #CFC9BC; line-height: 1.45; }
+.lb-points .i { color: #FFC400; margin-top: 1px; }
+.lb-foot { position: relative; margin: 0; font-size: 12.5px; color: #8B8578; }
+#login > .login-card { align-self: center; justify-self: center; width: min(100% - 48px, 23.5rem); max-width: none; padding: 32px 0; }
+.login-brand-small { display: none; }
+.login-card h1 { font-size: 28px; letter-spacing: -.02em; margin-bottom: 8px; }
+.login-card > p { font-size: 14px; margin-bottom: 26px; }
+.login-card label { font-weight: 500; font-size: 13px; color: var(--ink); margin: 16px 0 6px; }
+.login-card input { padding: 12px 14px; border-radius: 10px; transition: border-color .15s, box-shadow .15s; }
+.login-card input:focus { box-shadow: 0 0 0 3px rgb(255 196 0 / .22); }
+.login-card .primary { margin-top: 24px; padding: 14px 18px; border-radius: 10px; font-size: 15px; }
+@media (max-width: 860px) {
+  #login { grid-template-columns: 1fr; }
+  .login-brand { display: none; }
+  .login-brand-small { display: flex; }
+}
+
+/* ---- rail */
+.rail-top { gap: 2px; padding: 14px 12px 10px; }
+.rail .brand { margin: 2px 2px 14px; }
+.rail-new {
+  display: flex; align-items: center; gap: 9px; width: 100%; margin-bottom: 8px;
+  padding: 10px 12px; border-radius: 9px; background: var(--ink); color: var(--paper);
+  font: 600 13.5px/1.2 "Archivo", sans-serif; letter-spacing: .005em;
+  transition: opacity .15s, transform .15s;
+}
+.rail-new:hover { opacity: .88; }
+.rail-new:active { transform: translateY(1px); }
+.rail-link {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 8px 10px; border-radius: 8px; font-size: 13.5px; color: var(--ink-soft);
+}
+.rail-link .i { color: var(--ink-faint); }
+.rail-link:hover { background: var(--surface-2); color: var(--ink); }
+.rail-link:hover .i { color: var(--ink); }
+.chats { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.chats h2, .rail-sec {
+  font: 600 11px/1 "IBM Plex Sans", sans-serif; letter-spacing: .08em;
+}
+.rail-sec .count { font: 500 11px/1 "IBM Plex Sans", sans-serif; font-variant-numeric: tabular-nums; }
+.rail-foot { gap: 6px; padding: 10px 10px 10px 12px; }
+.avatar {
+  width: 28px; height: 28px; flex: none; border-radius: 50%; display: grid; place-items: center;
+  background: var(--yellow); color: #14130F; font: 600 12.5px/1 "Archivo", sans-serif;
+}
+.rail-foot .who { font-size: 12.5px; color: var(--ink-soft); }
+.icon-btn {
+  width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+  border-radius: 8px; color: var(--ink-faint);
+}
+.icon-btn .i { width: 16px; height: 16px; }
+.icon-btn:hover { background: var(--surface-2); color: var(--ink); }
+.mark-sm { width: 26px; height: 26px; border-radius: 6px; }
+.topbar-title { font: 600 14px/1 "Archivo", sans-serif; }
+.burger .i { width: 18px; height: 18px; }
+
+/* ---- conversation */
+.welcome h1 { font-size: 32px; letter-spacing: -.025em; }
+.seed { display: flex; align-items: center; gap: 10px; border-radius: 10px; transition: border-color .15s, background .15s; }
+.seed::after { content: "\2192"; margin-left: auto; color: var(--ink-faint); transition: transform .15s, color .15s; }
+.seed:hover::after { color: var(--yellow-deep); transform: translateX(2px); }
+.msg-user { border-radius: 12px; }
+.msg-user .who { font: 600 10.5px/1.75 "IBM Plex Sans", sans-serif; letter-spacing: .08em; }
+details.detail, .hit, .notice, .upload { border-radius: 12px; }
+.pill, .cite, .arm, .scope-label, .tier-count, .tier-tag, .del-note, .cost, .masked-kind, .step {
+  font-family: "IBM Plex Sans", sans-serif;
+}
+.pill { font-size: 12px; }
+.cite { font-size: 12px; }
+.kv { font-family: "IBM Plex Sans", sans-serif; font-size: 12.5px; }
+.kv b { font-variant-numeric: tabular-nums; }
+
+/* ---- composer */
+.composer-wrap { background: linear-gradient(to bottom, transparent, var(--surface) 38%); border-top: 0; }
+.field { border-radius: 14px; box-shadow: var(--shadow); transition: border-color .15s, box-shadow .15s; }
+.field:focus-within { box-shadow: var(--shadow), 0 0 0 3px rgb(255 196 0 / .18); }
+.attach .i { width: 18px; height: 18px; }
+.send { padding: 10px 18px; }
+.hint { font: 400 12px/1.4 "IBM Plex Sans", sans-serif; gap: 14px; }
+.hint label { display: inline-flex; align-items: center; gap: 6px; }
+.hint select { border-radius: 7px; padding: 3px 6px; font-size: 12px; }
+
+/* ---- document view */
+.dv-head h1 { font-size: 22px; letter-spacing: -.015em; }
+.dv-path, .dv-meta { font-family: "IBM Plex Sans", sans-serif; font-size: 12.5px; }
+.access-bar { border-radius: 10px; }
+.access-label { font: 600 11px/1 "IBM Plex Sans", sans-serif; letter-spacing: .08em; }
+.mini { border-radius: 8px; padding: 5px 10px; font-size: 12.5px; transition: border-color .15s, color .15s; }
+@media (max-width: 820px) {
+  /* The column has three rows on a phone (top bar, conversation, composer) but declared two, so
+     the top bar took all the spare height. */
+  .column { grid-template-rows: auto 1fr auto; }
+  .topbar { gap: 10px; }
+  .welcome { padding-top: 5vh; }
+  .welcome h1 { font-size: 26px; }
+  #q::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+}
 </style>
 </head>
 <body>
 
+<!-- One icon set, drawn as strokes in currentColor so every icon takes the theme from its text. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-contrast" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 20H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h3M16 16l4-4-4-4M20 12H9"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5 9.5 17 19 7.5"/></symbol>
+</svg>
+
 <!-- =============================================== sign in: its own full view -->
 <section id="login">
+  <aside class="login-brand">
+    <div class="brand brand-lg brand-inv">
+      <img class="mark" src="/assets/apag-logo.jpg"
+           alt="A-PAG, Air Pollution Action Group" width="46" height="46">
+      <span><b>A&#8209;PAG</b><span>Knowledge Base</span></span>
+    </div>
+    <div class="lb-copy">
+      <p class="eyebrow">Air Pollution Action Group</p>
+      <h2>Every answer,<br>traced to <em>its source.</em></h2>
+      <ul class="lb-points">
+        <li><svg class="i"><use href="#i-check"/></svg>Cites the page, section or table it came from</li>
+        <li><svg class="i"><use href="#i-check"/></svg>Says so when our documents do not cover a question</li>
+        <li><svg class="i"><use href="#i-check"/></svg>Restricted documents stay with the people allowed to see them</li>
+      </ul>
+    </div>
+    <p class="lb-foot">For A&#8209;PAG staff &middot; sign in with your work email</p>
+  </aside>
   <form class="login-card" id="loginForm">
-    <div class="brand brand-lg">
+    <div class="brand brand-lg login-brand-small">
       <img class="mark" src="/assets/apag-logo.jpg"
            alt="A-PAG, Air Pollution Action Group" width="36" height="36">
       <span><b>A&#8209;PAG</b><span>Knowledge Base</span></span>
     </div>
     <h1>Sign in</h1>
-    <p>Ask questions of A&#8209;PAG's documents and get answers with citations.</p>
+    <p>Use your A&#8209;PAG account to search and ask questions of our documents.</p>
     <label for="email">Email</label>
     <input id="email" type="email" autocomplete="username" required>
     <label for="pw">Password</label>
@@ -504,25 +678,27 @@ details.detail > summary:hover { color: var(--ink); }
              alt="A-PAG, Air Pollution Action Group" width="36" height="36">
         <span><b>A&#8209;PAG</b><span>Knowledge Base</span></span>
       </div>
-      <button class="rail-btn" id="newChat"><span class="ic">+</span> New chat</button>
-      <button class="rail-btn" id="uploadBtn"><span class="ic">&#8593;</span> Add documents</button>
-      <button class="rail-btn" id="folderBtn"><span class="ic">&#128193;</span> Add a folder</button>
+      <button class="rail-new" id="newChat"><svg class="i"><use href="#i-plus"/></svg>New chat</button>
+      <button class="rail-link" id="uploadBtn"><svg class="i"><use href="#i-upload"/></svg>Add documents</button>
+      <button class="rail-link" id="folderBtn"><svg class="i"><use href="#i-folder"/></svg>Add a folder</button>
     </div>
     <div class="chats">
       <div id="docsSec"></div>
       <div id="chats"></div>
     </div>
     <div class="rail-foot">
+      <span class="avatar" id="avatar" aria-hidden="true"></span>
       <span class="who" id="whoami"></span>
-      <button class="mini" id="themeBtn">Theme</button>
-      <button class="mini" id="outBtn">Sign out</button>
+      <button class="icon-btn" id="themeBtn" title="Switch between light and dark" aria-label="Switch theme"><svg class="i"><use href="#i-contrast"/></svg></button>
+      <button class="icon-btn" id="outBtn" title="Sign out" aria-label="Sign out"><svg class="i"><use href="#i-logout"/></svg></button>
     </div>
   </aside>
 
   <div class="column">
     <div class="topbar">
-      <button class="burger" id="burger">&#9776;</button>
-      <b style="font:600 14px/1 'Archivo',sans-serif">A&#8209;PAG Knowledge Base</b>
+      <button class="burger" id="burger" aria-label="Menu"><svg class="i"><use href="#i-menu"/></svg></button>
+      <img class="mark mark-sm" src="/assets/apag-logo.jpg" alt="" width="26" height="26">
+      <b class="topbar-title">A&#8209;PAG Knowledge Base</b>
     </div>
 
     <div class="scroll" id="scroll">
@@ -547,22 +723,22 @@ details.detail > summary:hover { color: var(--ink); }
       </div>
       <div class="composer">
         <div class="field">
-          <button class="attach" id="attachBtn" title="Add a document">+</button>
+          <button class="attach" id="attachBtn" title="Add a document" aria-label="Add a document"><svg class="i"><use href="#i-plus"/></svg></button>
           <textarea id="q" rows="1" placeholder="Ask about enforcement obligations, targets, penalties&hellip;"></textarea>
           <button class="primary send" id="askBtn">Ask</button>
         </div>
         <div class="hint">
           <span>Enter to send &middot; Shift+Enter for a new line</span>
           <span class="grow"></span>
-          <label class="tog"><input type="checkbox" id="answerMode" checked> write an answer</label>
-          <label for="mode">match
+          <label class="tog"><input type="checkbox" id="answerMode" checked> Write an answer</label>
+          <label for="mode">Match
             <select id="mode">
-              <option value="hybrid" selected>hybrid</option>
-              <option value="semantic">meaning</option>
-              <option value="lexical">words</option>
+              <option value="hybrid" selected>Meaning and words</option>
+              <option value="semantic">Meaning</option>
+              <option value="lexical">Exact words</option>
             </select>
           </label>
-          <label for="k">passages
+          <label for="k">Passages
             <select id="k"><option>5</option><option selected>10</option><option>20</option></select>
           </label>
         </div>
@@ -1484,6 +1660,7 @@ async function loadMe() {
 const showApp = (email) => {
   $("login").hidden = true; $("app").hidden = false;
   $("whoami").textContent = email || store.get("apag.email") || "";
+  $("avatar").textContent = ($("whoami").textContent.trim()[0] || "?").toUpperCase();
   paintChats(); paintDocs(); loadDocs(); loadMe(); $("q").focus();
 };
 
