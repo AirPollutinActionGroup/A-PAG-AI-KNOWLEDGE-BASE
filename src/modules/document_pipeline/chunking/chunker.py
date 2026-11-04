@@ -20,7 +20,12 @@ import re
 
 from src.modules.document_pipeline.chunking.models import SECTION_SCALE, Chunk
 from src.modules.document_pipeline.chunking.sizing import CharacterBudget, SizeBudget
-from src.modules.document_pipeline.extraction.models import ExtractedTable, Heading
+from src.modules.document_pipeline.extraction.models import (
+    ExtractedFigure,
+    ExtractedTable,
+    Heading,
+)
+from src.modules.document_pipeline.formats import PPTX_MIME, XLSX_MIME
 from src.modules.document_pipeline.normalization.models import (
     NormalizationResult,
     NormalizedUnit,
@@ -44,19 +49,79 @@ class Chunker:
     def chunk(self, result: NormalizationResult) -> list[Chunk]:
         chunks: list[Chunk] = []
         tables_by_unit = self._tables_by_unit(result.tables)
+        figures_by_unit: dict[int, list[ExtractedFigure]] = {}
+        for figure in result.figures:
+            figures_by_unit.setdefault(figure.unit_index, []).append(figure)
         headings_by_unit = self._headings_by_unit(result.headings)
 
-        # Carried across units: a section started by a heading on page 3 still governs the prose
-        # that runs onto page 4, and a citation should keep naming that section.
+        # Carried across units in a PDF or Word file: a section started by a heading on page 3
+        # still governs the prose that runs onto page 4, and a citation should keep naming it.
+        # Never across slides or worksheets, which stand alone: carrying it filed 8 of the 21
+        # slides of "TPPs Delhi NCR" under the previous slide's title, so a search for "privately
+        # owned" also matched the emission norms.
         current_heading: str | None = None
+        units_stand_alone = result.mime_type in (PPTX_MIME, XLSX_MIME)
+
+        def add_table(table: ExtractedTable, unit_index: int, heading: str | None) -> None:
+            for piece in self._render_table(table):
+                chunks.append(
+                    Chunk(
+                        index=len(chunks),
+                        text=piece,
+                        page_number=unit_index,
+                        section_heading=heading,
+                        is_table=True,
+                        scale=SECTION_SCALE,
+                    )
+                )
+
+        def add_figure(figure: ExtractedFigure, unit_index: int, heading: str | None) -> None:
+            # Said in the passage itself, where the model and the reader both see it: text read
+            # from pixels can be wrong in ways typed text cannot (sideways labels, run-together
+            # words), and a figure in a submission should be checked against the original.
+            label = "[Figure] (text read from a picture by OCR)"
+            if figure.caption:
+                label = f"{label} {figure.caption}"
+            body = f"{label}\n{figure.text}" if figure.text else label
+            for piece in self._split_to_size(body):
+                chunks.append(
+                    Chunk(
+                        index=len(chunks),
+                        text=piece,
+                        page_number=unit_index,
+                        section_heading=heading,
+                        is_table=False,
+                        scale=SECTION_SCALE,
+                    )
+                )
 
         for unit in result.units:
-            for heading, body in self._split_unit_by_headings(
-                unit, headings_by_unit.get(unit.index, [])
-            ):
+            if units_stand_alone:
+                current_heading = None
+            pending = list(tables_by_unit.get(unit.index, []))
+            pending_figures = list(figures_by_unit.get(unit.index, []))
+
+            # A worksheet's text is its table written out again; the table is chunked below.
+            sections = (
+                [] if unit.text_is_table
+                else self._split_unit_by_headings(unit, headings_by_unit.get(unit.index, []))
+            )
+            for heading, body in sections:
                 if heading is not None:
                     current_heading = heading
-                for piece in self._split_to_size(body):
+                # A heading with nothing under it but its own table or figure is not a passage: the
+                # title says nothing the table's passage does not already carry as its section, and
+                # on its own it outranks the table for any question that repeats the title ("Zorbia
+                # monthly load Mar 341" found the title, not the 341). A heading with nothing
+                # attached stays, so a title slide can still be found.
+                if heading is not None and " ".join(body.split()) == " ".join(heading.split()) and (
+                    any(t.heading == heading for t in pending)
+                    or any(f.heading == heading for f in pending_figures)
+                ):
+                    pieces: list[str] = []
+                else:
+                    pieces = self._split_to_size(body)
+                for piece in pieces:
                     chunks.append(
                         Chunk(
                             index=len(chunks),
@@ -67,27 +132,29 @@ class Chunker:
                             scale=SECTION_SCALE,
                         )
                     )
+                # A table that knows its section follows that section's prose, so a document
+                # reads in order and the table is cited under the heading it sat beneath.
+                if heading is not None:
+                    for table in [t for t in pending if t.heading == heading]:
+                        add_table(table, unit.index, heading)
+                        pending.remove(table)
+                    # Text read from a picture follows the section the picture sits in, the
+                    # same way.
+                    for figure in [f for f in pending_figures if f.heading == heading]:
+                        add_figure(figure, unit.index, heading)
+                        pending_figures.remove(figure)
 
-            # A table's position *within* a unit is not recorded — extraction gives it only a
-            # unit index. Where a unit carries several headings we therefore cannot tell which
-            # section the table sat under, and must say so: a DOCX is a single unit, so guessing
-            # would silently attribute every table to the document's last heading. A wrong
-            # citation is worse than an absent one. See KNOWN_DEBTS.md #19.
+            # Tables whose section was not found in the text, or that do not know their section.
+            # For the second kind the position *within* a unit is unknown, so where a unit
+            # carries several headings the table is cited under none of them rather than
+            # guessed at: a DOCX is a single unit, and guessing would attribute every table to
+            # the document's last heading. A wrong citation is worse than an absent one (#19).
             unit_headings = headings_by_unit.get(unit.index, [])
-            table_heading = None if len(unit_headings) > 1 else current_heading
-
-            for table in tables_by_unit.get(unit.index, []):
-                for piece in self._render_table(table):
-                    chunks.append(
-                        Chunk(
-                            index=len(chunks),
-                            text=piece,
-                            page_number=unit.index,
-                            section_heading=table_heading,
-                            is_table=True,
-                            scale=SECTION_SCALE,
-                        )
-                    )
+            fallback = None if len(unit_headings) > 1 else current_heading
+            for table in pending:
+                add_table(table, unit.index, table.heading or fallback)
+            for figure in pending_figures:
+                add_figure(figure, unit.index, figure.heading or fallback)
 
         return chunks
 
@@ -235,16 +302,18 @@ class Chunker:
         with no idea what the columns mean. Repeating the header keeps each group a readable
         table in its own right.
         """
-        rows = [
-            [("" if cell is None else str(cell)).strip() for cell in row]
-            for row in table.rows
-            if row
-        ]
+        rows = [[_cell_text(cell) for cell in row] for row in table.rows if row]
         if not rows:
             return []
 
-        header, body = rows[0], rows[1:]
-        header_line = " | ".join(header)
+        # Title rows above the real header -- "State-Owned TPPs | | | |" spanning a slide table,
+        # or a sheet's title in A1 -- are a caption, not the column names. Taking row 0 as the
+        # header regardless repeated the title in every row group while the actual column names
+        # sat in the body as if they were data.
+        start = _header_row(rows)
+        caption = [" ".join(c for c in row if c) for row in rows[:start]]
+        header, body = rows[start], rows[start + 1:]
+        header_line = "\n".join([*caption, " | ".join(header)])
         if not body:
             return [header_line]
 
@@ -298,3 +367,22 @@ class Chunker:
             *self._fit_group(header_line, rows[:middle]),
             *self._fit_group(header_line, rows[middle:]),
         ]
+
+
+def _cell_text(cell: object) -> str:
+    """One cell on one line. A cell holding "1 : 27 yrs\n2 : 26 yrs" broke its row across five
+    lines, so the row could be cut in half when groups were split on newlines."""
+    text = "" if cell is None else str(cell)
+    return "; ".join(part.strip() for part in text.splitlines() if part.strip())
+
+
+def _header_row(rows: list[list[str]]) -> int:
+    """Index of the column-header row: the first of the opening three rows that is more than
+    half as full as the table's fullest row. Title rows above it fill one cell of many -- on a
+    two-column table, one of two, which "at least half" let through as the header."""
+    filled = [sum(1 for c in row if c) for row in rows]
+    widest = max(filled[:12])
+    for i in range(min(3, len(rows))):
+        if filled[i] * 2 > widest:
+            return i
+    return 0

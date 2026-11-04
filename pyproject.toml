@@ -23,8 +23,8 @@ dependencies = [
     # no tables — they are prose notifications. Their cost is ~500MB of models plus
     # torch/transformers, in an image that already carries a 640MB embedding model. LlamaParse
     # is a cloud API, which would send every document out of the deployment at ingestion.
-    # See KNOWN_DEBTS.md for the trigger to revisit — scanned tables would be it, and Docling
-    # takes RapidOCR as its own OCR backend, so this is a layer under that, not a dead end.
+    # Docling was tried again later for tables in pictures, and lost to img2table + rapidocr on
+    # accuracy as well as weight (KNOWN_DEBTS.md #46); it is not a dependency.
     "pdfplumber>=0.11.0",
     "python-docx>=1.1.0",
     "python-pptx>=1.0.0",
@@ -56,6 +56,17 @@ dependencies = [
     # PyTorch, consistent with every other model choice here. Rasterisation needs nothing new:
     # pdfplumber already depends on pypdfium2 and `page.to_image()` uses it.
     "rapidocr>=3.4,<4",
+    # Tables that are pictures (a slide that is a screenshot of a table). img2table finds the
+    # ruled grid with OpenCV -- no model, no PyTorch -- and rapidocr above reads the words. It
+    # replaced Docling for this after both were scored against tables read by eye: 98% of cells
+    # against 78%, and 1.7s a table against 3-14s, in about 100MB instead of PyTorch and a 730MB
+    # model set. Pinned to the minor: it calls into OpenCV internals.
+    "img2table>=2.0,<2.1",
+    # img2table needs the contrib build of OpenCV 4 (`cv2.ximgproc`), which OpenCV 5 dropped, and
+    # the headless wheel because the image has no display libraries. rapidocr and img2table each
+    # name a different opencv wheel; they all provide the same `cv2` module, so the overrides below
+    # leave exactly one installed rather than three overwriting each other in install order.
+    "opencv-contrib-python-headless==4.11.0.86",
     # Google Drive connector. `google-auth` only: it signs the service-account JWT and refreshes
     # the access token, which is the part worth not hand-rolling. Drive itself is plain REST and
     # is called with the httpx already above, so `google-api-python-client` — which pulls its own
@@ -76,6 +87,12 @@ eval = [
     "ragas>=0.4,<0.5",
     "langchain-community>=0.3,<0.4",
     "langchain-openai>=1.0",
+]
+
+[tool.uv]
+override-dependencies = [
+    "opencv-python; sys_platform == 'never'",
+    "opencv-contrib-python; sys_platform == 'never'",
 ]
 
 [tool.pytest.ini_options]

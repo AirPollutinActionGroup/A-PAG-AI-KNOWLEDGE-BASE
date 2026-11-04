@@ -153,8 +153,8 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
 - **Context**: Queue depth, job duration, lease renewals, and dead-letter counts are logged at INFO/DEBUG levels, but no Prometheus metrics endpoint is exposed yet.
 - **Trigger to address**: Prior to user-facing production release.
 
-### 7. Studio UI expects synchronous upload response
-- **Status**: Fast-follow UI task.
+### 7. ✅ Studio UI expects synchronous upload response (Removed, #47)
+- **Status**: Resolved by deleting the page (#47): it was not linked from anywhere and had no users.
 - **Context**: The testing Studio UI (now at `/studio`; `/` serves the knowledge base) was written for the synchronous pipeline and expects terminal `AWAITING_CLASSIFICATION` immediately from `POST /upload`. It needs to be updated to poll `GET /api/v1/documents/{id}/status` every 500ms until terminal state.
 - **Trigger to address**: Before internal user onboarding.
 
@@ -241,8 +241,8 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   content inside the XML parts — is unaffected and still open; these caps only bound the
   container's declared size, they don't inspect what's in it.
 
-### 12. Studio UI test presets are PDF-only
-- **Status**: Not addressed — noted while fixing unrelated format-validation bugs.
+### 12. ✅ Studio UI test presets are PDF-only (Removed, #47)
+- **Status**: Moot: the Studio page and the preset endpoint were removed (#47).
 - **Context**: `GET /documents/test-preset/{preset_name}` and the Studio UI's preset buttons only
   serve PDF fixtures (`tests/fixtures/pdfs/`). There's no one-click way to exercise DOCX/XLSX/PPTX
   validation (e.g. a macro-enabled or path-traversal fixture) from the UI the way PDF has.
@@ -368,8 +368,12 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   periodic `DELETE FROM jobs WHERE status = 'COMPLETED' AND finished_at < now() - interval '30
   days'` — and is much easier to add before the table is large.
 
-### 19. A table's position within a unit is not recorded
-- **Status**: Worked around honestly; the real fix belongs in extraction.
+### 19. ✅ A table's position within a unit is not recorded (Closed for DOCX, PPTX, XLSX)
+- **Status**: Closed for the Office formats by `ExtractedTable.heading` (#44): Word is now read
+  in document order and each table records the heading in force; a slide's tables carry the
+  slide title; a sheet's table carries the sheet name. The chunker emits a table after its own
+  section's prose and cites it there. PDF still has no heading per table; the fallback below
+  still applies to it.
 - **Context**: `ExtractedTable` carries only a `unit_index` — which page, slide or worksheet the
   table came from — not where inside it the table sat. For PDF, PPTX and XLSX that is usually
   enough, because a unit is one page or slide. For DOCX it is not: Word has no pages until it is
@@ -747,7 +751,7 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   doing before this is ever pushed to a shared registry. Today images are built on the VM and
   never pushed, which is what kept the exposure local.
 
-### 39. A row-per-record spreadsheet costs 8-19 minutes to embed
+### 39. A row-per-record spreadsheet costs 8-19 minutes to embed (halved by #44)
 - **Status**: Open. The memory half is handled by headroom (`EMBEDDING_MEM_LIMIT` 2500m -> 3g);
   the time half is not addressed.
 - **What happened**: the first document imported from Google Drive was a Faridabad complaint
@@ -874,3 +878,299 @@ Technical debts and trade-offs tracked deliberately. Each debt is annotated with
   still live. Each was a person's request, so re-apply them deliberately rather than in bulk:
   `SELECT d.document_id, d.filename, a.event_time FROM audit_log a JOIN documents d USING
   (document_id) WHERE a.event_type = 'DOCUMENT_DELETED' AND d.deleted_at IS NULL;`
+
+### 44. ✅ What two reviews of real documents found missing or misfiled (Closed)
+- **Status**: Closed, except pictures of tables (#46). Found by external reviews of the Ministry
+  of Power memo of 20 Nov 2024 (a scan) and "TPPs Delhi NCR.pptx", each checked against the file
+  and against fresh OCR runs before anything was changed.
+- **Fixed, with what was measured:**
+  - **OCR dropped whole lines.** Four full-width lines of the memo -- "out of 600 units", "may
+    not be able to comply", "category A, B & C" -- were not near the confidence cut-off: at
+    144 dpi the engine read them as noise ("o.in o n nn nn", 0.67), so lowering the cut-off, as
+    the review proposed, would have indexed noise. At 300 dpi three of the four read at
+    0.98-0.99 (`OCR_RESOLUTION`, 7.4s against 5.3s for two pages). The fourth is unreadable at
+    any resolution and is now **recorded** -- `ocr_unreadable_lines` per page, and a WARNING --
+    instead of vanishing without a trace.
+  - **Scans had no headings.** A scan has no font sizes, so every passage was cited under no
+    section. A "Subject:" line is now the page's heading; the 162-page CPCB set has 26.
+  - **Page furniture** ("Contd...2/-", "-2-", "Page 3 of 10") is stripped as whole lines.
+  - **Slide headings carried across slides.** 8 of the deck's 21 slides were filed under the
+    previous slide's title. Slides and sheets now stand alone; a slide with no title placeholder
+    takes the first line of its topmost text box.
+  - **Grouped shapes were skipped** -- the whole MoEF&CC deadline history on slide 10. Shapes are
+    now read recursively. **Speaker notes** are kept (slide 11's "30 to 45 days" shutdown).
+    **Hidden slides** are skipped without renumbering.
+  - **Title rows became table headers**; the header is now the first of the opening rows that is
+    more than half full, and the rows above it are a caption. **Multi-line cells** stay on one row.
+  - **Spreadsheets were indexed twice** -- as prose and as a table. Measured before re-processing:
+    Faridabad 1,815 -> 953 passages, DD_Biharsharif 11,949 -> 6,122, CEDS 460 -> 116.
+  - **Word**: read in document order (#19), merged cells kept once, text boxes and footnotes read.
+  - **Soft line breaks** (PowerPoint's vertical tab) were deleted, gluing words together.
+- **Two review claims were wrong, and are recorded so nobody acts on them:** the landline
+  011-23063746 *is* masked by the gateway (`_plausible_landline`), and "So2" does not hurt search
+  -- the BM25 index ignores case (SO2, so2 and So2 each find the same 1,034 passages).
+- **Checked before re-processing**: `compare_extraction.py` runs the new code in memory over every
+  affected document and compares it with what is stored. 0 of 21 flipped language or quality
+  verdict -- the risk being a spreadsheet whose cleaner numbers tip it into a wrong non-English
+  detection, which would take it out of meaning-based search.
+- **Pictures of tables** (slides 9, 15 and 20 of the deck, the "1209 mg/Nm3" figure) are separate
+  work from parsing, and are #46.
+
+### 45. ✅ Search silently returned the wrong passages once the corpus grew (Closed)
+- **Status**: Closed. Found while running `run_eval.py` after re-processing, not by any test or
+  alert.
+- **What**: semantic-only hit@1 fell from 72% to **38%**, and `hybrid, no rerank` from 80% to 58%,
+  with no error anywhere. The shipped configuration (hybrid + rerank) hid most of it: 83% -> 81%.
+- **Why**: the HNSW index returns at most its `ef_search` nearest neighbours -- **40** by default
+  -- and the permission and deleted-document filters run on *those*. Rows nearer to the question
+  than its answer, that the filters then discard, leave nothing behind. A 6,946-row complaints
+  spreadsheet (near-identical rows) sat among the 40 nearest for most questions: 190 of the top-10
+  slots over 40 questions. At 200 the index matched an exact search (71%); `iterative_scan` did not
+  help. Not caused by the parsing changes -- the corpus reached ~13,900 vectors when the sheet was
+  embedded -- and not visible at 4,459 chunks, which is why the earlier measurements never saw it.
+- **Fix**: `RetrievalService._widen_vector_search` sets `hnsw.ef_search` to at least twice the
+  candidate pool for the vector arm, with `SET LOCAL`, so it ends with the transaction
+  (`SEARCH_HNSW_EF_SEARCH`, 200). Pinned by `tests/integration/test_retrieval_service.py`: 80
+  deleted rows nearer than the one live passage return **nothing** at the default and the passage
+  at 200, forcing the index's own ordering with `enable_sort = off` because on 81 rows Postgres
+  otherwise joins first and never meets the limit. Both tests fail without the fix.
+- **After**: hybrid + rerank 82.0% hit@1 / 94.0% hit@5 / MRR 0.870; semantic 71%. The 3-point
+  hit@5 gap against the earlier 97% is two new misses, both questions generated from
+  `Report on TPPs.xlsx` -- a one-sheet *summary* of reports whose full text is in the corpus. The
+  full reports (NIAS, "Note on FGD installation", Part 7) now outrank the summary. Whether that
+  is a regression in answer quality is unproven, and the earlier baseline predates the corpus
+  growing from 4,459 to 12,100 passages, so it cannot be attributed to parsing either way.
+- **Still to watch**: any single document that contributes thousands of near-identical rows
+  crowds every arm, and a bigger `ef_search` is the cost of finding the answer behind it. Passage
+  search cannot count: "how many pending in Ward 43" over that sheet is Text-to-SQL's job.
+
+### 46. Tables that are pictures: read with img2table and the OCR already here, not Docling
+- **Status**: Built, and **measured on a small sample** -- 8 tables, 242 cells, transcribed by eye
+  by the person who wrote the reader. Treat the figures below as what it did on those pictures, not
+  as a guarantee about the corpus.
+- **Context**: Slides 9, 15 and 20 of "TPPs Delhi NCR" are screenshots of tables, so "average max
+  SOx 1209 mg/Nm3" was not findable. So are the tables of the Secretary Power presentation, and a
+  dozen pictures across the Word files. A plain OCR engine returns lines with no grid, so a figure
+  loses its row and column.
+- **Docling was built first and then replaced.** Read against the same eight tables:
+
+  | | cells right | figures right | headers right | time per table | cost |
+  |---|---|---|---|---|---|
+  | Docling 2.131 | 78.5% | 75.3% | 84% | 3-14s | PyTorch, 730MB of models, image 2.5 -> 6.2GB |
+  | img2table + rapidocr | **98.8%** | **100%** | **100%** | **1.7-4s** | ~100MB, no PyTorch |
+
+  Docling's failures were *structural*, which is the kind a number in the wrong column makes worse
+  than a missing one: it moved the "Category" column to the end of each row and fused header cells,
+  so slide 15 scored 0 of 15. It also read a "99.0" as "0.66" on one table; img2table's mistake on
+  the same table was two blanks on yellow cells (since fixed). On the "Table 2" picture it found 8
+  rows by 1 column where there are 7 by 5.
+- **How it reads** (`extraction/picture_tables.py`, found with `picture_source.py`):
+  img2table finds the ruled grid with OpenCV (no model; 0.04s) and the OCR reads the words, each
+  placed in the cell that holds it. A merged block is written into every position it covers;
+  a header drawn over two rows becomes one row of full column names (`grid.py`, shared with the
+  PowerPoint extractor). The title above the table and the notes below come back too.
+- **Each safeguard is from a failure measured on the real pictures**: an empty cell with ink in it
+  is read again alone (yellow-highlighted "239.0" came back blank); any word scored under 0.9 is
+  read a second time from its own crop (the same pixels read "164" or "1964" depending on how the
+  picture was resized); sideways month headers are read both ways round, then **rebuilt from the
+  months that did read** (they run in sequence; "APpi-19", "l--19" become April-19, Jul-19), and
+  only when the readable ones agree, so a quarterly header is left alone; a frame round four map
+  panels is not a table (at least six cells, half of them filled).
+- **Marked as what it is.** Every table opens with a caption line "(table read from a picture by
+  OCR; check against the original before citing)", which the chunker keeps above the header in
+  every row group, and every figure's label says "text read from a picture by OCR". OCR dropped
+  word boundaries and misread superscripts here ("31st" became "31a"), so a figure in a submission
+  should be checked.
+- **Vector pictures.** Office writes an EMF when a table is pasted from Excel -- all 13 pictures of
+  the Secretary Power deck, labelled `.wmf` but with an EMF header. They are drawn with `emf2svg`
+  and `rsvg-convert` (29MB with fonts, installed in the image) rather than LibreOffice (about
+  450MB, and its PNG export prints the picture onto an A4 page, leaving a table too small to
+  read). The metafile asks for Calibri; without Carlito installed the renderer falls back to a wide
+  monospaced face and the text runs over its cells. **The converter also draws sideways text too
+  low**, so a table's month labels landed on its first row of figures ("5.9" read as "5.69", and
+  the ruled line under the header was cut, so header and first row were one cell). The SVG is
+  therefore split before it is drawn (`split_rotated_labels`): the table without its sideways
+  text, and that text alone, which is read turned a quarter and given to the columns it stands
+  over by position. Measured on the three vector tables with an answer key: 98.6% of cells, 100%
+  of figures (119/119), 1.4-4.7s a picture, in the Linux image. `split_fused_header` stays as a
+  net for a picture that still arrives with its labels fused to its first row: it keeps the labels
+  and drops that row's figures, because a figure wrong by a digit is worse than a missing one.
+- **What it does not do, and what is still wrong:**
+  - **Tables with no ruling lines** (only a top and bottom rule) are not read as tables.
+    img2table's borderless mode split wrapped lines into rows and merged columns; their text comes
+    back as plain lines instead.
+  - **Row labels in a first column** are the commonest remaining misread ("NLCIL/TPS-II" read as
+    "NLAL/TPSII"; a bold "CO" as "8"). The figures are not.
+  - **Charts and maps are not understood.** A chart saved as a picture yields its axis labels and
+    title, not its values; a map yields its place names and legend. A description of what a map
+    shows needs a vision model, which nothing here uses because nothing may leave the deployment.
+  - **English only**, like the embedding model.
+  - **Cost**: about 2-4s a picture (1.8s at 750px, up to 6s for a 24-row table), capped at 40
+    pictures a document (`PICTURE_MAX_PER_DOCUMENT`); a deck of 15 pictures took 10.6s, and the
+    Secretary Power deck's 13 vector pictures 38s in the Linux image.
+  - **Some cells come back blank rather than wrong**: a cell the OCR cannot read at all (pale text
+    on a tinted cell on the Secretary deck's slide 15, a merged "Not required at present" cell on
+    its slide 20) is left empty. That is the intended failure -- an empty cell cannot mislead --
+    but it means a row can be incomplete.
+- **Dependencies**: `img2table` needs OpenCV 4's contrib build (`cv2.ximgproc`), which OpenCV 5
+  dropped, while rapidocr names `opencv-python`. `pyproject.toml` pins
+  `opencv-contrib-python-headless==4.11.0.86` and overrides the other two for `uv`; **pip ignores
+  those overrides**, so the Dockerfile removes every OpenCV wheel and reinstalls the one, then
+  asserts `cv2.ximgproc.niBlackThreshold` exists. Without that step three wheels overwrite each
+  other in install order.
+- **Pictures that are not tables** (charts, flow diagrams, maps, photographs) give their printed
+  words and nothing else. Measured on seven such pictures from the corpus with every printed word
+  written down (a throwaway script; the pictures and the answer key are not in the repository):
+  **97.8% of the printed words came back (221 of 226)**
+  once three things found on those pictures were fixed -- single-digit axis ticks were being
+  dropped as noise (recall 82.7% before), a caption the whole-picture pass half-read is now read
+  again from its own crop (0.58 -> 0.99), and one confident line (a sign on a photograph) is kept
+  instead of being discarded for not having a second line. Loose text is also returned as
+  **blocks** (a wide gap on a row starts a new piece; pieces stacked under one another and lined
+  up are one block), because joining a whole row ran the boxes of a flow diagram together --
+  "Raw Boiler ESP Stack" over "coal Zeta" -- and "Raw coal" and "Stack Zeta" existed nowhere in
+  the passage. Words returned that are not printed:
+  a handful ("unf"; a subscript read as "SO" for "SO2"; "FGO" for "FGD" on a sign), each carrying
+  the OCR label. **What a picture shows is not read**: the curve of a line chart, the heights of
+  96 bars, the arrows between the boxes of a flow diagram drawn as an image. An OCR engine
+  returns the printed words, and 99% of *those* is not 99% of what the picture says. Charts and
+  diagrams drawn in the file itself are read exactly instead (#48).
+- **Switches**: `PICTURES_ENABLED=false`, or `OCR_ENABLED=false`, or img2table not installed:
+  pictures are not read and a document extracts exactly as before, with one WARNING saying why.
+
+### 47. Dead code removed (Closed)
+- **How it was found**: `vulture` over the application and every script, then every candidate
+  checked by counting references across source, tests, scripts and docs. Most of what it flags is
+  not dead -- route handlers, Alembic's `upgrade`/`downgrade`, ORM columns and fields read through
+  other names -- so nothing was removed on the tool's say-so.
+- **Removed**:
+  - **The Studio page** (`/studio`, 70KB) and **`GET /documents/test-preset/{name}`**, the endpoint
+    that served `tests/fixtures/pdfs/` to it. The page expected a synchronous upload response that
+    no longer exists (#7), was linked from nowhere, and its one endpoint handed fixtures named
+    `disguised_malware.pdf` out of the production app (#34). The fixtures stay: the tests generate
+    them.
+  - **Six settings nothing read** -- `ENVIRONMENT` and `POSTGRES_HOST/PORT/DB/USER/PASSWORD` -- and
+    the same variables passed to every application container in both compose files. The application
+    connects through `DATABASE_URL` alone, so changing `POSTGRES_HOST` silently did nothing.
+    `POSTGRES_PASSWORD` stays where compose reads it for the database container.
+  - **Three Drive client methods** -- `get_file` and the two change-feed calls for an incremental
+    sync that was never built (`get_start_page_token`, `list_changes`). Restorable from git when
+    Phase B is; the `drive_sync_state` table that was to hold the page token is kept, since it is a
+    migration.
+  - `FormatSpec.unit_label` (a field no code read), `SUPPORTED_EXTENSIONS`, and
+    `UploadValidator.MAX_PAGE_COUNT` (a copy of `MAX_PDF_PAGES` that nothing used).
+- **Looked at and kept**: `DocumentStatus`/`AuditEventType` values with no emitter
+  (`DOCUMENT_UPLOADED`, `DOCUMENT_ARCHIVED`, job `COMPLETED`) because database CHECK constraints
+  list them and dropping one needs a migration; methods used only by tests (`load_result`,
+  `load_chunks`, `row_count`, `unextractable_formats`); and columns the schema defines but nothing
+  yet writes (`jobs.priority`, `scheduled_at`, `documents.scan_flags`), which a migration, not a
+  tidy-up, would remove.
+
+### 48. Charts, connectors and SmartArt are read from the file, exactly (Built)
+- **Context**: a chart *picture* is pixels and its bars cannot be read, but a chart drawn in an
+  Office file is not: its categories, series and values are stored in the chart part. The same is
+  true of a flow diagram built from shapes and connectors (each connector records the shapes it
+  joins) and of SmartArt (a data model of nodes and links). None of the three was read: the
+  extractors took a slide's text boxes and a document's paragraphs, so the values, the arrows and
+  the SmartArt text were missing, with nothing to say so.
+- **What is read, on the real corpus**: all 9 charts of the spreadsheets and the Secretary Power
+  deck, with their values (the CEDS emissions by country, the generation-capacity series, the
+  fuel-mix pies); and the arrows of slide 16 of "TPP & CEMS" ("Non-compliance with emission
+  standards -- Environmental compensation", "-- Legal proceedings"). Values are exact because they
+  are copied, not recognised.
+- **Details that mattered, each found on a real file**: Google Sheets and openpyxl store a chart as
+  cell references with an *empty* cache, so values and series names are resolved from the
+  workbook; a chart omits empty points and numbers the rest by index, so a gap stays a gap; a date
+  axis is stored as Excel serial numbers (44105 is 2020-10-01); a percent-formatted value is
+  shown as the chart shows it.
+- **Not guessed**: a series with no stored name is "Series n" and not a name; a chart with no
+  stored values and no resolvable references produces nothing; a connector with a free end, or to
+  a shape with no text, produces nothing -- an arrow is not matched to a shape it only passes
+  near. Connectors with no arrowhead read as a plain link ("A -- B"), because the file does not
+  say which way the process runs.
+- **Limits**: SmartArt is built to the format and tested on constructed files only -- **the corpus
+  has none**, so it has not met a real one. A PowerPoint chart stores its own copy of the values;
+  if that cache is empty nothing is read, since the embedded workbook is not opened. A Word flow
+  diagram drawn with shape connectors (`wps:cxnSp`) is not read; the corpus's one Word drawing
+  has no connectors. **A chart or diagram saved as a picture is not covered here**: it gets the
+  OCR of its printed labels (`extraction/pictures.py`) and nothing about its bars or arrows.
+
+### 49. Delete erases everything, at once (Closed)
+- **Status**: Closed. Asked for after a delete-then-re-upload: the file was deleted, gone from the
+  list, and uploading it again was refused as "already there".
+- **Why that happened**: delete was reversible by default (#41). The bytes, text and passages
+  stayed so the delete could be undone, and dedup still matched the hidden copy, so a re-upload
+  was refused and offered a Restore. Working as designed, and read as broken. In this case it
+  also changed the document: the re-upload was marked Restricted, the stricter tier won (#36),
+  and the restored original came back Restricted.
+- **Now**: `DELETE /documents/{id}` erases, for the owner or an ADMIN alike (`erasure.py`): the
+  stored file, the extracted and normalized text, the passages and their vectors, the refused
+  re-uploads of it (DUPLICATE rows: its name, and who tried again), and its queued jobs, which
+  would otherwise rebuild the passages. Uploading the same file afterwards adds it as new.
+- **A bug the in-memory tests could not see**: the SQL repository's `get_by_checksum` counted
+  DUPLICATE rows, the in-memory one did not. So the existing test "an erased file can be uploaded
+  again" passed, while in Postgres the next upload matched a refused copy and was refused again.
+  The SQL lookup now ignores DUPLICATE and REJECTED rows, as the in-memory one always did, and a
+  test runs it against the real repository.
+- **Kept, on purpose**: the audit entry recording the delete (who, when, the file's name and
+  hash). The log is append-only at the database level (migration `0003`) and holds no content; an
+  erasure that erased the record of itself could not be shown to have happened. The row stays as
+  a tombstone with its content fields cleared, because version chains refer to it.
+- **Refused, on purpose**: a delete while a worker is processing the document (409, "try again in
+  a few seconds"). Erasing under a running job would let it write the passages straight back.
+- **Not changed**: the Drive connector still hides, rather than erases, a document whose file
+  left the folder, and restores it when the file comes back (#41) -- removing a file from a shared
+  folder is not a decision to destroy it. "Recently deleted" and restore serve only that now.
+- **What this gives up**: an accidental delete cannot be undone. That was the reason for the old
+  default; the trade was made deliberately, for a delete that means what it says.
+
+### 50. Pictures in PDFs and spreadsheets, tables on scanned pages, and lines OCR could not read (Built)
+- **Status**: Built and run over the whole live corpus (28 PDFs, 19 Office files): no document
+  changes language or quality verdict (`compare_extraction.py`).
+- **Context**: #46 read pictures in Word and PowerPoint only, on the reasoning that a PDF page's
+  pictures are seen by OCR. That holds for a scanned page and not for a typed one: a typed report
+  with a table pasted in as a picture has a text layer, so OCR never runs on it, and the table's
+  figures were not in the index at all. A scanned page that *is* a ruled table had the opposite
+  problem -- OCR read it, as loose lines with no rows or columns. And OCR drops lines it cannot
+  read with confidence, which is right, but the passage then read as complete: a handwritten
+  receipt came back as "Received with thanks" with no sign that the amount was missing.
+- **What was built**:
+  - **Typed PDF pages** (`picture_source._pdf_pictures`): pictures of at least 1.5 inches on a
+    page with a text layer, drawn as the page shows them, read **only if they are tables**
+    (`tables_only`): the grid finder decides before any OCR is spent, because a report's charts
+    and photographs carry captions in its text already, and one report has 217 pictures.
+  - **Spreadsheets** (`_xlsx_pictures`): pictures placed on a sheet, filed under the sheet's name,
+    found through the workbook's own relationships (sheet -> drawing -> media).
+  - **Scanned pages** (`PdfTextExtractor._scan_tables`): after OCR, the same grid check; a page
+    that is a ruled table becomes an `ExtractedTable` with the OCR notice as its caption, and the
+    page's text becomes only what lies outside the table, so the cells are not indexed twice.
+  - **Unreadable lines are said** in the passage: "[n lines on this page could not be read
+    reliably by OCR; check the original]" on a scanned page, "... in this picture" on a picture.
+    Counted only for words with at least three letters or digits and a score between 0.3 and the
+    keep threshold, so specks are not lines; and **only where there is other text**, so a notice
+    never carries an unreadable page through the quality gate.
+- **Measured on the corpus**:
+  - **10 new tables in 3 PDFs.** The IITD 2022 report's monthly dispersion results, with and
+    without FGD (`JAN | 17812 | 20.91,85.21 | 23.84 | 3783 ...`, 7 tables), and its emission-norms
+    table; the NOx-control table of 261-MP-2022 (twice, on pages 17 and 41). Read by eye against
+    the pages, they are right. **One is wrong**: a chart on page 53 of the NEERI study came back as
+    a two-row "table" (`PM10 | 9 19 24 32 15 2`). It carries the OCR notice; a filter for it would
+    be a guess, so it is recorded here instead.
+  - **Spreadsheets: none.** No live workbook has a picture on a sheet.
+  - **Scanned pages: no tables found** in the corpus -- its scans are prose, as #13 measured. The
+    check is for the scanned annexure that is a table, which this corpus does not have yet.
+  - **Unreadable-line notices**: 70 of the 162 pages of `Part_7_21.12.2017.pdf` (87 lines, mostly
+    signatures and stamps), the MoP OM (4), the WhatsApp receipt (4, the handwriting), NEERI (1).
+- **Cost**, in the extraction worker's image:
+  - Typed PDFs: 0-5s more for most; 36s more for the 246-page IITD report (17s -> 53s), 9s for
+    the CSE SOx report, 7s for the IIT Bombay deck.
+  - Scanned pages: the grid check is about **1s a page at 300 dpi** (OCR is about 4s). The
+    162-page scan took 811s against 630s, for no table. An earlier measurement of 3,120s for the
+    same run was the development machine, not the code: rerun, it was 811s.
+- **Not done, and why**:
+  - **Handwriting is still not read.** PP-OCRv6 medium, PP-OCRv5 server, Tesseract, EasyOCR and
+    TrOCR were tried on the receipt and all either missed it or invented words. Only a vision
+    model reads it, and none may be used here; the notice is what is possible.
+  - **A chart in a PDF gives nothing** unless it is drawn as a ruled table. Its labels are usually
+    in the page's text already.
+  - **Tables with no ruling lines** are not found in PDFs either, as in #46.

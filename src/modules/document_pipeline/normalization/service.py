@@ -58,12 +58,31 @@ class NormalizationService:
         self.quality_checker = quality_checker or QualityChecker()
         self.language_detector = language_detector or LanguageDetector()
 
+    def _clean_figures(self, figures):
+        """Figure text gets the same cleaning as body text, and a figure with nothing left after
+        it is dropped."""
+        cleaned = []
+        for figure in figures:
+            text = self.cleaner.clean(figure.text)
+            caption = self.cleaner.clean(figure.caption) if figure.caption else ""
+            if not text and not caption:
+                continue
+            cleaned.append(figure.model_copy(update={
+                "text": text,
+                "caption": caption or None,
+                "heading": (self.cleaner.clean(figure.heading) or None) if figure.heading else None,
+            }))
+        return cleaned
+
     def normalize(self, extraction: ExtractionResult) -> NormalizationResult:
         units = [
             NormalizedUnit(
                 index=unit.index,
                 label=unit.label,
                 text=self.cleaner.clean(unit.text),
+                # Rebuilt field by field, so a field not copied here is silently lost on the way
+                # to chunking -- which is what would happen to this flag.
+                text_is_table=unit.text_is_table,
             )
             for unit in extraction.units
         ]
@@ -86,7 +105,13 @@ class NormalizationService:
             language=language,
             units=units,
             headings=headings,
-            tables=extraction.tables,
+            tables=[
+                table.model_copy(
+                    update={"heading": self.cleaner.clean(table.heading) or None}
+                ) if table.heading else table
+                for table in extraction.tables
+            ],
+            figures=self._clean_figures(extraction.figures),
             quality=quality,
         )
         logger.info(

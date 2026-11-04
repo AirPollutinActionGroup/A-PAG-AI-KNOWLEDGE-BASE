@@ -18,6 +18,10 @@ from src.core.config import settings
 
 @pytest.fixture(autouse=True)
 def _no_rerank_by_default(request, monkeypatch):
+    # Reading pictures loads OCR and img2table; only the tests about it should, and they inject
+    # their own reader.
+    monkeypatch.setattr(settings, "PICTURES_ENABLED", False)
+
     # Tests marked `rerank` opt back in and manage the setting themselves.
     if request.node.get_closest_marker("rerank"):
         return

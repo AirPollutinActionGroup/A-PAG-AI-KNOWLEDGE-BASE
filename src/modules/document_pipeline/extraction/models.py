@@ -34,6 +34,12 @@ class ExtractedUnit(BaseModel):
     # measured 0.99 confidence on this corpus and still drops word boundaries.
     method: str = METHOD_NATIVE
 
+    # The unit's text is its table, written out again. True for a worksheet, whose grid is also
+    # emitted as an `ExtractedTable`: the text is still what the quality gate and language
+    # detection read, but chunking it as prose as well indexed every sheet twice -- 6,142 prose
+    # passages duplicating 8,420 table ones across the corpus's spreadsheets.
+    text_is_table: bool = False
+
 
 class ExtractedTable(BaseModel):
     """A table as a grid of cell strings, kept separate from the flowing text.
@@ -45,11 +51,31 @@ class ExtractedTable(BaseModel):
 
     unit_index: int
     rows: list[list[str]]
+    # The section the table sits in, when the format says so (the Word heading in force, the
+    # slide's title, the sheet's name). Without it a table's position inside a unit is unknown,
+    # and a unit with several headings had to cite its tables under none of them (#19).
+    heading: str | None = None
 
     @computed_field
     @property
     def row_count(self) -> int:
         return len(self.rows)
+
+
+class ExtractedFigure(BaseModel):
+    """The words and numbers read out of a picture: axis labels, a map's legend, a diagram's
+    boxes. A picture of a *table* is not a figure -- its grid is an `ExtractedTable`.
+
+    Carried as its own record, with the section it sits in, rather than appended to the page's
+    text. Appended text lands at the end of its unit, and in a Word file that is the end of the
+    document, so a figure from the introduction would be cited under the last heading: a wrong
+    citation, which is worse than an absent one (#19).
+    """
+
+    unit_index: int
+    text: str
+    caption: str | None = None
+    heading: str | None = None
 
 
 class Heading(BaseModel):
@@ -72,6 +98,8 @@ class ExtractionResult(BaseModel):
     tables: list[ExtractedTable] = Field(default_factory=list)
     ocr_pages: list[int] = Field(default_factory=list)
     ocr_skipped_pages: list[int] = Field(default_factory=list)
+    ocr_unreadable_lines: dict[int, int] = Field(default_factory=dict)
+    figures: list[ExtractedFigure] = Field(default_factory=list)
 
     @computed_field
     @property
@@ -122,6 +150,11 @@ class ExtractedContent(BaseModel):
     # document that was short.
     ocr_pages: list[int] = Field(default_factory=list)
     ocr_skipped_pages: list[int] = Field(default_factory=list)
+    # Page -> lines the OCR engine found but could not read with confidence. They are left out of
+    # the text, and recorded here so the gap is findable: the Ministry of Power memo lost a line
+    # stating that the extension covered categories A, B and C, and nothing said so.
+    ocr_unreadable_lines: dict[int, int] = Field(default_factory=dict)
+    figures: list[ExtractedFigure] = Field(default_factory=list)
 
 
 class ExtractionError(Exception):

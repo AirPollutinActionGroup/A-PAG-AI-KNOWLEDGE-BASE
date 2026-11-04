@@ -52,11 +52,6 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: apag_secure_password_2026
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: apag_admin
@@ -76,6 +71,10 @@ services:
       GDRIVE_PUBLIC_FOLDER_ID: ${GDRIVE_PUBLIC_FOLDER_ID:-}
       GDRIVE_RESTRICTED_FOLDER_ID: ${GDRIVE_RESTRICTED_FOLDER_ID:-}
       GDRIVE_FALLBACK_OWNER_EMAIL: ${GDRIVE_FALLBACK_OWNER_EMAIL:-}
+      # Shared demo account, offered as "Sign in with the demo account". Empty means off; set in
+      # .env only. Must be a USER account -- the endpoint refuses to publish an ADMIN's password.
+      DEMO_LOGIN_EMAIL: ${DEMO_LOGIN_EMAIL:-}
+      DEMO_LOGIN_PASSWORD: ${DEMO_LOGIN_PASSWORD:-}
     volumes:
       - ./secrets:/app/secrets:ro
     depends_on:
@@ -101,11 +100,6 @@ services:
     environment:
       WORKER_STAGE: SCAN
       DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: apag_secure_password_2026
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: apag_admin
@@ -134,11 +128,6 @@ services:
     environment:
       WORKER_STAGE: NORMALIZE
       DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: apag_secure_password_2026
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: apag_admin
@@ -172,11 +161,6 @@ services:
     environment:
       WORKER_STAGE: CHUNK
       DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: apag_secure_password_2026
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: apag_admin
@@ -210,11 +194,6 @@ services:
     environment:
       WORKER_STAGE: EMBED
       DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: apag_secure_password_2026
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: apag_admin
@@ -248,11 +227,6 @@ services:
     environment:
       WORKER_STAGE: EXTRACT
       DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: apag_secure_password_2026
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: apag_admin
@@ -289,11 +263,6 @@ services:
     environment:
       WORKER_STAGE: DRIVE_SYNC
       DATABASE_URL: postgresql://postgres:apag_secure_password_2026@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: apag_secure_password_2026
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: apag_admin

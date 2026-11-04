@@ -25,7 +25,6 @@ from abc import ABC, abstractmethod
 from typing import ClassVar
 
 from src.modules.document_pipeline.formats import (
-    MAX_PDF_PAGES,
     describe_unsupported,
     spec_for,
 )
@@ -82,7 +81,6 @@ class FileValidator:
     """Core fail-fast validator for uploaded documents."""
 
     MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
-    MAX_PAGE_COUNT = MAX_PDF_PAGES
 
     def __init__(self, scanner: ThreatScanner | None = None):
         self.scanner = scanner or ClamAVScanner()

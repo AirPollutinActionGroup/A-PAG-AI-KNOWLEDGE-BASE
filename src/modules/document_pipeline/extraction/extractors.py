@@ -8,17 +8,29 @@ out of the file rather than out of a model. PDF is the one format with no semant
 all — just positioned glyphs — so it gets a small, clearly-bounded font-size heuristic and
 pdfplumber's ruling-line table detection.
 
-No OCR: this corpus is digitally authored, so every file has a real text layer. A file that turns
-out not to (a scan someone pasted in) produces almost no text here, which the normalization
-quality gate flags explicitly rather than letting near-empty content through silently.
+A PDF page with no text layer is read by OCR (`ocr.py`), decided page by page; a scan that OCR
+cannot read either produces almost no text, which the normalization quality gate flags rather
+than letting near-empty content through silently.
 """
 
 import io
 import logging
+import re
 from abc import ABC, abstractmethod
 from collections import Counter
+from typing import Any, NamedTuple
 
 from src.core.config import settings
+from src.modules.document_pipeline.extraction.charts import (
+    chart_rids,
+    chart_rows,
+    slide_connections,
+    smartart_lines,
+    smartart_rids,
+    workbook_resolver,
+    xlsx_chart_parts,
+)
+from src.modules.document_pipeline.extraction.grid import flatten_header
 from src.modules.document_pipeline.extraction.models import (
     ExtractedContent,
     ExtractedTable,
@@ -47,6 +59,14 @@ logger = logging.getLogger(__name__)
 _HEADING_SIZE_RATIO = 1.15
 _HEADING_MAX_CHARS = 120
 
+# The subject line of a government memo, notice or direction: "Subject: Extension of timelines
+# for ...", "Sub.: ...". A scanned page has no font sizes, so the size heuristic finds no heading
+# on it at all, and every passage from a scan was cited under "no section recorded". This line is
+# what the document says it is about, written by its author, which makes it the one heading a
+# scan reliably carries. The 162-page CPCB set has 26 of them, one per direction.
+_SUBJECT_LINE = re.compile(r"^\s*(subject|sub)\s*[.:\-]+\s*\S", re.IGNORECASE)
+_SUBJECT_MAX_CHARS = 200
+
 
 class TextExtractor(ABC):
     """Extracts readable content from one format's bytes."""
@@ -74,10 +94,13 @@ class PdfTextExtractor(TextExtractor):
     was produced.
     """
 
-    def __init__(self, ocr: OcrEngine | None = None):
+    def __init__(self, ocr: OcrEngine | None = None, table_reader=None):
         # An explicit engine is for tests. In production it is resolved lazily on the first page
         # that needs it, so an extraction worker that never meets a scan never loads a model.
         self._ocr = ocr
+        # The reader of tables in pictures (`picture_tables.py`), for a scanned page that is a
+        # ruled table. Injected in tests; otherwise the picture reader's, when pictures are on.
+        self._table_reader = table_reader
 
     def _engine(self) -> OcrEngine | None:
         # The setting is authoritative even over an injected engine. Otherwise OCR_ENABLED=false
@@ -94,6 +117,8 @@ class PdfTextExtractor(TextExtractor):
         headings: list[Heading] = []
         ocr_pages: list[int] = []
         skipped_pages: list[int] = []
+        unreadable_lines: dict[int, int] = {}
+        subject_headings: list[Heading] = []
         # (text, font size, page index) for every line, collected across the whole document so
         # the body size is measured document-wide rather than per page — a page that is entirely
         # a heading would otherwise make that heading look like body text.
@@ -116,12 +141,16 @@ class PdfTextExtractor(TextExtractor):
                                 settings.OCR_MAX_PAGES, index,
                             )
                         else:
-                            read = self._ocr_page(page, index)
+                            read, unreadable, scan_tables = self._ocr_page(page, index)
+                            tables.extend(scan_tables)
+                            if unreadable:
+                                unreadable_lines[index] = unreadable
                             if read:
                                 text = read
                                 method = METHOD_OCR
                                 ocr_pages.append(index)
                                 ocr_budget -= 1
+                                subject_headings.extend(self._subject_headings(read, index))
 
                     units.append(
                         ExtractedUnit(index=index, label=f"Page {index}", text=text, method=method)
@@ -149,14 +178,38 @@ class PdfTextExtractor(TextExtractor):
                 "…" if len(ocr_pages) > 10 else "",
             )
 
-        headings = self._infer_headings(lines)
+        # Size-inferred headings come from the text layer and subject lines from OCR'd pages, so
+        # the two never describe the same page; sorted by page so the chunker meets them in
+        # reading order.
+        headings = sorted(
+            self._infer_headings(lines) + subject_headings, key=lambda h: h.unit_index
+        )
         return ExtractedContent(
             units=units,
             headings=headings,
             tables=tables,
             ocr_pages=ocr_pages,
             ocr_skipped_pages=skipped_pages,
+            ocr_unreadable_lines=unreadable_lines,
         )
+
+    @staticmethod
+    def _subject_headings(text: str, page_index: int) -> list[Heading]:
+        """A memo's "Subject:" line, as the heading of the scanned page it opens. Only the first
+        line of a wrapped subject is used, because the chunker locates a heading by finding its
+        exact text in the page, and a subject joined across a line break is not in it."""
+        found = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not _SUBJECT_LINE.match(line) or len(line) > _SUBJECT_MAX_CHARS:
+                continue
+            # A word hyphenated across the line break ("Flue Gas De-" / "sulphurisation") is
+            # rejoined in the page text by the cleaner, so a heading ending "De-" would match
+            # nothing and the memo's subject was silently not used. Stop before the fragment.
+            if line.endswith("-") and " " in line:
+                line = line.rsplit(" ", 1)[0].rstrip()
+            found.append(Heading(text=line, level=1, unit_index=page_index))
+        return found
 
     @staticmethod
     def _needs_ocr(page, text: str) -> bool:
@@ -174,25 +227,80 @@ class PdfTextExtractor(TextExtractor):
         except Exception:
             return False
 
-    def _ocr_page(self, page, index: int) -> str:
-        """Renders one page and reads it. Returns "" if OCR is off, unavailable, or found
-        nothing — in every one of those cases the page keeps its (empty) native text, and the
-        normalization quality gate decides what an empty document means. That judgement belongs
-        there, not here."""
+    def _ocr_page(self, page, index: int) -> tuple[str, int, list[ExtractedTable]]:
+        """Renders one page and reads it: (text, lines found but too uncertain to keep, tables).
+
+        The text is "" if OCR is off, unavailable, or found nothing — in every one of those
+        cases the page keeps its (empty) native text, and the normalization quality gate decides
+        what an empty document means. That judgement belongs there, not here.
+
+        A scanned page that is a ruled table is read as one, with its rows and columns -- a plain
+        OCR pass returns its cells as loose lines with no grid -- and its text outside the table
+        stays the page's text, so the cells are not indexed twice. The grid check costs about a
+        second on a 300 dpi page (162 pages of prose: 811s against 630s), and no more OCR is run
+        on a page where it finds no table.
+
+        Lines that were found but could not be read (handwriting, mostly) are said to be missing
+        at the end of the page's text, so a passage does not read as complete when it is not.
+        Only on a page that has other text: a notice must never be what lets an unreadable scan
+        through the quality gate."""
         engine = self._engine()
         if engine is None:
-            return ""
+            return "", 0, []
         try:
             image = page.to_image(resolution=settings.OCR_RESOLUTION).original
-            lines = engine.read(image)
+            read = engine.read_page(image)
         except OcrUnavailable as e:
             logger.error("OCR failed on page %d: %s", index, e)
-            return ""
+            return "", 0, []
         except Exception as e:
             # Rendering can fail on a malformed page. One bad page must not lose the other 161.
             logger.warning("Could not render page %d for OCR: %s", index, e)
-            return ""
-        return "\n".join(line.text for line in lines)
+            return "", 0, []
+        text = "\n".join(line.text for line in read.lines)
+        tables = self._scan_tables(image, index) if text else ([], None)
+        found, rest = tables
+        if found:
+            text = rest
+        if text and read.unreadable:
+            from src.modules.document_pipeline.extraction.pictures import (
+                unreadable_notice,
+            )
+
+            text += "\n" + unreadable_notice(read.unreadable, "on this page")
+        return text, read.unreadable, found
+
+    def _scan_tables(self, image, index: int) -> tuple[list[ExtractedTable], str | None]:
+        """The ruled tables on a scanned page, and the page's text outside them."""
+        reader = self._table_reader
+        if reader is None:
+            from src.modules.document_pipeline.extraction.pictures import (
+                get_picture_reader,
+            )
+
+            pictures = get_picture_reader()
+            reader = pictures.table_reader() if pictures is not None else None
+        if reader is None:
+            return [], None
+        try:
+            import cv2
+            import numpy as np
+
+            reading = reader.read(
+                cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR), tables_only=True,
+            )
+        except Exception as e:
+            logger.warning("Could not look for tables on scanned page %d: %s", index, e)
+            return [], None
+        if not reading.tables:
+            return [], None
+        from src.modules.document_pipeline.extraction.pictures import with_ocr_notice
+
+        tables = [
+            ExtractedTable(unit_index=index, rows=with_ocr_notice(t.rows, t.title))
+            for t in reading.tables
+        ]
+        return tables, "\n".join(reading.lines)
 
     @staticmethod
     def _page_lines(page, page_index: int) -> list[tuple[str, float, int]]:
@@ -257,29 +365,53 @@ class PdfTextExtractor(TextExtractor):
 
 
 class DocxTextExtractor(TextExtractor):
-    """DOCX via python-docx. Headings come from Word's own paragraph styles."""
+    """DOCX via python-docx. Headings come from Word's own paragraph styles.
+
+    The body is read **in document order**, paragraphs and tables interleaved, so each table
+    records the heading it sits under. Reading every paragraph and then every table lost that, and
+    a Word file with more than one heading cited all its tables under none (#19). Text boxes and
+    footnotes are read too: footnotes here are mostly source URLs, which are what a citation needs.
+    """
 
     def extract(self, data: bytes) -> ExtractedContent:
         from docx import Document as DocxDocument
+        from docx.table import Table as DocxTable
 
+        paragraphs: list[str] = []
+        headings: list[Heading] = []
+        tables: list[ExtractedTable] = []
         try:
             document = DocxDocument(io.BytesIO(data))
-            paragraphs = []
-            headings = []
-            for paragraph in document.paragraphs:
-                text = paragraph.text.strip()
-                if not text:
+            current: str | None = None
+            related = document.part.related_parts
+            for block in document.iter_inner_content():
+                element = block._tbl if isinstance(block, DocxTable) else block._p
+                # Drawn charts and SmartArt are stored apart from the text, so a paragraph or table
+                # that holds one says so only through a relationship id.
+                for rid in chart_rids(element):
+                    rows = chart_rows(related[rid].blob) if rid in related else None
+                    if rows:
+                        tables.append(ExtractedTable(unit_index=1, rows=rows, heading=current))
+                for rid in smartart_rids(element):
+                    if rid in related:
+                        paragraphs.extend(smartart_lines(related[rid].blob))
+                if isinstance(block, DocxTable):
+                    rows = _docx_rows(block)
+                    if _table_has_content(rows):
+                        tables.append(ExtractedTable(unit_index=1, rows=rows, heading=current))
                     continue
-                paragraphs.append(text)
-                level = self._heading_level(paragraph)
-                if level is not None:
-                    headings.append(Heading(text=text, level=level, unit_index=1))
+                text = block.text.strip()
+                if text:
+                    paragraphs.append(text)
+                    level = self._heading_level(block)
+                    if level is not None:
+                        headings.append(Heading(text=text, level=level, unit_index=1))
+                        current = text
+                paragraphs.extend(_docx_text_boxes(block._p))
 
-            tables = []
-            for table in document.tables:
-                rows = [[_clean_cell(cell.text) for cell in row.cells] for row in table.rows]
-                if _table_has_content(rows):
-                    tables.append(ExtractedTable(unit_index=1, rows=rows))
+            notes = _docx_footnotes(document)
+            if notes:
+                paragraphs.append("Notes:\n" + "\n".join(notes))
         except Exception as e:
             raise ExtractionError(f"Could not read Word document content: {e}") from e
 
@@ -301,8 +433,79 @@ class DocxTextExtractor(TextExtractor):
         return int(tail) if tail.isdigit() else 1
 
 
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+
+
+def _docx_rows(table) -> list[list[str]]:
+    """A Word table's cells, with a horizontally merged cell kept once.
+
+    python-docx returns a cell merged across three columns three times, so its text appeared
+    three times in the row. Vertical merges are kept repeated on purpose: each row of a row group
+    should still say which merged label it belongs to.
+    """
+    rows = []
+    for row in table.rows:
+        cells, previous = [], None
+        for cell in row.cells:
+            if previous is not None and cell._tc is previous:
+                continue
+            previous = cell._tc
+            cells.append(_clean_cell(cell.text))
+        rows.append(cells)
+    return rows
+
+
+def _docx_text_boxes(paragraph_element) -> list[str]:
+    """Text inside text boxes anchored in this paragraph, which `paragraph.text` does not include.
+
+    A text box is stored twice for compatibility -- a modern shape and a VML fallback holding the
+    same text -- so anything under `mc:Fallback` is skipped, or every box would be read twice.
+    """
+    found: list[str] = []
+    for box in paragraph_element.iter(f"{{{_W_NS}}}txbxContent"):
+        if any(ancestor.tag == _MC_FALLBACK for ancestor in box.iterancestors()):
+            continue
+        for p in box.iter(f"{{{_W_NS}}}p"):
+            text = "".join(t.text or "" for t in p.iter(f"{{{_W_NS}}}t")).strip()
+            if text and text not in found:
+                found.append(text)
+    return found
+
+
+def _docx_footnotes(document) -> list[str]:
+    """The document's footnotes and endnotes, in order. Separator entries are Word's own
+    furniture (the rule above the notes) and are skipped."""
+    from lxml import etree
+
+    notes: list[str] = []
+    for part in document.part.package.iter_parts():
+        name = str(part.partname)
+        if name not in ("/word/footnotes.xml", "/word/endnotes.xml"):
+            continue
+        root = etree.fromstring(part.blob, parser=etree.XMLParser(resolve_entities=False))
+        for note in root:
+            if note.get(f"{{{_W_NS}}}type") in ("separator", "continuationSeparator",
+                                                "continuationNotice"):
+                continue
+            text = " ".join(
+                "".join(t.text or "" for t in p.iter(f"{{{_W_NS}}}t")).strip()
+                for p in note.iter(f"{{{_W_NS}}}p")
+            ).strip()
+            if text:
+                notes.append(text)
+    return notes
+
+
 class PptxTextExtractor(TextExtractor):
-    """PPTX via python-pptx. One unit per slide; the slide's title placeholder is its heading."""
+    """PPTX via python-pptx. One unit per slide, and each slide stands alone.
+
+    Shapes are read recursively, because grouped shapes are how decks draw timelines and labelled
+    diagrams: reading only top-level shapes lost the whole MoEF&CC deadline history on one slide
+    of "TPPs Delhi NCR". Speaker notes are kept (they carry source URLs, and sometimes the point
+    of the slide). Hidden slides are skipped -- they are drafts or discarded numbers -- without
+    renumbering the rest, so slide N in a citation is slide N in the file.
+    """
 
     def extract(self, data: bytes) -> ExtractedContent:
         from pptx import Presentation
@@ -310,52 +513,346 @@ class PptxTextExtractor(TextExtractor):
         units: list[ExtractedUnit] = []
         headings: list[Heading] = []
         tables: list[ExtractedTable] = []
+        hidden: list[int] = []
 
         try:
             presentation = Presentation(io.BytesIO(data))
             for index, slide in enumerate(presentation.slides, start=1):
-                title = self._slide_title(slide)
-                if title:
-                    headings.append(Heading(text=title, level=1, unit_index=index))
+                if slide._element.get("show") == "0":
+                    hidden.append(index)
+                    continue
 
-                texts = []
-                for shape in slide.shapes:
-                    if getattr(shape, "has_table", False):
-                        rows = [
-                            [_clean_cell(cell.text) for cell in row.cells]
-                            for row in shape.table.rows
-                        ]
+                title_shape, title = self._slide_title(slide)
+                # The title's shape goes first, whatever its place in the slide's drawing order,
+                # so the chunker meets the heading before the text it heads.
+                texts = [title_shape.text_frame.text.strip()] if title_shape is not None else []
+                slide_tables: list[ExtractedTable] = []
+                title_element = title_shape._element if title_shape is not None else None
+                placed = list(_placed_shapes(slide.shapes))
+                legend = _colour_legend([p.shape for p in placed if _is_table(p.shape)])
+                labels, consumed = _overlay_labels(placed)
+                body: list[tuple[int | None, str]] = []
+                for item in placed:
+                    shape = item.shape
+                    # Compared by XML element: python-pptx builds a new wrapper object on every
+                    # iteration, so `shape is title_shape` is never true.
+                    if shape._element is title_element or shape._element in consumed:
+                        continue
+                    if _is_table(shape):
+                        rows = _pptx_table_rows(shape.table, legend, labels.get(shape._element))
                         if _table_has_content(rows):
-                            tables.append(ExtractedTable(unit_index=index, rows=rows))
+                            slide_tables.append(ExtractedTable(
+                                unit_index=index, rows=rows, heading=title or None,
+                            ))
+                    elif getattr(shape, "has_chart", False):
+                        rows = chart_rows(shape.chart.part.blob)
+                        if rows:
+                            slide_tables.append(ExtractedTable(
+                                unit_index=index, rows=rows, heading=title or None,
+                            ))
                     elif getattr(shape, "has_text_frame", False):
                         text = shape.text_frame.text.strip()
                         if text:
-                            texts.append(text)
+                            body.append((item.group, text))
+                    else:
+                        # SmartArt keeps its text in a data model, not in shapes: unseen until read.
+                        for rid in smartart_rids(shape._element):
+                            for line in smartart_lines(slide.part.related_part(rid).blob):
+                                body.append((None, line))
+                texts.extend(_timeline_order(body))
+                connections = slide_connections(slide._element)
+                if connections:
+                    texts.append("Diagram connections:\n" + "\n".join(connections))
 
+                notes = self._notes(slide)
+                if notes:
+                    texts.append("Notes:\n" + notes)
+                if title:
+                    headings.append(Heading(text=title, level=1, unit_index=index))
+                tables.extend(slide_tables)
                 units.append(
                     ExtractedUnit(index=index, label=f"Slide {index}", text="\n".join(texts))
                 )
         except Exception as e:
             raise ExtractionError(f"Could not read PowerPoint content: {e}") from e
 
+        if hidden:
+            logger.info("Skipped %d hidden slide(s): %s", len(hidden), hidden)
         return ExtractedContent(units=units, headings=headings, tables=tables)
 
     @staticmethod
-    def _slide_title(slide) -> str:
+    def _slide_title(slide) -> tuple[Any, str]:
+        """The slide's title and the shape it came from.
+
+        The title placeholder when it has text; otherwise the first line of the topmost text box.
+        Decks routinely type a title into an ordinary text box, and without this fallback such a
+        slide had no heading of its own.
+        """
         try:
-            title_shape = slide.shapes.title
+            placeholder = slide.shapes.title
+        except Exception:
+            placeholder = None
+        if placeholder is not None and getattr(placeholder, "has_text_frame", False):
+            text = placeholder.text_frame.text.strip()
+            if text:
+                return placeholder, text
+
+        candidates = []
+        for order, shape in enumerate(slide.shapes):
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            first = next(
+                (line.strip() for line in shape.text_frame.text.splitlines() if line.strip()), ""
+            )
+            if len(first) >= 4 and len(first) <= _HEADING_MAX_CHARS:
+                top = shape.top if shape.top is not None else 10**12
+                left = shape.left if shape.left is not None else 10**12
+                candidates.append((top, left, order, first, shape))
+        if not candidates:
+            return None, ""
+        # The title is the first line; the shape's other lines stay in the body under it.
+        _, _, _, first, shape = min(candidates, key=lambda c: c[:3])
+        return shape, first
+
+    @staticmethod
+    def _notes(slide) -> str:
+        try:
+            if not slide.has_notes_slide:
+                return ""
+            frame = slide.notes_slide.notes_text_frame
         except Exception:
             return ""
-        if title_shape is None or not getattr(title_shape, "has_text_frame", False):
-            return ""
-        return title_shape.text_frame.text.strip()
+        return frame.text.strip() if frame is not None else ""
+
+
+class _Placed(NamedTuple):
+    """A leaf shape, where it really sits on the slide, and which group it was drawn in."""
+
+    shape: Any
+    # Slide coordinates in EMU: left, top, width, height. A shape inside a group carries
+    # coordinates in the group's own space, so they are mapped out through every enclosing group.
+    frame: tuple[float, float, float, float]
+    group: int | None
+
+
+def _placed_shapes(shapes, chain: tuple = (), counter: list[int] | None = None, group=None):
+    """Every shape on a slide, descending into groups, in the slide's own order."""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    counter = counter if counter is not None else [0]
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            counter[0] += 1
+            xfrm = shape._element.grpSpPr.xfrm
+            yield from _placed_shapes(
+                shape.shapes, (*chain, xfrm), counter, group=counter[0],
+            )
+            continue
+        left, top = shape.left or 0, shape.top or 0
+        width, height = shape.width or 0, shape.height or 0
+        for xfrm in reversed(chain):  # innermost group first
+            if xfrm is None or not xfrm.chExt.cx or not xfrm.chExt.cy:
+                continue
+            sx, sy = xfrm.ext.cx / xfrm.chExt.cx, xfrm.ext.cy / xfrm.chExt.cy
+            left = xfrm.off.x + (left - xfrm.chOff.x) * sx
+            top = xfrm.off.y + (top - xfrm.chOff.y) * sy
+            width, height = width * sx, height * sy
+        yield _Placed(shape, (left, top, width, height), group)
+
+
+def _is_table(shape) -> bool:
+    return bool(getattr(shape, "has_table", False))
+
+
+# A year on its own is a timeline's label, and the text drawn beside it is what happened that year.
+_YEAR_LABEL = re.compile(r"^(19|20)\d\d$")
+
+
+def _timeline_order(items: list[tuple[int | None, str]]) -> list[str]:
+    """Text boxes in reading order, with each timeline year put in front of its description.
+
+    A timeline is drawn as one small group per year, holding a label and a text box in whatever
+    order the author created them. Slide 10 of "TPPs Delhi NCR" came out as "2015, <2015>, <2017>,
+    2017, 2021, <2021>", where the year after its own description reads as the label of the next.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(items):
+        j = i + 1
+        while items[i][0] is not None and j < len(items) and items[j][0] == items[i][0]:
+            j += 1
+        block = [text for _, text in items[i:j]]
+        years = [t for t in block if _YEAR_LABEL.match(t)]
+        rest = [t for t in block if not _YEAR_LABEL.match(t)]
+        if len(years) == 1 and rest:
+            out.append(f"{years[0]}: {rest[0]}")
+            out.extend(rest[1:])
+        else:
+            out.extend(block)
+        i = j
+    return out
+
+
+def _cell_fill(cell) -> str | None:
+    """A cell's solid RGB fill as "RRGGBB", or None. Theme colours are left out on purpose: the
+    colour a deck's key refers to is one the author picked, not one the theme supplied."""
+    from pptx.enum.dml import MSO_COLOR_TYPE, MSO_FILL
+
+    try:
+        fill = cell.fill
+        if fill.type != MSO_FILL.SOLID or fill.fore_color.type != MSO_COLOR_TYPE.RGB:
+            return None
+        return str(fill.fore_color.rgb)
+    except Exception:
+        return None
+
+
+def _colour_legend(tables) -> dict[str, str]:
+    """The slide's colour key, as {fill: meaning}.
+
+    "Data from only 5/11 TPPs is listed online" colours a grid green, orange and red and says what
+    they mean in a small second table. The coloured cells hold no text, so the slide's whole answer
+    -- which plant reports which pollutant -- was missing from the index. A key is a small table
+    whose labelled cells each carry their own colour, every colour with one label.
+    """
+    for shape in tables:
+        table = shape.table
+        if len(table.rows) > 8 or len(table.columns) > 3:
+            continue
+        found: dict[str, set[str]] = {}
+        for row in table.rows:
+            for cell in row.cells:
+                text, fill = _clean_cell(cell.text), _cell_fill(cell)
+                if text and fill:
+                    found.setdefault(fill, set()).add(text)
+        labels = [next(iter(v)) for v in found.values() if len(v) == 1]
+        if len(found) >= 2 and len(labels) == len(found) and len(set(labels)) == len(labels):
+            return {fill: next(iter(v)) for fill, v in found.items()}
+    return {}
+
+
+def _grid_spans(table) -> list[list[tuple[int, int, int, int] | None]]:
+    """For every cell, the (row, col, height, width) of the merged block it belongs to."""
+    n_rows, n_cols = len(table.rows), len(table.columns)
+    spans: list[list[tuple[int, int, int, int] | None]] = [[None] * n_cols for _ in range(n_rows)]
+    for r in range(n_rows):
+        for c in range(n_cols):
+            cell = table.cell(r, c)
+            if cell.is_merge_origin:
+                height, width = cell.span_height, cell.span_width
+                for rr in range(r, min(r + height, n_rows)):
+                    for cc in range(c, min(c + width, n_cols)):
+                        spans[rr][cc] = (r, c, height, width)
+    return spans
+
+
+def _overlay_labels(placed: list[_Placed]) -> tuple[dict, set]:
+    """Text boxes laid over a table's merged column, matched to the rows they name.
+
+    Slide 7 draws "State", "Centre" and "Private" as rotated text boxes on top of three empty
+    merged cells, so the table said nothing about who owns which plant and the three words sat
+    loose in the slide's text. Row heights in the file are minimums, so position alone cannot say
+    which block a label is over; the match is by order, and only when it is unambiguous: as many
+    short labels over the column as there are empty merged blocks in it.
+
+    Returns {table element: {(row, col): label}} and the elements of the labels used.
+    """
+    tables = [p for p in placed if _is_table(p.shape)]
+    boxes = [
+        p for p in placed
+        if not _is_table(p.shape) and getattr(p.shape, "has_text_frame", False)
+        and 0 < len(p.shape.text_frame.text.strip()) <= 40
+        and len(p.shape.text_frame.text.split()) <= 3
+    ]
+    labels: dict = {}
+    consumed: set = set()
+    for item in tables:
+        table = item.shape.table
+        left, top, _, _ = item.frame
+        spans = _grid_spans(table)
+        x = left
+        for c, column in enumerate(table.columns):
+            right = x + column.width
+            slots = [
+                (r, c) for r in range(len(table.rows))
+                if (b := spans[r][c]) and b[:2] == (r, c) and b[2] >= 2 and b[3] == 1
+                and not _clean_cell(table.cell(r, c).text)
+            ]
+            x = right
+            if not slots:
+                continue
+            over = sorted(
+                (p for p in boxes
+                 if p.shape._element not in consumed
+                 and right - column.width - 91440 <= p.frame[0] + p.frame[2] / 2 <= right + 91440
+                 and top - 91440 <= p.frame[1] + p.frame[3] / 2
+                 <= top + 2 * sum(row.height for row in table.rows)),
+                key=lambda p: p.frame[1] + p.frame[3] / 2,
+            )
+            if len(over) != len(slots):
+                continue
+            for slot, p in zip(slots, over, strict=True):
+                labels.setdefault(item.shape._element, {})[slot] = _clean_cell(p.shape.text_frame.text)
+                consumed.add(p.shape._element)
+    return labels, consumed
+
+
+def _pptx_table_rows(table, legend: dict[str, str], labels: dict | None = None) -> list[list[str]]:
+    """A slide table as a full grid of cell text.
+
+    python-pptx hands back the text of a merged block in its top-left cell and an empty string in
+    the rest, so "Total | (blank) | 35" lost what the row is a total *of*, and an "Unlisted" spread
+    over four columns was filled in one. A merged block's text is written into every cell it
+    covers, so each cell can be read on its own, except a title spanning the table's whole width,
+    which stays a single caption cell for the chunker to recognise.
+
+    A header drawn over two rows -- a group name above its columns, or a label spanning both --
+    becomes one row: "SO2 (mg/NM3)" over ">= 500 MW" is the column "SO2 (mg/NM3) >= 500 MW". Left
+    as two rows, the column over "200" had no name.
+
+    A cell with no text but a colour from the slide's key is read as what the key says, in
+    brackets so it is plain that the colour said it.
+    """
+    n_rows, n_cols = len(table.rows), len(table.columns)
+    spans = _grid_spans(table)
+    own = [[_clean_cell(table.cell(r, c).text) for c in range(n_cols)] for r in range(n_rows)]
+    for (r, c), label in (labels or {}).items():
+        own[r][c] = label
+
+    rows: list[list[str]] = []
+    for r in range(n_rows):
+        row = []
+        for c in range(n_cols):
+            block = spans[r][c]
+            if block is None:
+                text = own[r][c]
+            else:
+                top, left, _, width = block
+                text = own[top][left]
+                if n_cols > 1 and width == n_cols and (r, c) != (top, left):
+                    text = ""
+            if not text and (fill := _cell_fill(table.cell(r, c))) in legend:
+                text = f"({legend[fill]})"
+            row.append(text)
+        rows.append(row)
+
+    return flatten_header(rows, spans)
+
+
+# Above this, a workbook is read in openpyxl's streaming mode, which cannot see merged ranges.
+# Below it the full load costs memory in proportion to the file and nothing else: the corpus's
+# largest spreadsheet is 325 KB.
+_XLSX_FULL_LOAD_MAX_BYTES = 8 * 1024 * 1024
 
 
 class XlsxTextExtractor(TextExtractor):
-    """XLSX via openpyxl. A worksheet is already a grid, so each sheet is both a unit and a table.
+    """XLSX via openpyxl. A worksheet is already a grid, so each sheet is a table.
 
     Opened with `data_only=True`: cached computed values are what a reader cares about, and it
     also means formula source (`=cmd|...`) never reaches the extracted text.
+
+    The sheet's text is still produced -- the quality gate and language detection read it -- but
+    marked `text_is_table`, so it is chunked once, as the table, not again as prose.
     """
 
     def extract(self, data: bytes) -> ExtractedContent:
@@ -365,24 +862,43 @@ class XlsxTextExtractor(TextExtractor):
         headings: list[Heading] = []
         tables: list[ExtractedTable] = []
 
+        full = len(data) <= _XLSX_FULL_LOAD_MAX_BYTES
         workbook = None
         try:
-            workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+            workbook = load_workbook(io.BytesIO(data), read_only=not full, data_only=True)
+            charts = self._charts(data)
+            resolver = workbook_resolver(workbook) if full else None
             for index, worksheet in enumerate(workbook.worksheets, start=1):
-                rows = [
-                    [_clean_cell(cell) for cell in row]
-                    for row in worksheet.iter_rows(values_only=True)
-                ]
+                fills = _vertical_merge_fills(worksheet) if full else {}
+                rows = []
+                for r, row in enumerate(worksheet.iter_rows(), start=1):
+                    rows.append([
+                        fills.get((r, c), _xlsx_cell(cell)) for c, cell in enumerate(row, start=1)
+                    ])
                 rows = [row for row in rows if any(row)]
 
                 # The sheet name is the only structural label a spreadsheet carries.
                 headings.append(Heading(text=worksheet.title, level=1, unit_index=index))
-                if _table_has_content(rows):
-                    tables.append(ExtractedTable(unit_index=index, rows=rows))
+                has_table = _table_has_content(rows)
+                if has_table:
+                    tables.append(
+                        ExtractedTable(unit_index=index, rows=rows, heading=worksheet.title)
+                    )
+
+                # A drawn chart's values are stored with it; the sheet's own cells are not them.
+                for chart_xml in charts.get(worksheet.title, []):
+                    chart = chart_rows(chart_xml, resolve=resolver)
+                    if chart:
+                        tables.append(
+                            ExtractedTable(unit_index=index, rows=chart, heading=worksheet.title)
+                        )
 
                 text = "\n".join("\t".join(row).rstrip() for row in rows)
                 units.append(
-                    ExtractedUnit(index=index, label=f"Sheet: {worksheet.title}", text=text)
+                    ExtractedUnit(
+                        index=index, label=f"Sheet: {worksheet.title}", text=text,
+                        text_is_table=has_table,
+                    )
                 )
         except Exception as e:
             raise ExtractionError(f"Could not read spreadsheet content: {e}") from e
@@ -395,9 +911,67 @@ class XlsxTextExtractor(TextExtractor):
 
         return ExtractedContent(units=units, headings=headings, tables=tables)
 
+    @staticmethod
+    def _charts(data: bytes) -> dict[str, list[bytes]]:
+        """The workbook's chart parts by sheet. A chart that cannot be located costs the sheet
+        nothing: its cells are read either way."""
+        import zipfile
 
-# Keyed by the same MIME constants validation uses, so a format cannot be accepted at upload and
-# then have no way to be read here. `ExtractionService` asserts the two registries agree.
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                return xlsx_chart_parts(archive)
+        except Exception as e:
+            logger.warning("Could not look for charts in the workbook: %s", e)
+            return {}
+
+
+def _xlsx_cell(cell) -> str:
+    """A cell as a person reads it, not as Python prints it.
+
+    `str()` wrote a phone number as "9910257052.0" and a date as "2024-01-01 00:00:00", which
+    neither a reader nor the word index matches against "9910257052" or "2024-01-01".
+    """
+    import datetime
+
+    value = getattr(cell, "value", None)
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value).upper()
+    if isinstance(value, datetime.datetime):
+        if value.time() == datetime.time(0, 0):
+            return value.date().isoformat()
+        return value.isoformat(sep=" ", timespec="minutes")
+    if isinstance(value, datetime.date | datetime.time):
+        return value.isoformat()
+    if isinstance(value, float):
+        if "%" in (getattr(cell, "number_format", "") or ""):
+            return f"{value * 100:.4g}%"
+        if value.is_integer() and abs(value) < 1e15:
+            return str(int(value))
+        return f"{value:.12g}"
+    return str(value).strip()
+
+
+def _vertical_merge_fills(worksheet) -> dict[tuple[int, int], str]:
+    """Values to write into cells hidden under a merged range, by (row, column).
+
+    Only downwards: a label merged across several rows is written into each of them, so every row
+    of a row group still says which label it belongs to. A merge across columns is a spanning
+    header and stays in its first cell, or it would be repeated across the row.
+    """
+    fills: dict[tuple[int, int], str] = {}
+    for merged in getattr(worksheet, "merged_cells", None) or []:
+        if merged.max_row == merged.min_row:
+            continue
+        value = _xlsx_cell(worksheet.cell(row=merged.min_row, column=merged.min_col))
+        if not value:
+            continue
+        for row in range(merged.min_row + 1, merged.max_row + 1):
+            fills[(row, merged.min_col)] = value
+    return fills
+
+
 EXTRACTORS: dict[str, TextExtractor] = {
     PDF_MIME: PdfTextExtractor(),
     DOCX_MIME: DocxTextExtractor(),

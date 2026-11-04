@@ -81,8 +81,6 @@ services:
     command: alembic upgrade head
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
@@ -100,18 +98,12 @@ services:
       - "85:8000"
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_SECURE: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
-      ENVIRONMENT: staging
       # Written answers. Interpolated with an empty default so the stack still starts without
       # a key: /ask then returns 503 and the UI falls back to showing passages, which is the
       # intended behaviour for a deployment without external inference rather than a crash.
@@ -169,18 +161,12 @@ services:
     environment:
       WORKER_STAGE: SCAN
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_SECURE: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
-      ENVIRONMENT: staging
       WORKER_POLL_INTERVAL_SECONDS: "1.0"
       SCAN_WORKER_LEASE_SECONDS: "60"
       WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
@@ -204,18 +190,12 @@ services:
     environment:
       WORKER_STAGE: NORMALIZE
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_SECURE: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
-      ENVIRONMENT: staging
       WORKER_POLL_INTERVAL_SECONDS: "1.0"
       SCAN_WORKER_LEASE_SECONDS: "60"
       WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
@@ -244,18 +224,12 @@ services:
     environment:
       WORKER_STAGE: CHUNK
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_SECURE: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
-      ENVIRONMENT: staging
       WORKER_POLL_INTERVAL_SECONDS: "1.0"
       SCAN_WORKER_LEASE_SECONDS: "60"
       WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
@@ -301,18 +275,12 @@ services:
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
       INFERENCE_THREADS: ${INFERENCE_THREADS:-0}
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_SECURE: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
-      ENVIRONMENT: staging
       WORKER_POLL_INTERVAL_SECONDS: "1.0"
       SCAN_WORKER_LEASE_SECONDS: "60"
       WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
@@ -351,11 +319,6 @@ services:
       WORKER_STAGE: EXTRACT
       MAX_PDF_PAGES: "600"
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
@@ -367,7 +330,8 @@ services:
       # the VM's core count, not this machine's — 8 threads on a 2-vCPU box is slower than 2.
       OCR_ENABLED: ${OCR_ENABLED:-true}
       OCR_THREADS: ${OCR_THREADS:-0}
-      ENVIRONMENT: staging
+      # Pictures in Word and PowerPoint files (tables read with img2table and the OCR above).
+      PICTURES_ENABLED: ${PICTURES_ENABLED:-true}
       WORKER_POLL_INTERVAL_SECONDS: "1.0"
       SCAN_WORKER_LEASE_SECONDS: "60"
       WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
@@ -399,18 +363,12 @@ services:
     environment:
       WORKER_STAGE: DRIVE_SYNC
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/apag_knowledge_base
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: apag_knowledge_base
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       STORAGE_BACKEND: minio
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_SECURE: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
-      ENVIRONMENT: staging
       WORKER_HEARTBEAT_FILE: "/tmp/worker_alive"
       GDRIVE_ENABLED: ${GDRIVE_ENABLED:-false}
       GDRIVE_CREDENTIALS_FILE: ${GDRIVE_CREDENTIALS_FILE:-/app/secrets/drive-sync.json}

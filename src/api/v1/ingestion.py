@@ -33,6 +33,11 @@ from src.db.models import User
 from src.modules.audit.service import AuditService
 from src.modules.auth.access import can_view, is_admin
 from src.modules.auth.dependencies import get_current_user
+from src.modules.document_pipeline.erasure import (
+    DocumentBusy,
+    StorageEraseFailed,
+    erase_document,
+)
 from src.modules.document_pipeline.formats import (
     FormatSpec,
     describe_unsupported,
@@ -541,23 +546,24 @@ async def get_document_chunks(
 
 @router.delete(
     "/{document_id}",
-    summary="Delete a document (owner or ADMIN). Reversible unless ?permanent=true",
+    summary="Delete a document and everything derived from it, at once (owner or ADMIN)",
 )
 async def delete_document(
     document_id: uuid.UUID,
-    permanent: bool = False,
     repo: DocumentRepository = Depends(get_document_repository),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Irreversible: erases the promoted object from `raw/`, then tombstones the row
-    (deleted_at + purged_at stamped, sha256/raw_path nulled). The row itself is kept because
-    supersedes chains and audit_log rows reference this document_id — a tombstone keeps that
-    history resolvable, while the actual file content is gone for good.
+    """Erases the document and everything derived from it, at once (owner or ADMIN).
 
-    Order of operations is deliberate: audit first, then storage, then DB. If the storage
-    delete fails the row is left un-tombstoned, so the document keeps showing as live and the
-    delete can be retried — better than reporting success while bytes remain in the bucket.
+    The stored file, the text read out of it, its passages and their vectors, the refused
+    re-uploads of it and its unfinished jobs all go (`erasure.py`); uploading the same file
+    afterwards adds it as a new document. The row stays as a tombstone with its content fields
+    cleared, because version chains and the append-only audit log refer to it, and the audit
+    entry for this delete is the one record that it happened.
+
+    Delete used to be reversible by default, which read as broken: the file vanished from the
+    list, but uploading it again was refused as "already there", matching the hidden copy.
     """
     doc = repo.get_by_id(document_id)
     if not doc or not _can_view(doc, current_user):
@@ -573,18 +579,8 @@ async def delete_document(
     if doc.purged_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document with ID {document_id} not found.")
 
-    # Erasing the bytes is a separate, stronger act than removing a document from the knowledge
-    # base, and only an administrator may do it. An uploader deleting their own upload gets the
-    # reversible kind: the document leaves search immediately, and the bytes survive long enough
-    # for the mistake to be noticed — someone may have cited it in a submission last week.
-    if permanent and current_user.role != UserRole.ADMIN.value:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="FORBIDDEN: Only an ADMIN may permanently erase a document's bytes. "
-                   "Delete without ?permanent to remove it from search reversibly.",
-        )
-
-    if not permanent:
+    def record() -> None:
+        # Before anything is destroyed: this is the only surviving record of what was erased.
         try:
             AuditService.log_event(
                 db=db,
@@ -592,50 +588,27 @@ async def delete_document(
                 event_type=AuditEventType.DOCUMENT_DELETED,
                 details={
                     "deleted_by": str(current_user.user_id),
-                    "permanent": False,
-                    "filename": doc.filename,
+                    "permanent": True,
+                    "erased_sha256": doc.checksum,
+                    "erased_filename": doc.filename,
                 },
                 user_id=str(current_user.user_id),
             )
         except Exception:
             logger.exception("AUDIT WRITE FAILED: doc_id=%s event=DOCUMENT_DELETED", document_id)
 
-        if not repo.soft_delete(document_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Document with ID {document_id} not found.",
-            )
-        return {"document_id": document_id, "status": "DELETED", "permanent": False}
-
-    # Audit before destroying anything — this is the only surviving record of what the
-    # erased bytes were, so it must not depend on the delete succeeding.
     try:
-        AuditService.log_event(
-            db=db,
-            document_id=document_id,
-            event_type=AuditEventType.DOCUMENT_DELETED,
-            details={
-                "deleted_by": str(current_user.user_id),
-                "permanent": True,
-                "erased_sha256": doc.checksum,
-                "erased_filename": doc.filename,
-            },
-            user_id=str(current_user.user_id),
-        )
-    except Exception:
-        logger.exception("AUDIT WRITE FAILED: doc_id=%s event=DOCUMENT_DELETED", document_id)
-
-    for bucket, path in ((_buckets.raw, doc.raw_path), (_buckets.quarantine, doc.quarantine_path)):
-        if not path:
-            continue
-        if not _buckets.storage.delete_object(bucket_name=bucket, object_name=path.split("/", 1)[-1]):
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="STORAGE_ERROR: Could not erase the stored file. Nothing was deleted — please retry.",
-            )
-
-    if not repo.purge(document_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document with ID {document_id} not found.")
+        erase_document(db, repo, _buckets, doc, record=record)
+    except DocumentBusy:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="BUSY: This file is being processed right now. Delete it again in a few seconds.",
+        ) from None
+    except StorageEraseFailed:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="STORAGE_ERROR: Could not erase the stored file. Nothing was deleted — please retry.",
+        ) from None
 
     return {"document_id": document_id, "status": "DELETED", "permanent": True}
 
@@ -791,58 +764,3 @@ async def search_documents(
         "query": q,
         "documents": [_with_uploader(d, emails) for d in docs],
     }
-
-
-@router.get(
-    "/test-preset/{preset_name}",
-    summary="Get binary fixture for testing presets",
-)
-async def get_test_preset(
-    preset_name: str,
-    current_user: User = Depends(get_current_user),
-):
-    """Returns binary test PDF fixtures for the interactive studio.
-
-    Authenticated like every other route under `/documents/*`. It previously was not, which made
-    it the one exception to that rule and an unauthenticated file-server for fixtures named
-    `disguised_malware.pdf` and `threat_exploit_sample.pdf`. They are crafted to trip the
-    validator rather than to do harm, and `preset_name` is matched against a fixed map so there
-    is no path traversal — but an unauthenticated endpoint handing out files called malware is
-    not something to leave on a box with a public IP, and the documented claim that all of
-    `/documents/*` needs a bearer token was simply false while it stood.
-    """
-    from pathlib import Path
-
-    from fastapi.responses import Response
-
-    fixtures_dir = Path(__file__).resolve().parent.parent.parent.parent / "tests" / "fixtures" / "pdfs"
-
-    fixture_map = {
-        "valid_v1": ("01_standard_digital_policy.pdf", "caqm_directive_2026_v1.pdf"),
-        "corrupt_header": ("05_corrupted_header_missing.pdf", "broken_header.pdf"),
-        "truncated_eof": ("06_truncated_eof_missing.pdf", "truncated_stream.pdf"),
-        "fake_exe": ("07_disguised_fake_binary.pdf", "disguised_malware.pdf"),
-        "malicious": ("08_malicious_script_exploit.pdf", "threat_exploit_sample.pdf"),
-        "encrypted": ("10_password_protected.pdf", "password_protected_confidential.pdf"),
-    }
-
-    if preset_name not in fixture_map:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Test preset '{preset_name}' not found.",
-        )
-
-    file_name, download_name = fixture_map[preset_name]
-    file_path = fixtures_dir / file_name
-
-    if not file_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Fixture file '{file_name}' not found on disk.",
-        )
-
-    return Response(
-        content=file_path.read_bytes(),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
-    )

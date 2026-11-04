@@ -65,8 +65,7 @@ python run_ragas.py --count 25          # answer faithfulness; needs a judge wit
 ```
 
 Interactive endpoints once running: the knowledge base at `/` (also `/search`), Swagger at `/docs`,
-health at `/health`, and the old developer Studio UI at `/studio` (note: Studio UI predates auth/multi-file and still expects a synchronous single-file response —
-see `KNOWN_DEBTS.md` #7). All `/api/v1/documents/*` endpoints require `Authorization: Bearer <token>`
+and health at `/health`. All `/api/v1/documents/*` endpoints require `Authorization: Bearer <token>`
 — get one via `POST /api/v1/auth/register` then `POST /api/v1/auth/login`.
 
 ## Architecture
@@ -212,7 +211,46 @@ onnxruntime default these pages measured 20.5s each against 3.5s at 8 intra-op t
 `OCR_THREADS` is set explicitly. And **OCR drops word boundaries** (`FGDinexisting plantswere`),
 which costs the lexical arm a term it can never match — BM25 cannot match what was never
 tokenised. Lines below `OCR_MIN_CONFIDENCE` are dropped rather than kept, because an invented
-word inside a passage that will later be cited is worse than a gap.
+word inside a passage that will later be cited is worse than a gap -- but the gap is **recorded**
+(`ocr_unreadable_lines`, per page), because a dropped line can be a real one: the MoP memo lost
+"category A, B & C" that way, silently. The passage says so too: a page with lines left out ends
+with "[n lines on this page could not be read reliably by OCR; check the original]" -- but only a
+page that has other text, so a notice is never what carries an unreadable scan through the quality
+gate. Handwriting is the usual cause and no local OCR reads it (`KNOWN_DEBTS.md` #50). **Resolution
+is 300 dpi**, not 144: at 144 those lines read as noise, at 300 they read at 0.99 (`KNOWN_DEBTS.md`
+#44). A scan has no font sizes, so its headings come from "Subject:" lines instead. **A scanned
+page that is a ruled table is read as one** (`PdfTextExtractor._scan_tables`), by the same reader
+as pictures below: plain OCR returns its cells as loose lines, so a figure lost its row and column.
+The page's text outside the table stays its text, so the cells are not indexed twice.
+
+**Pictures in Word, PowerPoint, Excel and typed PDF files are read, and marked as read from pixels**
+(`extraction/pictures.py`, `picture_source.py`, `picture_tables.py`, `KNOWN_DEBTS.md` #46). A table
+saved as a screenshot is pixels. img2table finds its ruled grid with OpenCV and the OCR that reads
+scanned pages reads the words, each placed in the cell that holds it, so "1209" keeps its row and
+column; what comes out is an `ExtractedTable` (or, for other text, an `ExtractedFigure`) filed under
+the slide or Word heading the picture sat under. It was measured against Docling on eight tables
+read by eye -- 98.8% of cells and 100% of figures against 78.5% and 75.3%, at 1.7-4s a table against
+3-14s, without PyTorch -- and replaced it. Every such table opens with a caption line saying it was
+read by OCR and should be checked before citing, and every figure's label says so too. It does not
+read tables with no ruling lines, charts' values, or what a map shows. **A typed PDF's pictures are
+read only when they are tables** (`FoundPicture.tables_only`): the grid finder answers that before
+any OCR is spent, and a report's charts and photographs have their captions in its text already --
+reading all of them would be minutes a document. Across the 28 live PDFs this found 10 tables in 3
+documents (7 in the IITD report's dispersion results) and one false one, a chart; it costs 0-36s a
+typed document and about 1s a scanned page (`KNOWN_DEBTS.md` #50). A scanned page's pictures are
+not looked at separately, since OCR reads the whole page. An EMF (what Office
+writes for a table pasted from Excel) is drawn with emf2svg and rsvg-convert first, its sideways
+labels apart from the rest, because the converter draws them over the first row of figures.
+
+**Charts and diagrams that a file draws, rather than pastes as a picture, are read exactly**
+(`extraction/charts.py`, `KNOWN_DEBTS.md` #48). A chart's categories, series and every value are
+stored in the chart part, so a PowerPoint, Word or Excel chart becomes a table of those values with
+no OCR and no guessing; when a spreadsheet chart stores only cell references (Google Sheets and
+openpyxl do, with an empty cache) they are resolved from the workbook's cells. A flow diagram built
+from shapes and connectors records which two shapes each connector joins and which end has the
+arrowhead, so its arrows come back as "A -> B" lines; a connector with a free end says nothing,
+and one with no arrowhead is a plain link, not a guessed direction. SmartArt keeps its text in a
+data model, not in shapes, so it was invisible before: its nodes are now read in order.
 
 ### Chunking: structure-aware, and why chunks live in Postgres
 
@@ -260,6 +298,25 @@ cannot be located it falls back to the full provider, then to the character budg
 `document_chunks` is the one pipeline artifact that lives in Postgres instead of object storage.
 That's deliberate: chunks are queried, not merely stored — the embedding stage adds a vector
 column to the same row, and a similarity search cannot join against JSON in a bucket.
+Headings carry from page to page in a PDF or Word file, where a section runs on, but **never
+across slides or worksheets**, which stand alone — carrying them filed 8 of 21 slides of one deck
+under the previous slide's title. A worksheet unit is marked `text_is_table`: its text feeds the
+quality gate and language detection but is not chunked as prose, or every sheet is indexed twice.
+Tables carry `ExtractedTable.heading` where the format says which section they sit in, and are
+emitted after that section. `compare_extraction.py` dry-runs any change here against the corpus
+and stops on a language or quality flip.
+
+**A slide table is read as a grid, not as python-pptx hands it back** (`_pptx_table_rows`). A
+merged block's text is written into every cell it covers (`Total | Total | 35`), except a title
+across the whole width, which stays one caption cell. A header drawn over two rows becomes one row
+of full column names (`SO2 (mg/NM3) >= 500 MW`). Two things a deck says without a word of text are
+read too: a **colour key** (an empty cell filled with a colour the slide's legend table explains
+becomes `(Pollutant data available)`, in brackets so it is plain the colour said it), and **labels
+laid over a merged column** (rotated "State / Centre / Private" boxes), matched by order and only
+when there are exactly as many labels as empty merged blocks. A decorative fill with no key, or a
+label count that does not match, is left alone rather than guessed. A timeline's year is put in
+front of its description, since a group's text boxes come out in the order they were created.
+
 `page_number`, `section_heading` and `is_table` are the citation contract, and the `scale` column
 ships holding one value so a second granularity later is an INSERT rather than a migration plus a
 backfill (`KNOWN_DEBTS.md` #17).
@@ -799,9 +856,10 @@ characters).
   it `pytest.skip()`s with a fix-it message unless `APAG_ALLOW_DESTRUCTIVE_DB_TESTS=1` is set.
   Never set that env var against a database with real data.
 - `tests/fixtures/pdfs/` contains real PDF fixtures (valid, corrupted header, truncated EOF,
-  disguised binaries, embedded-script malware samples, password-protected) exercised through
-  named presets in `GET /documents/test-preset/{preset_name}` for the Studio UI — when adding a new
-  validation check, add a matching fixture + preset rather than only unit-testing it in isolation.
+  disguised binaries, embedded-script malware samples, password-protected), generated by
+  `tests/unit/test_ingestion_pipeline.py` — when adding a new validation check, add a matching
+  fixture there rather than only unit-testing it in isolation. They used to be served to a Studio
+  page through a preset endpoint; both are gone (`KNOWN_DEBTS.md` #47).
 
 ## Evaluation: what is measured, and what is not
 
@@ -814,13 +872,25 @@ to compare two commits. Measured:
 
 | configuration | hit@1 | hit@5 | hit@10 | MRR | median |
 |---|---|---|---|---|---|
-| hybrid + rerank (shipped) | **83.0%** | **97.0%** | 97.0% | 0.894 | 6.05s |
-| hybrid, no rerank | 80.0% | 91.0% | 96.0% | 0.853 | 0.36s |
-| semantic only | 72.0% | 90.0% | 91.0% | 0.801 | 0.33s |
-| lexical only (BM25) | 66.0% | 89.0% | 94.0% | 0.751 | 0.03s |
+| hybrid + rerank (shipped) | **82.0%** | **94.0%** | 95.0% | 0.870 | 2.08s |
+| hybrid, no rerank | 76.0% | 86.0% | 93.0% | 0.812 | 0.12s |
+| semantic only | 71.0% | 83.0% | 85.0% | 0.764 | 0.07s |
+| lexical only (BM25) | 70.0% | 91.0% | 95.0% | 0.792 | 0.04s |
 
-Read bottom-up, every layer earns its place. Reranking is worth 3 points of hit@1 and 6 of
-hit@5, which is a trade-off someone can now decide rather than one that was asserted.
+Measured 14 Oct 2026 on 12,100 passages, after the parsing fixes and the HNSW fix below. The
+previous figures (83 / 97 / 0.894, on 4,459 passages) are not comparable: the corpus grew by 2.7x,
+mostly one 6,946-row spreadsheet, and **that growth is what broke semantic search** -- the HNSW
+index considered 40 neighbours, the filters ran after it, and near-identical rows from one
+document crowded the answer out (semantic hit@1 38%, `KNOWN_DEBTS.md` #45). `SEARCH_HNSW_EF_SEARCH`
+is the fix, with pgvector's iterative scan behind it: any fixed candidate list can be filled by rows
+the filters remove (dead index entries until VACUUM, other documents in a scoped question), and the
+iterative scan keeps reading until enough survive, up to its memory budget of roughly 1,300
+candidates at 768 dimensions. A figure that silently halves with no error is the reason to run this after any large
+ingest, not only after a code change.
+
+Read bottom-up, every layer earns its place. Reranking is worth 6 points of hit@1 and 8 of
+hit@5 over hybrid alone, which is a trade-off someone can now decide rather than one that was
+asserted.
 
 Two things to read carefully rather than quote flat:
 
@@ -833,13 +903,20 @@ this day. `DEPLOY.md` sets `RERANK_CANDIDATES=25` on a 2-vCPU VM for exactly thi
 
 **The remaining failures are no longer table lookups.** They were, when there were four of them
 and the lexical arm was being swamped by function words; trimming those (`lexical_query.py`)
-fixed that shape of failure. The 3 that miss out of 100 are now prose:
+fixed that shape of failure. The 5 that miss out of 100 are now prose or summaries:
 
 | question | expected document |
 |---|---|
 | why FGD is considered unnecessary for certain plants | `TPP FGD_Comparative Note_May 2026.docx` |
 | whether Section 7 of the Electricity Act 2003 requires … | `_annex_266_AS212_IjMmVN (2).docx` |
 | percentage change in CFPP-SO2 emissions 2021→2023 | `s44407-026-00075-4.pdf` |
+| the gap between commissioned and required FGD capacity | `Report on TPPs.xlsx` |
+| additional environmental impacts of FGD (CO2, coal use) | `Report on TPPs.xlsx` |
+
+The last two are new, and are questions generated from a one-sheet *summary* of reports whose full
+text is itself in the corpus: lexical search ranks the sheet first, and the reranker prefers the
+full reports (the NIAS study, "Note on FGD installation"). Whether that is a miss or a better
+answer is a judgement the eval set cannot make -- it records one expected document per question.
 
 Two are arguing a position rather than stating a fact, which is the harder retrieval problem:
 the passage that answers "why is X considered unnecessary" rarely contains those words. Do not
@@ -933,13 +1010,16 @@ rationale before "fixing" them:
   answer plus a per-file list for exceptions, and goes up as one run of batches per tier. A
   wrong answer is corrected from the bar at the top of the document view (owner or admin; two
   clicks to widen, one to narrow). The API still has no default; every caller states one.
-- **Delete is reversible by default.** `DELETE /documents/{id}` removes a document from search
-  and the listing while keeping its bytes and audit trail; `?permanent=true` erases and is
-  **ADMIN only**. Owner-or-admin applies to both, and to `POST /documents/{id}/restore`, which
-  brings one back (`GET /documents/deleted` lists them; the UI's "Recently deleted"). Dedup still
-  matches deleted documents, so a re-upload of one is refused as DUPLICATE and its status says so
-  via `duplicate_of` rather than the system quietly resurrecting it (`KNOWN_DEBTS.md` #41). Every delete used to be a purge, which is the
-  wrong default when someone may have cited the document in a submission last week.
+- **Delete erases everything, at once.** `DELETE /documents/{id}` (owner or ADMIN) removes the
+  stored file, the text read out of it (`extracted/`, `normalized/`), its passages and vectors,
+  the refused re-uploads of it, and its queued jobs (`erasure.py`), and leaves the row as a
+  tombstone; uploading the same file afterwards adds it as a new document. A document a worker is
+  processing at that moment is refused with 409 rather than erased under the worker, which would
+  write the passages back. The audit entry for the delete is kept -- the log is append-only by
+  design and holds no content. This replaced a reversible default that read as broken: the file
+  vanished, yet a re-upload was refused as "already there" (`KNOWN_DEBTS.md` #49). Restore
+  (`POST /documents/{id}/restore`, the UI's "Recently deleted") remains only for what the Drive
+  connector hides when a file leaves its folder, which is reversible on purpose.
 - Text extraction is **non-ML** (`pdfplumber`/`python-docx`/`python-pptx`/`openpyxl`), not Docling
   — deliberate given this corpus is typed documents whose structure the file already states, not
   scanned/complex-layout PDFs Docling's layout inference exists for. See `KNOWN_DEBTS.md` #13
@@ -947,8 +1027,9 @@ rationale before "fixing" them:
   wholesale rewrite, if a real document proves the trade-off wrong.
 - **OCR exists, for scanned PDF pages only** (`rapidocr`, ONNX, no PyTorch). It was added
   because debt #14's stated trigger fired: three real documents arrived with no text layer. It is
-  a *fallback*, not a parser — it returns text lines, not table grids, so a scanned table would
-  come out as ungrouped numbers. `OCR_ENABLED=false` switches it off entirely and is
+  a *fallback*, not a parser — it returns text lines, and a scanned page keeps rows and columns
+  only when it is a ruled table, which the picture-table reader finds (#50); an unruled scanned
+  table still comes out as ungrouped numbers. `OCR_ENABLED=false` switches it off entirely and is
   authoritative even over an injected engine. See `KNOWN_DEBTS.md` #13/#14.
 - The Postgres image is **`paradedb/paradedb:0.25.10-pg16`**, not `pgvector/pgvector:pg16`. It
   carries pgvector *and* `pg_search` on the same Postgres 16.15, so the switch was not a version

@@ -5,14 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    ENVIRONMENT: str = "development"
-
-    # Database
-    POSTGRES_HOST: str = "localhost"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str = "apag_knowledge_base"
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "apag_secure_password_2026"
+    # Database. DATABASE_URL is the one setting the application connects with; there used to be
+    # five POSTGRES_* settings beside it that nothing read, so changing POSTGRES_HOST did nothing.
     DATABASE_URL: str = (
         "postgresql://postgres:apag_secure_password_2026@localhost:5432/apag_knowledge_base"
     )
@@ -101,6 +95,12 @@ class Settings(BaseSettings):
     # Model-specific. Every embedding model has its own similarity distribution, so this needs
     # re-measuring on a model change, not carrying over.
     SEARCH_MIN_SIMILARITY: float = 0.55
+
+    # How many nearest neighbours the vector index considers per search, before the permission
+    # and deleted-document filters (pgvector's `hnsw.ef_search`, default 40). Too low and the
+    # semantic arm silently returns the wrong passages: measured 38% hit@1 at 40 against 71% at
+    # 200, equal to an exact search. Raised to at least twice the candidate pool per query.
+    SEARCH_HNSW_EF_SEARCH: int = 200
 
     # ---- Answer generation (Sarvam) -------------------------------------------------------
     # The one place text leaves the deployment. Sarvam was chosen over OpenAI/Anthropic because
@@ -229,9 +229,14 @@ class Settings(BaseSettings):
     # silently becomes an unreadable document is the failure this exists to fix, and a setting
     # nobody turns on fixes nothing.
     OCR_ENABLED: bool = True
-    # 144 dpi (pdfplumber renders at `resolution`). Enough for a 10pt government typeface;
-    # doubling it roughly quadruples the pixels and the time for no measured accuracy gain.
-    OCR_RESOLUTION: int = 144
+    # Rendering resolution for OCR (pdfplumber's `resolution`). Was 144, on the reasoning that it
+    # is enough for a 10pt government typeface. A review of the Ministry of Power memo of 20 Nov
+    # 2024 measured otherwise: at 144 four full-width lines came out as noise and were dropped,
+    # including "Power Plants may not be able to comply with the prescribed timelines" -- the
+    # memo's central claim. At 300, three of the four read at 0.98-0.99 confidence; the fourth
+    # is unreadable at any resolution (a stamp or damage) and is now recorded rather than silent.
+    # Cost: 7.4s against 5.3s for the memo's two pages.
+    OCR_RESOLUTION: int = 300
     # Explicit, because the default is not a tuning detail: unset measured 20.5s per page against
     # 4.0s at 8 intra-op threads. 0 means min(8, cpu_count) rather than "let onnxruntime decide".
     OCR_THREADS: int = 0
@@ -256,6 +261,18 @@ class Settings(BaseSettings):
     # A ceiling on how long one document can hold a worker: at ~4s a page, 500 pages is ~33
     # minutes. Pages past the cap are recorded as unread rather than quietly dropped.
     OCR_MAX_PAGES: int = 500
+
+    # Pictures inside Word, PowerPoint, Excel and typed PDF files: a slide that is a screenshot of
+    # a table, a chart saved as an image (`extraction/pictures.py`). Read with the OCR above plus img2table for the
+    # grid, so it needs `OCR_ENABLED` too. Off, a document extracts exactly as it did before.
+    PICTURES_ENABLED: bool = True
+    # A deck of photographs is otherwise unbounded, and each picture is seconds of CPU.
+    PICTURE_MAX_PER_DOCUMENT: int = 40
+    # Smaller than this on either side is an icon, a bullet or a rule, not a figure.
+    PICTURE_MIN_EDGE_PX: int = 80
+    # Inside a ruled table, where the cell is known and a figure is the point, a lower floor than
+    # `OCR_MIN_CONFIDENCE`, which is for loose text where a guessed word is worse than a gap.
+    PICTURE_TABLE_MIN_CONFIDENCE: float = 0.4
 
     # Reranking — read the candidates properly, then keep the best few.
     #

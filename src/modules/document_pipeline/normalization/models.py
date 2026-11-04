@@ -4,7 +4,11 @@ import uuid
 
 from pydantic import BaseModel, Field, computed_field
 
-from src.modules.document_pipeline.extraction.models import ExtractedTable, Heading
+from src.modules.document_pipeline.extraction.models import (
+    ExtractedFigure,
+    ExtractedTable,
+    Heading,
+)
 
 # Quality gate failure codes.
 EMPTY_TEXT = "EMPTY_TEXT"
@@ -18,6 +22,8 @@ class NormalizedUnit(BaseModel):
     index: int
     label: str
     text: str
+    # Carried from extraction: see `ExtractedUnit.text_is_table`.
+    text_is_table: bool = False
 
 
 class QualityCheckResult(BaseModel):
@@ -43,6 +49,7 @@ class NormalizationResult(BaseModel):
     units: list[NormalizedUnit] = Field(default_factory=list)
     headings: list[Heading] = Field(default_factory=list)
     tables: list[ExtractedTable] = Field(default_factory=list)
+    figures: list[ExtractedFigure] = Field(default_factory=list)
     quality: QualityCheckResult
 
     @computed_field

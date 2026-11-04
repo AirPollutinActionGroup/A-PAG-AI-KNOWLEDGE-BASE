@@ -69,7 +69,6 @@ app.include_router(retrieval_router, prefix="/api/v1")
 app.include_router(ask_router, prefix="/api/v1")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
-INDEX_HTML = STATIC_DIR / "index.html"
 SEARCH_HTML = STATIC_DIR / "search.html"
 
 # Brand assets (the A-PAG logo). Mounted rather than served by a hand-written route so adding an
@@ -97,17 +96,6 @@ async def knowledge_base_ui():
     if SEARCH_HTML.exists():
         return HTMLResponse(content=SEARCH_HTML.read_text(encoding="utf-8"))
     return HTMLResponse(content="<h1>Knowledge base UI not found</h1>", status_code=404)
-
-
-@app.get("/studio", response_class=HTMLResponse, tags=["Studio UI"])
-async def studio_ui():
-    """Ingestion Pipeline Testing Studio -- a developer tool, kept for its validation presets.
-
-    Not linked from the application. See `knowledge_base_ui` for why it no longer lives at `/`.
-    """
-    if INDEX_HTML.exists():
-        return HTMLResponse(content=INDEX_HTML.read_text(encoding="utf-8"))
-    return HTMLResponse(content="<h1>Studio UI not found</h1>", status_code=404)
 
 
 @app.get("/health", tags=["System"])

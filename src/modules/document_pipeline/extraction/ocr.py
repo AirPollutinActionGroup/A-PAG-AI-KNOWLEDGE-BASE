@@ -18,9 +18,11 @@ model. LlamaParse and unstructured's hosted tier are cloud services, which would
 document out of the deployment at ingestion — the opposite of what the boundary between this
 system and an external model exists to enforce.
 
-That reasoning is corpus-specific and may not survive the rest of the drive. If scanned budget
-sheets or emission tables turn up, revisit it: Docling accepts RapidOCR as its own OCR backend,
-so adding layout recovery later is a layer on top of this, not a replacement for it.
+That reasoning is corpus-specific and may not survive the rest of the drive, so a scanned page
+that *is* a ruled table is now read as one, by the reader for tables in pictures
+(`picture_tables.py`: img2table finds the ruled grid, this engine reads the cells), which replaced
+Docling for screenshots of tables after scoring 98.8% of cells against Docling's 78.5%. See
+`PdfTextExtractor._scan_tables`.
 
 **Why the model is loaded lazily.** Unlike the embedding model, which every EMBED job needs, OCR
 is needed only by the small minority of documents that are scans. Loading on first use means an
@@ -54,6 +56,13 @@ class OcrLine(BaseModel):
     confidence: float
 
 
+class OcrPage(BaseModel):
+    """What a page read produced: the lines kept, and how many were found but not trusted."""
+
+    lines: list[OcrLine]
+    unreadable: int = 0
+
+
 class OcrEngine(ABC):
     """Turns an image of a page into lines of text."""
 
@@ -65,6 +74,11 @@ class OcrEngine(ABC):
     @abstractmethod
     def read(self, image) -> list[OcrLine]:
         """Reads a PIL image. Returns an empty list for a page with nothing legible on it."""
+
+    def read_page(self, image) -> OcrPage:
+        """`read`, plus a count of lines left out. Engines that filter override this; the
+        default reports nothing dropped, which is true of an engine that drops nothing."""
+        return OcrPage(lines=self.read(image))
 
 
 class OcrUnavailable(RuntimeError):
@@ -124,6 +138,9 @@ class RapidOcrEngine(OcrEngine):
             return self._engine
 
     def read(self, image) -> list[OcrLine]:
+        return self.read_page(image).lines
+
+    def read_page(self, image) -> OcrPage:
         import numpy as np
 
         engine = self._load()
@@ -136,16 +153,23 @@ class RapidOcrEngine(OcrEngine):
         scores = list(result.scores) if result.scores is not None else []
 
         lines = []
+        unreadable = 0
         for i, text in enumerate(texts):
             confidence = float(scores[i]) if i < len(scores) else 0.0
             cleaned = (text or "").strip()
+            if not cleaned:
+                continue
             # A low-confidence line is usually a stamp, a signature or a scan artifact. Keeping
             # it puts invented words into a passage that will later be cited, which is worse
             # than a gap: nothing downstream can tell the difference between a word the engine
-            # read and a word it guessed.
-            if cleaned and confidence >= self._min_confidence:
+            # read and a word it guessed. But a gap must be *recorded* -- it can also be a real
+            # line the engine failed on, and dropping that silently is how the MoP memo lost the
+            # sentence saying the extension covered categories A, B and C.
+            if confidence >= self._min_confidence:
                 lines.append(OcrLine(text=cleaned, confidence=confidence))
-        return lines
+            else:
+                unreadable += 1
+        return OcrPage(lines=lines, unreadable=unreadable)
 
 
 def _cpu_count() -> int:
