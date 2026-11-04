@@ -309,8 +309,36 @@ def test_a_crowd_of_filtered_rows_cannot_hide_a_live_passage(db_session: Session
     table; on 81 rows it would otherwise join first, filter, and sort the survivors, and never
     meet the limit this test is about.
     """
+    hits = _search_past_a_crowd(db_session, service, deleted_rows=80)
+
+    assert [h.text for h in hits] == ["the passage that answers"]
+
+    db_session.rollback()
+
+
+def test_a_crowd_larger_than_ef_search_still_cannot_hide_it(db_session: Session, service):
+    """400 filtered rows nearer than the answer: more than the 200 candidates `ef_search` allows.
+
+    A wider candidate list alone loses the answer here. pgvector's iterative scan keeps reading
+    the index until enough rows pass the filters, and is what finds it. The same shape arises from
+    dead index entries left by deletes and re-embeds until VACUUM, and from a question scoped to
+    one document whose passages are not among the nearest 200 overall.
+    """
+    hits = _search_past_a_crowd(db_session, service, deleted_rows=400)
+
+    assert [h.text for h in hits] == ["the passage that answers"]
+
+    db_session.rollback()
+
+
+def _search_past_a_crowd(db_session: Session, service, deleted_rows: int):
+    # Start from an empty index (undone by the test's rollback). Rows that earlier tests inserted
+    # and rolled back stay in the HNSW graph as dead entries until VACUUM; most of them sit at
+    # this same query vector, so without this the result depended on which tests ran first. It
+    # failed in CI that way, its candidates taken by other tests' leftovers.
+    db_session.execute(text("TRUNCATE document_chunks"))
     gone = _doc(db_session, deleted_at=datetime.now(UTC))
-    for i in range(80):
+    for i in range(deleted_rows):
         _chunk(db_session, gone, _vec(1.0, i * 1e-4), f"deleted {i}", i)
     live = _doc(db_session)
     _chunk(db_session, live, _vec(1.0, 0.5), "the passage that answers", 0)
@@ -322,10 +350,7 @@ def test_a_crowd_of_filtered_rows_cannot_hide_a_live_passage(db_session: Session
         db_session, "q", user_id=None, is_admin=True, limit=5,
         mode=SearchMode.SEMANTIC, rerank=False,
     )
-
-    assert [h.text for h in hits] == ["the passage that answers"]
-
-    db_session.rollback()
+    return hits
 
 
 def test_the_vector_search_budget_scales_with_the_pool(db_session: Session, service):

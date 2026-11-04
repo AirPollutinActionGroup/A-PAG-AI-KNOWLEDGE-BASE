@@ -882,7 +882,10 @@ previous figures (83 / 97 / 0.894, on 4,459 passages) are not comparable: the co
 mostly one 6,946-row spreadsheet, and **that growth is what broke semantic search** -- the HNSW
 index considered 40 neighbours, the filters ran after it, and near-identical rows from one
 document crowded the answer out (semantic hit@1 38%, `KNOWN_DEBTS.md` #45). `SEARCH_HNSW_EF_SEARCH`
-is the fix. A figure that silently halves with no error is the reason to run this after any large
+is the fix, with pgvector's iterative scan behind it: any fixed candidate list can be filled by rows
+the filters remove (dead index entries until VACUUM, other documents in a scoped question), and the
+iterative scan keeps reading until enough survive, up to its memory budget of roughly 1,300
+candidates at 768 dimensions. A figure that silently halves with no error is the reason to run this after any large
 ingest, not only after a code change.
 
 Read bottom-up, every layer earns its place. Reranking is worth 6 points of hit@1 and 8 of

@@ -98,12 +98,21 @@ class RetrievalService:
         those rows filled the 40 slots for most questions: the semantic arm fell from 72% to 38%
         hit@1 with no error anywhere. At 200 it matched an exact search (71%). Set per
         transaction with SET LOCAL, so nothing else on the connection is affected.
+
+        A fixed number is not enough on its own: any list of 200 can be filled by rows the
+        filters then remove -- dead index entries (deleted or re-embedded passages, until VACUUM)
+        count against it too, and so do other documents when a question is scoped to one
+        document. pgvector's iterative scan (0.8+) keeps reading the index until enough rows
+        survive the filters. It stops at its memory budget (`hnsw.scan_mem_multiplier` x
+        `work_mem`), measured here at roughly 1,300 candidates at 768 dimensions, so it raises
+        the ceiling rather than removing it. `strict_order` keeps the arm's ranks exact.
         """
         bind = db.get_bind()
         if getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
             return
         ef_search = max(settings.SEARCH_HNSW_EF_SEARCH, pool * 2)
         db.execute(text(f"SET LOCAL hnsw.ef_search = {int(ef_search)}"))
+        db.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
 
     def _semantic_cte(self, vector, pool, user_id, viewer_is_admin, document_ids=None):
         distance = ChunkORM.embedding.cosine_distance(vector)
