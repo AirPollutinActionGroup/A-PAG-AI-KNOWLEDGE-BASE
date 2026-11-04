@@ -93,17 +93,6 @@ button { cursor: pointer; background: none; border: 0; }
 .primary:hover:not(:disabled) { background: var(--yellow-deep); }
 .primary:disabled { opacity: .45; cursor: not-allowed; }
 .login-card .primary { width: 100%; margin-top: 20px; }
-.demo { margin-top: 22px; padding: 13px 14px; border: 1px dashed var(--line); border-radius: var(--radius);
-        background: var(--surface); font-size: 12.5px; color: var(--ink-soft); }
-.demo b { display: block; color: var(--ink); margin-bottom: 8px; font-weight: 600; }
-.demo dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; }
-.demo dt { color: var(--ink-faint); }
-.demo dd { margin: 0; color: var(--ink); font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-           font-size: 12.5px; overflow-wrap: anywhere; user-select: all; }
-.demo button { margin-top: 10px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px;
-               background: var(--paper); color: var(--ink); font: inherit; cursor: pointer; }
-.demo button:hover { border-color: var(--yellow-deep); }
-.demo button:focus-visible { outline: 2px solid var(--yellow-deep); outline-offset: 2px; }
 .msg { margin-top: 12px; font-size: 12.5px; color: var(--danger); min-height: 1.2em; }
 
 /* ========================================================== app shell */
@@ -524,6 +513,20 @@ details.detail > summary:hover { color: var(--ink); }
 .login-card input { padding: 12px 14px; border-radius: 10px; transition: border-color .15s, box-shadow .15s; }
 .login-card input:focus { box-shadow: 0 0 0 3px rgb(255 196 0 / .22); }
 .login-card .primary { margin-top: 24px; padding: 14px 18px; border-radius: 10px; font-size: 15px; }
+.demo-opt { margin-top: 4px; }
+.or {
+  display: flex; align-items: center; gap: 12px; margin: 18px 0 16px;
+  font-size: 12px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .08em;
+}
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.demo-btn {
+  width: 100%; padding: 13px 18px; border-radius: 10px; border: 1.5px solid var(--line);
+  background: var(--paper); color: var(--ink); font: 600 14.5px/1 "Archivo", sans-serif;
+  transition: border-color .15s, background .15s;
+}
+.demo-btn:hover:not(:disabled) { border-color: var(--ink); background: var(--surface); }
+.demo-btn:disabled { opacity: .5; cursor: not-allowed; }
+.demo-note { margin: 9px 0 0; text-align: center; font-size: 12.5px; color: var(--ink-faint); }
 @media (max-width: 860px) {
   #login { grid-template-columns: 1fr; }
   .login-brand { display: none; }
@@ -658,13 +661,11 @@ details.detail, .hit, .notice, .upload { border-radius: 12px; }
     <input id="pw" type="password" autocomplete="current-password" required>
     <button class="primary" type="submit" id="loginBtn">Sign in</button>
     <div class="msg" id="loginMsg"></div>
-    <div class="demo" id="demo" hidden>
-      <b>Demo login</b>
-      <dl>
-        <dt>Email</dt><dd id="demoEmail"></dd>
-        <dt>Password</dt><dd id="demoPw"></dd>
-      </dl>
-      <button type="button" id="demoUse">Fill in the form</button>
+    <!-- Shown only when this deployment configures a shared demo account (GET /auth/demo-login). -->
+    <div class="demo-opt" id="demo" hidden>
+      <div class="or"><span>or</span></div>
+      <button type="button" class="demo-btn" id="demoUse">Sign in with the demo account</button>
+      <p class="demo-note">A shared account for trying the knowledge base.</p>
     </div>
   </form>
 </section>
@@ -1664,11 +1665,13 @@ const showApp = (email) => {
   paintChats(); paintDocs(); loadDocs(); loadMe(); $("q").focus();
 };
 
-$("loginForm").onsubmit = async (e) => {
-  e.preventDefault();
-  const msg = $("loginMsg"); msg.textContent = ""; $("loginBtn").disabled = true;
+/* One sign-in path for both buttons, so the demo account goes through exactly the same login
+   (and the same error messages) as anyone else. */
+async function signIn(email, password) {
+  const msg = $("loginMsg"); msg.textContent = "";
+  $("loginBtn").disabled = true; $("demoUse").disabled = true;
   try {
-    const body = new URLSearchParams({ username: $("email").value, password: $("pw").value });
+    const body = new URLSearchParams({ username: email, password });
     const r = await fetch("/api/v1/auth/login", { method: "POST", body });
     if (!r.ok) {
       msg.textContent = r.status === 401 ? "Email or password not recognised."
@@ -1677,24 +1680,25 @@ $("loginForm").onsubmit = async (e) => {
     }
     const data = await r.json();
     store.set(TOKEN_KEY, data.access_token);
-    store.set("apag.email", $("email").value);
+    store.set("apag.email", email);
     $("pw").value = "";
-    showApp($("email").value);
+    showApp(email);
   } catch { msg.textContent = "Could not reach the server."; }
-  finally { $("loginBtn").disabled = false; }
-};
+  finally { $("loginBtn").disabled = false; $("demoUse").disabled = false; }
+}
 
-// A deployment may publish a shared demo login (404 when it does not, which is the normal case).
+$("loginForm").onsubmit = (e) => { e.preventDefault(); signIn($("email").value, $("pw").value); };
+
+// A deployment may configure a shared demo account (404 when it does not, the normal case). It is
+// offered as a second way to sign in; the credentials are used, never displayed.
 (async () => {
   try {
     const r = await fetch("/api/v1/auth/demo-login");
     if (!r.ok) return;
     const d = await r.json();
-    $("demoEmail").textContent = d.email;
-    $("demoPw").textContent = d.password;
-    $("demoUse").onclick = () => { $("email").value = d.email; $("pw").value = d.password; $("pw").focus(); };
+    $("demoUse").onclick = () => signIn(d.email, d.password);
     $("demo").hidden = false;
-  } catch { /* no demo login shown */ }
+  } catch { /* no demo option shown */ }
 })();
 
 $("outBtn").onclick = () => {

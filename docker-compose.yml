@@ -71,6 +71,10 @@ services:
       GDRIVE_PUBLIC_FOLDER_ID: ${GDRIVE_PUBLIC_FOLDER_ID:-}
       GDRIVE_RESTRICTED_FOLDER_ID: ${GDRIVE_RESTRICTED_FOLDER_ID:-}
       GDRIVE_FALLBACK_OWNER_EMAIL: ${GDRIVE_FALLBACK_OWNER_EMAIL:-}
+      # Shared demo account, offered as "Sign in with the demo account". Empty means off; set in
+      # .env only. Must be a USER account -- the endpoint refuses to publish an ADMIN's password.
+      DEMO_LOGIN_EMAIL: ${DEMO_LOGIN_EMAIL:-}
+      DEMO_LOGIN_PASSWORD: ${DEMO_LOGIN_PASSWORD:-}
     volumes:
       - ./secrets:/app/secrets:ro
     depends_on:
